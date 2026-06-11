@@ -25,7 +25,6 @@ HOW THIS UI CONNECTS TO THE BACKEND:
              → retriever.delete_document()
 """
 
-import tempfile
 from pathlib import Path
 
 import streamlit as st
@@ -127,17 +126,15 @@ with st.sidebar:
 
             with st.spinner(f"Processing {uploaded_file.name}..."):
                 try:
-                    # Streamlit gives us BytesIO — write to temp file so
-                    # document_loader.py can use its Path-based interface
-                    suffix = Path(uploaded_file.name).suffix
-                    with tempfile.NamedTemporaryFile(
-                        delete=False, suffix=suffix
-                    ) as tmp:
-                        tmp.write(uploaded_file.getvalue())
-                        tmp_path = Path(tmp.name)
+                    # Streamlit gives us BytesIO — write to a temp file
+                    # named exactly as the uploaded file so the real
+                    # filename is preserved in ChromaDB metadata.
+                    # We use the uploads directory as the temp location.
+                    from src.config import UPLOAD_DIR
+                    save_path = UPLOAD_DIR / uploaded_file.name
+                    save_path.write_bytes(uploaded_file.getvalue())
 
-                    result = retriever.ingest_file(tmp_path)
-                    tmp_path.unlink(missing_ok=True)   # clean up temp file
+                    result = retriever.ingest_file(save_path)
 
                     if result.chunks_added > 0:
                         st.success(
@@ -184,7 +181,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.caption("Enterprise Knowledge Bot · RAG System")
-    st.caption("Powered by LangChain · ChromaDB · OpenAI")
+    st.caption("Powered by LangChain · ChromaDB · Mistral")
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +201,7 @@ if retriever.is_ready():
     col1, col2, col3 = st.columns(3)
     col1.metric("Documents indexed", stats["total_sources"])
     col2.metric("Total chunks",      stats["total_chunks"])
-    col3.metric("LLM model",         "gpt-4o-mini")
+    col3.metric("LLM model",         "mistral-small-latest")
 else:
     st.info(
         "👈 Upload documents using the sidebar to get started. "
