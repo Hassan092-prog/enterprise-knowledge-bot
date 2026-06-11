@@ -61,7 +61,15 @@ LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openai")
 # LLM Settings
 # ---------------------------------------------------------------------------
 # The model that GENERATES answers (the "G" in RAG)
+
+#OPENAI LLM MODEL OPTIONS:
 LLM_MODEL: str = "gpt-4o-mini"          # Cheap, fast, good quality
+
+#MISTRAL LLM MODEL OPTIONS:
+LLM_MODEL: str = (
+    "mistral-small-latest" if os.getenv("LLM_PROVIDER") == "mistral"
+    else "gpt-4o-mini"
+)
 
 # Controls randomness: 0 = deterministic, 1 = creative
 # For factual Q&A over documents, we want LOW temperature (0.0 - 0.2)
@@ -80,7 +88,15 @@ LLM_MAX_TOKENS: int = 1024
 #   1. Ingestion (converting document chunks to vectors)
 #   2. Retrieval  (converting user queries to vectors)
 # If you use different models, the vectors are incompatible.
-EMBEDDING_MODEL: str = "text-embedding-3-small"  # 1536 dimensions, cheap
+
+#OPENAI EMBEDDING MODEL OPTIONS:
+# EMBEDDING_MODEL: str = "text-embedding-3-small"  # 1536 dimensions, cheap
+
+#MISTRAL EMBEDDING MODEL OPTIONS:
+EMBEDDING_MODEL: str = (
+    "mistral-embed" if os.getenv("LLM_PROVIDER") == "mistral"
+    else "text-embedding-3-small"
+)
 
 # Embedding dimension (must match the model above)
 EMBEDDING_DIMENSION: int = 1536

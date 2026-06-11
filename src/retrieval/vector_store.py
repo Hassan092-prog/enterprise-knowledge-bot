@@ -43,6 +43,8 @@ from langchain_openai import OpenAIEmbeddings
 from src.config import (
     CHROMA_COLLECTION_NAME,
     EMBEDDING_MODEL,
+    LLM_PROVIDER,
+    MISTRAL_API_KEY,
     OPENAI_API_KEY,
     RETRIEVAL_TOP_K,
     VECTORSTORE_DIR,
@@ -100,10 +102,26 @@ class VectorStore:
         # .embed_documents(texts) → List[List[float]]
         # .embed_query(text)      → List[float]
         # We use the same model name from config to guarantee consistency.
-        self._embeddings = OpenAIEmbeddings(
-            model=EMBEDDING_MODEL,
-            openai_api_key=OPENAI_API_KEY,
-        )
+        
+        #OPENAI EMBEDDING MODEL OPTIONS:
+        # self._embeddings = OpenAIEmbeddings(
+        #     model=EMBEDDING_MODEL,
+        #     openai_api_key=OPENAI_API_KEY,
+        # )
+
+        #MISTRAL EMBEDDING MODEL OPTIONS:
+        if LLM_PROVIDER == "mistral":
+            from langchain_mistralai import MistralAIEmbeddings
+            self._embeddings = MistralAIEmbeddings(
+                model=EMBEDDING_MODEL,
+                mistral_api_key=MISTRAL_API_KEY,
+            )
+        else:
+            self._embeddings = OpenAIEmbeddings(
+                model=EMBEDDING_MODEL,
+                openai_api_key=OPENAI_API_KEY,
+            )
+
 
         logger.info(
             "VectorStore ready — collection: '%s', model: '%s', "
