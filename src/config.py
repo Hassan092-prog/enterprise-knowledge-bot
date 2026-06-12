@@ -1,4 +1,4 @@
-"""
+﻿"""
 config.py — Central configuration for the Enterprise Knowledge Bot.
 
 WHY THIS FILE EXISTS:
@@ -61,15 +61,7 @@ LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openai")
 # LLM Settings
 # ---------------------------------------------------------------------------
 # The model that GENERATES answers (the "G" in RAG)
-
-#OPENAI LLM MODEL OPTIONS:
-LLM_MODEL: str = "gpt-4o-mini"          # Cheap, fast, good quality
-
-#MISTRAL LLM MODEL OPTIONS:
-LLM_MODEL: str = (
-    "mistral-small-latest" if os.getenv("LLM_PROVIDER") == "mistral"
-    else "gpt-4o-mini"
-)
+LLM_MODEL: str = ("mistral-small-latest" if LLM_PROVIDER == "mistral" else "gpt-4o-mini")
 
 # Controls randomness: 0 = deterministic, 1 = creative
 # For factual Q&A over documents, we want LOW temperature (0.0 - 0.2)
@@ -88,15 +80,7 @@ LLM_MAX_TOKENS: int = 1024
 #   1. Ingestion (converting document chunks to vectors)
 #   2. Retrieval  (converting user queries to vectors)
 # If you use different models, the vectors are incompatible.
-
-#OPENAI EMBEDDING MODEL OPTIONS:
-# EMBEDDING_MODEL: str = "text-embedding-3-small"  # 1536 dimensions, cheap
-
-#MISTRAL EMBEDDING MODEL OPTIONS:
-EMBEDDING_MODEL: str = (
-    "mistral-embed" if os.getenv("LLM_PROVIDER") == "mistral"
-    else "text-embedding-3-small"
-)
+EMBEDDING_MODEL: str = ("mistral-embed" if LLM_PROVIDER == "mistral" else "text-embedding-3-small")
 
 # Embedding dimension (must match the model above)
 EMBEDDING_DIMENSION: int = 1536
@@ -171,3 +155,22 @@ def validate_config() -> None:
         raise EnvironmentError(
             "Configuration errors found:\n" + "\n".join(f"  - {e}" for e in errors)
         )
+
+
+# ---------------------------------------------------------------------------
+# Production hardening limits (Phase 7)
+# ---------------------------------------------------------------------------
+# Maximum characters allowed in a user query.
+# Prevents prompt injection attacks and runaway API costs.
+# 2000 chars ≈ 400 words — more than enough for any real question.
+MAX_QUERY_LENGTH: int = 2000
+
+# Maximum file size in megabytes allowed for upload.
+# Prevents memory exhaustion on large uploads.
+MAX_FILE_SIZE_MB: int = 50
+
+# Maximum number of retry attempts for API calls.
+MAX_RETRIES: int = 3
+
+# Base delay in seconds for exponential backoff.
+RETRY_BASE_DELAY: float = 2.0

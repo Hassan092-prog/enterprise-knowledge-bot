@@ -5,23 +5,22 @@ ENTRY POINT:
     Run with: streamlit run app.py
 
 WHAT THIS FILE DOES:
-    Ties together all five backend phases into a working web application.
-    Users upload documents, ask questions, and receive cited answers in
-    real time — all through a clean browser interface.
+    Ties together all backend phases into a working web application.
+    Users upload documents, ask questions, and receive cited answers
+    in real time — all through a clean browser interface.
 
 STREAMLIT EXECUTION MODEL:
-    Every user interaction (button click, file upload, text input) causes
-    the ENTIRE script to rerun from top to bottom. Local variables are
-    lost on every rerun. Persistence requires:
+    Every user interaction causes the ENTIRE script to rerun.
+    Local variables are lost on every rerun. Persistence requires:
       - st.session_state   : per-session dictionary (survives reruns)
       - @st.cache_resource : module-level singleton (survives reruns)
 
 HOW THIS UI CONNECTS TO THE BACKEND:
-    Upload   → retriever.ingest_file()    [Phase 4 Facade]
-    Query    → retriever.retrieve()       [Phase 4 Retrieval]
-             → stream_answer()            [Phase 5 Generation]
-             → st.write_stream()          [Streamlit streaming]
-    Sidebar  → retriever.list_sources()   [Phase 4 Management]
+    Upload   → retriever.ingest_file()       [Phase 4 Facade]
+    Query    → retriever.retrieve()          [Phase 4 Retrieval]
+             → stream_answer()               [Phase 5 Generation]
+             → st.write_stream()             [Streamlit streaming]
+    Sidebar  → retriever.list_sources()      [Phase 4 Management]
              → retriever.delete_document()
 """
 
@@ -29,7 +28,13 @@ from pathlib import Path
 
 import streamlit as st
 
-from src.config import SUPPORTED_EXTENSIONS, validate_config
+from src.config import (
+    MAX_FILE_SIZE_MB,
+    MAX_QUERY_LENGTH,
+    SUPPORTED_EXTENSIONS,
+    UPLOAD_DIR,
+    validate_config,
+)
 from src.generation.llm_chain import _extract_sources, stream_answer
 from src.logger import get_logger
 from src.retrieval.retriever import Retriever
@@ -64,12 +69,7 @@ except EnvironmentError as e:
 # ---------------------------------------------------------------------------
 
 def _render_citations(sources: list) -> None:
-    """
-    Render a collapsible citation block below an answer.
-
-    Args:
-        sources: List of (filename, page) tuples from _extract_sources()
-    """
+    """Render a collapsible citation block below an answer."""
     if not sources:
         return
     with st.expander(f"📎 {len(sources)} source(s) cited", expanded=False):
@@ -77,12 +77,62 @@ def _render_citations(sources: list) -> None:
             st.markdown(f"- **{filename}** — Page {page}")
 
 
+def _validate_upload(uploaded_file) -> tuple[bool, str]:
+    """
+    Validate an uploaded file before processing.
+
+    Checks:
+      1. File size within MAX_FILE_SIZE_MB limit
+      2. Extension is supported (belt-and-suspenders — uploader also checks)
+
+    Returns:
+        (is_valid: bool, error_message: str)
+    """
+    # Size check
+    size_mb = len(uploaded_file.getvalue()) / (1024 * 1024)
+    if size_mb > MAX_FILE_SIZE_MB:
+        return False, (
+            f"File too large ({size_mb:.1f} MB). "
+            f"Maximum allowed: {MAX_FILE_SIZE_MB} MB."
+        )
+
+    # Extension check
+    ext = Path(uploaded_file.name).suffix.lower()
+    if ext not in SUPPORTED_EXTENSIONS:
+        return False, (
+            f"Unsupported file type: '{ext}'. "
+            f"Supported: {', '.join(SUPPORTED_EXTENSIONS)}"
+        )
+
+    return True, ""
+
+
+def _validate_query(query: str) -> tuple[bool, str]:
+    """
+    Validate a user query before processing.
+
+    Checks:
+      1. Not empty or whitespace-only
+      2. Within MAX_QUERY_LENGTH character limit
+
+    Returns:
+        (is_valid: bool, error_message: str)
+    """
+    if not query.strip():
+        return False, "Query cannot be empty."
+
+    if len(query) > MAX_QUERY_LENGTH:
+        return False, (
+            f"Query too long ({len(query)} characters). "
+            f"Maximum allowed: {MAX_QUERY_LENGTH} characters."
+        )
+
+    return True, ""
+
+
 # ---------------------------------------------------------------------------
 # Singleton Retriever — created ONCE for the app lifetime
 # ---------------------------------------------------------------------------
-# @st.cache_resource: runs the function once, caches the result forever.
-# Without this, every rerun opens a new ChromaDB connection.
-# @st.cache_data would fail here because Retriever is not serialisable.
 @st.cache_resource(show_spinner="Loading knowledge base...")
 def get_retriever() -> Retriever:
     """Return the singleton Retriever — opens ChromaDB once."""
@@ -96,7 +146,6 @@ retriever = get_retriever()
 # Session state — persists across reruns within one browser session
 # ---------------------------------------------------------------------------
 if "messages" not in st.session_state:
-    # {"role": "user"|"assistant", "content": str, "sources": list|None}
     st.session_state.messages = []
 
 
@@ -115,22 +164,29 @@ with st.sidebar:
         label="Drag and drop files here",
         type=allowed_types,
         accept_multiple_files=True,
-        help=f"Supported: {', '.join(SUPPORTED_EXTENSIONS)}",
+        help=(
+            f"Supported: {', '.join(SUPPORTED_EXTENSIONS)} "
+            f"· Max size: {MAX_FILE_SIZE_MB} MB per file"
+        ),
     )
 
     if uploaded_files:
         for uploaded_file in uploaded_files:
+
+            # Skip already-indexed files
             if uploaded_file.name in retriever.list_sources():
                 st.info(f"✓ Already indexed: **{uploaded_file.name}**")
                 continue
 
+            # Validate before processing
+            is_valid, error_msg = _validate_upload(uploaded_file)
+            if not is_valid:
+                st.error(f"❌ **{uploaded_file.name}**: {error_msg}")
+                continue
+
             with st.spinner(f"Processing {uploaded_file.name}..."):
                 try:
-                    # Streamlit gives us BytesIO — write to a temp file
-                    # named exactly as the uploaded file so the real
-                    # filename is preserved in ChromaDB metadata.
-                    # We use the uploads directory as the temp location.
-                    from src.config import UPLOAD_DIR
+                    # Save with real filename so ChromaDB stores it correctly
                     save_path = UPLOAD_DIR / uploaded_file.name
                     save_path.write_bytes(uploaded_file.getvalue())
 
@@ -141,18 +197,32 @@ with st.sidebar:
                             f"✅ **{uploaded_file.name}** — "
                             f"{result.chunks_added} chunks indexed"
                         )
+                        logger.info(
+                            "Indexed '%s': %d chunks",
+                            uploaded_file.name, result.chunks_added
+                        )
                     else:
                         st.warning(
                             f"⚠️ **{uploaded_file.name}** — "
-                            f"already fully indexed"
+                            f"already fully indexed (0 new chunks)"
                         )
+
+                except FileNotFoundError as e:
+                    st.error(f"❌ File not found: {e}")
+                    logger.error("FileNotFoundError for %s: %s", uploaded_file.name, e)
+
+                except ValueError as e:
+                    st.error(f"❌ Invalid file: {e}")
+                    logger.error("ValueError for %s: %s", uploaded_file.name, e)
 
                 except Exception as e:
                     st.error(
-                        f"❌ Failed to process **{uploaded_file.name}**: {e}"
+                        f"❌ Failed to process **{uploaded_file.name}**. "
+                        f"Please try again or check the logs."
                     )
                     logger.error(
-                        "Ingestion failed for %s: %s", uploaded_file.name, e
+                        "Unexpected error ingesting %s: %s",
+                        uploaded_file.name, e, exc_info=True
                     )
 
     st.markdown("---")
@@ -175,8 +245,12 @@ with st.sidebar:
                 st.markdown(f"📄 `{source}`")
             with col2:
                 if st.button("🗑️", key=f"del_{source}", help=f"Remove {source}"):
-                    deleted = retriever.delete_document(source)
-                    st.success(f"Removed {source} ({deleted} chunks)")
+                    try:
+                        deleted = retriever.delete_document(source)
+                        st.success(f"Removed {source} ({deleted} chunks)")
+                        logger.info("Deleted document '%s'", source)
+                    except Exception as e:
+                        st.error(f"Failed to delete {source}: {e}")
                     st.rerun()
 
     st.markdown("---")
@@ -188,7 +262,6 @@ with st.sidebar:
 # MAIN AREA
 # ---------------------------------------------------------------------------
 
-# ── Header ────────────────────────────────────────────────────────────────
 st.title("🤖 Enterprise Knowledge Bot")
 st.caption(
     "Ask questions about your uploaded documents. "
@@ -211,8 +284,6 @@ else:
 st.markdown("---")
 
 # ── Chat history ──────────────────────────────────────────────────────────
-# Replay all previous messages — Streamlit reruns wipe local variables,
-# but session_state survives, so we rebuild the visual history from it.
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
@@ -221,12 +292,17 @@ for message in st.session_state.messages:
 
 
 # ── Chat input ────────────────────────────────────────────────────────────
-# Disabled when knowledge base is empty — prompts user to upload first.
 if prompt := st.chat_input(
     placeholder="Ask a question about your documents...",
     disabled=not retriever.is_ready(),
 ):
-    # 1. Show the user message immediately
+    # Validate query before doing anything
+    is_valid, error_msg = _validate_query(prompt)
+    if not is_valid:
+        st.warning(f"⚠️ {error_msg}")
+        st.stop()
+
+    # 1. Show user message
     with st.chat_message("user"):
         st.markdown(prompt)
     st.session_state.messages.append({
@@ -234,8 +310,13 @@ if prompt := st.chat_input(
     })
 
     # 2. Retrieve relevant chunks
-    with st.spinner("Searching knowledge base..."):
-        chunks = retriever.retrieve(prompt)
+    try:
+        with st.spinner("Searching knowledge base..."):
+            chunks = retriever.retrieve(prompt)
+    except Exception as e:
+        st.error("⚠️ Retrieval failed. Please try again.")
+        logger.error("Retrieval error for query '%s': %s", prompt[:60], e, exc_info=True)
+        st.stop()
 
     # 3. Handle no-results case
     if not chunks:
@@ -251,17 +332,24 @@ if prompt := st.chat_input(
         })
         st.stop()
 
-    # 4. Stream the LLM response token by token
-    with st.chat_message("assistant"):
-        # st.write_stream() consumes the generator and renders tokens live.
-        # It returns the full concatenated string when done.
-        full_response = st.write_stream(stream_answer(prompt, chunks))
+    # 4. Stream the LLM response
+    try:
+        with st.chat_message("assistant"):
+            full_response = st.write_stream(stream_answer(prompt, chunks))
+            sources = _extract_sources(chunks)
+            _render_citations(sources)
 
-        # 5. Render citations below the streamed response
-        sources = _extract_sources(chunks)
-        _render_citations(sources)
+    except Exception as e:
+        st.error(
+            "⚠️ Answer generation failed. "
+            "This may be a temporary API issue — please try again."
+        )
+        logger.error(
+            "Generation error for query '%s': %s", prompt[:60], e, exc_info=True
+        )
+        st.stop()
 
-    # 6. Persist the full response + citations in session state
+    # 5. Persist to session state
     st.session_state.messages.append({
         "role":    "assistant",
         "content": full_response,

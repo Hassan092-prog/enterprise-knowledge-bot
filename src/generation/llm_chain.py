@@ -51,9 +51,7 @@ from langchain_openai import ChatOpenAI
 from src.config import (
     LLM_MAX_TOKENS,
     LLM_MODEL,
-    LLM_PROVIDER,
     LLM_TEMPERATURE,
-    MISTRAL_API_KEY,
     OPENAI_API_KEY,
 )
 from src.logger import get_logger
@@ -245,34 +243,13 @@ def _build_chain(streaming: bool = False):
     #   For creative tasks you'd set this higher (0.7-1.0).
     #   For enterprise Q&A over documents, 0.0 is always correct.
     # streaming=True  → enables token-by-token output in the UI
-
-    #OPENAI LLM OPTIONS:
-    # llm = ChatOpenAI(
-    #     model=LLM_MODEL,
-    #     temperature=LLM_TEMPERATURE,
-    #     max_tokens=LLM_MAX_TOKENS,
-    #     openai_api_key=OPENAI_API_KEY,
-    #     streaming=streaming,
-    # )
-
-    # MISTRAL LLM OPTIONS:
-    if LLM_PROVIDER == "mistral":
-        from langchain_mistralai.chat_models import ChatMistralAI
-        llm = ChatMistralAI(
-            model=LLM_MODEL,
-            temperature=LLM_TEMPERATURE,
-            max_tokens=LLM_MAX_TOKENS,
-            mistral_api_key=MISTRAL_API_KEY,
-            streaming=streaming,
-        )
-    else:
-        llm = ChatOpenAI(
-            model=LLM_MODEL,
-            temperature=LLM_TEMPERATURE,
-            max_tokens=LLM_MAX_TOKENS,
-            openai_api_key=OPENAI_API_KEY,
-            streaming=streaming,
-        )
+    llm = ChatOpenAI(
+        model=LLM_MODEL,
+        temperature=LLM_TEMPERATURE,
+        max_tokens=LLM_MAX_TOKENS,
+        openai_api_key=OPENAI_API_KEY,
+        streaming=streaming,
+    )
 
     # ── Output parser ─────────────────────────────────────────────────
     # StrOutputParser extracts .content from the AIMessage object.
@@ -407,3 +384,98 @@ def stream_answer(
         "question": query,
     }):
         yield token
+
+
+# ---------------------------------------------------------------------------
+# Retry logic with exponential backoff (Phase 7)
+# ---------------------------------------------------------------------------
+
+import time
+import random as _random
+
+from src.config import MAX_RETRIES, RETRY_BASE_DELAY
+
+
+def _with_retry(fn, *args, **kwargs):
+    """
+    Call fn(*args, **kwargs) with exponential backoff on failure.
+
+    WHY EXPONENTIAL BACKOFF:
+        API rate limits (429) and transient server errors (500/503) are
+        temporary. Retrying immediately hammers the server and makes things
+        worse. Waiting exponentially longer (2s, 4s, 8s) gives the service
+        time to recover.
+
+        Adding random jitter (±0-1s) prevents the "thundering herd" problem
+        where many clients retry at exactly the same time after an outage.
+
+    WHICH ERRORS TO RETRY:
+        429 Too Many Requests — rate limit, always retry with backoff
+        500/502/503/504       — server error, transient, safe to retry
+        AuthenticationError   — permanent, never retry (wrong key)
+        ValueError            — permanent, never retry (bad input)
+
+    Args:
+        fn:      The callable to retry (e.g. chain.invoke)
+        *args:   Positional args for fn
+        **kwargs: Keyword args for fn
+
+    Returns:
+        fn's return value on success.
+
+    Raises:
+        The last exception if all retries are exhausted.
+    """
+    last_error = None
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            return fn(*args, **kwargs)
+
+        except Exception as e:
+            error_str = str(e).lower()
+
+            # Permanent errors — do not retry
+            if any(term in error_str for term in [
+                "authentication", "invalid api key",
+                "permission", "not found", "invalid request"
+            ]):
+                logger.error("Permanent API error (no retry): %s", e)
+                raise
+
+            last_error = e
+
+            if attempt < MAX_RETRIES:
+                # Exponential backoff: 2s, 4s, 8s + jitter
+                delay = RETRY_BASE_DELAY ** attempt + _random.uniform(0, 1)
+                logger.warning(
+                    "API call failed (attempt %d/%d): %s — retrying in %.1fs",
+                    attempt, MAX_RETRIES, e, delay
+                )
+                time.sleep(delay)
+            else:
+                logger.error(
+                    "API call failed after %d attempts: %s", MAX_RETRIES, e
+                )
+
+    raise last_error
+
+
+def generate_answer_safe(
+    query: str,
+    chunks: List[Document],
+) -> Answer:
+    """
+    generate_answer() wrapped with retry logic.
+
+    Drop-in replacement for generate_answer() in production.
+    Retries on transient API errors with exponential backoff.
+
+    Args:
+        query:  User's natural language question.
+        chunks: Retrieved context chunks.
+
+    Returns:
+        Answer dataclass — same as generate_answer().
+    """
+    return _with_retry(generate_answer, query, chunks)

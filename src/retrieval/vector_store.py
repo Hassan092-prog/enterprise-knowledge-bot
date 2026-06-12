@@ -34,6 +34,7 @@ DATA FLOW — RETRIEVAL:
 
 from pathlib import Path
 from typing import List, Optional
+from urllib import response
 
 import chromadb
 from chromadb.config import Settings
@@ -71,57 +72,31 @@ class VectorStore:
     """
 
     def __init__(self) -> None:
-        """
-        Initialise the ChromaDB client and OpenAI embedding model.
+        import os
+        from dotenv import load_dotenv
+        load_dotenv()
 
-        ChromaDB is set to persist mode — data survives restarts.
-        The embedding model is loaded once and reused for all operations.
-        """
-        # ── ChromaDB client ────────────────────────────────────────────
-        # PersistentClient stores data on disk at VECTORSTORE_DIR.
-        # Every add() call is automatically persisted — no manual save().
-        # anonymized_telemetry=False: stop ChromaDB phoning home.
         self._client = chromadb.PersistentClient(
             path=str(VECTORSTORE_DIR),
             settings=Settings(anonymized_telemetry=False),
         )
-
-        # get_or_create_collection:
-        #   - If collection exists on disk  → loads it (fast resume)
-        #   - If collection does not exist  → creates it (first run)
-        # cosine distance is standard for text embeddings.
-        # "l2" (Euclidean) and "ip" (inner product) also available
-        # but cosine is the correct choice for normalised text vectors.
         self._collection = self._client.get_or_create_collection(
             name=CHROMA_COLLECTION_NAME,
             metadata={"hnsw:space": "cosine"},
         )
 
-        # ── Embedding model ────────────────────────────────────────────
-        # OpenAIEmbeddings wraps the OpenAI API.
-        # .embed_documents(texts) → List[List[float]]
-        # .embed_query(text)      → List[float]
-        # We use the same model name from config to guarantee consistency.
-        
-        #OPENAI EMBEDDING MODEL OPTIONS:
-        # self._embeddings = OpenAIEmbeddings(
-        #     model=EMBEDDING_MODEL,
-        #     openai_api_key=OPENAI_API_KEY,
-        # )
-
-        #MISTRAL EMBEDDING MODEL OPTIONS:
         if LLM_PROVIDER == "mistral":
-            from langchain_mistralai import MistralAIEmbeddings
-            self._embeddings = MistralAIEmbeddings(
-                model=EMBEDDING_MODEL,
-                mistral_api_key=MISTRAL_API_KEY,
-            )
+            from mistralai import Mistral
+            api_key = os.environ.get("MISTRAL_API_KEY", "")
+            self._mistral_client = Mistral(api_key=api_key)
+            self._embeddings = None
         else:
+            from langchain_openai import OpenAIEmbeddings
+            self._mistral_client = None
             self._embeddings = OpenAIEmbeddings(
                 model=EMBEDDING_MODEL,
                 openai_api_key=OPENAI_API_KEY,
             )
-
 
         logger.info(
             "VectorStore ready — collection: '%s', model: '%s', "
@@ -189,7 +164,14 @@ class VectorStore:
         # Returns List[List[float]] — one 1536-dim vector per text.
         # This is the step that costs money (fractions of a cent per chunk).
         logger.info("Generating embeddings for %d chunks...", len(new_chunks))
-        embeddings_list = self._embeddings.embed_documents(texts)
+        if self._mistral_client:
+            response = self._mistral_client.embeddings.create(
+                model=EMBEDDING_MODEL,
+                inputs=texts,
+            )
+            embeddings_list = [item.embedding for item in response.data]
+        else:
+            embeddings_list = self._embeddings.embed_documents(texts)
         logger.info("Embeddings generated successfully")
 
         # ── Store in ChromaDB ───────────────────────────────────────
@@ -247,7 +229,14 @@ class VectorStore:
         # ── Embed the query ─────────────────────────────────────────
         # CRITICAL: must use the SAME model as add_documents().
         # embed_query() returns a single vector: List[float]
-        query_embedding = self._embeddings.embed_query(query)
+        if self._mistral_client:
+            response = self._mistral_client.embeddings.create(
+                model=EMBEDDING_MODEL,
+                inputs=[query],
+            )
+            query_embedding = response.data[0].embedding
+        else:
+            query_embedding = self._embeddings.embed_query(query)
 
         # ── Build optional metadata filter ──────────────────────────
         # ChromaDB supports filtering by metadata fields.
