@@ -1,14 +1,17 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import shutil
 import os
 from pathlib import Path
+from sqlalchemy.orm import Session
 
 from src.retrieval.retriever import Retriever
 from src.generation.llm_chain import stream_answer
 from src.config import UPLOAD_DIR, MAX_FILE_SIZE_MB, SUPPORTED_EXTENSIONS
+from src.database import engine, Base, get_db
+from src.models import ChatSession, ChatMessage
 
 app = FastAPI(title="Enterprise Knowledge Bot API")
 
@@ -27,11 +30,12 @@ retriever = None
 @app.on_event("startup")
 async def startup_event():
     global retriever
-    # Assuming config validation passes or we handle it
+    Base.metadata.create_all(bind=engine)
     retriever = Retriever()
 
 class QueryRequest(BaseModel):
     query: str
+    session_id: int
 
 @app.get("/health")
 def health_check():
@@ -78,22 +82,46 @@ def delete_document(filename: str):
         raise HTTPException(status_code=404, detail="Document not found or could not be deleted")
     return {"status": "deleted", "filename": filename}
 
+@app.post("/sessions")
+def create_session(db: Session = Depends(get_db)):
+    session = ChatSession(title="New Chat")
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return {"id": session.id, "title": session.title}
+
+@app.get("/sessions")
+def list_sessions(db: Session = Depends(get_db)):
+    sessions = db.query(ChatSession).order_by(ChatSession.created_at.desc()).all()
+    return [{"id": s.id, "title": s.title, "created_at": s.created_at} for s in sessions]
+
+@app.get("/sessions/{session_id}/messages")
+def get_messages(session_id: int, db: Session = Depends(get_db)):
+    messages = db.query(ChatMessage).filter(ChatMessage.session_id == session_id).order_by(ChatMessage.timestamp.asc()).all()
+    return [{"role": m.role, "content": m.content, "timestamp": m.timestamp} for m in messages]
+
 @app.post("/query")
-async def query_bot(request: QueryRequest):
+async def query_bot(request: QueryRequest, db: Session = Depends(get_db)):
     if not retriever:
         raise HTTPException(status_code=500, detail="Retriever not initialized")
     
     if not request.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
         
-    # Get context from vector store
+    user_msg = ChatMessage(session_id=request.session_id, role="user", content=request.query)
+    db.add(user_msg)
+    db.commit()
+
     context, sources = retriever.retrieve(request.query)
     
     def generate():
+        full_response = ""
         for chunk in stream_answer(request.query, context):
+            full_response += chunk
             yield chunk
             
-    # Include sources in headers so the frontend can parse them, or send a JSON payload via streaming
-    # For simplicity, we just stream the text. The frontend might need a more complex streaming format
-    # (e.g. SSE) to receive both text and citations. Here we use basic chunk streaming.
+        bot_msg = ChatMessage(session_id=request.session_id, role="assistant", content=full_response)
+        db.add(bot_msg)
+        db.commit()
+
     return StreamingResponse(generate(), media_type="text/plain")

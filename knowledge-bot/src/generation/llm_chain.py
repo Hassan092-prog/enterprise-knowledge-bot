@@ -47,6 +47,17 @@ from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
+from cachetools import TTLCache
+import hashlib
+
+# Simple in-memory cache: 1000 items, 24-hour TTL
+_semantic_cache = TTLCache(maxsize=1000, ttl=86400)
+
+def _get_cache_key(query: str, chunks: List[Document]) -> str:
+    """Generate a deterministic hash for the cache key."""
+    chunk_summary = "|".join([c.metadata.get("source", "") + str(c.metadata.get("page", "")) for c in chunks])
+    combined = f"{query.lower().strip()}::{chunk_summary}"
+    return hashlib.md5(combined.encode()).hexdigest()
 
 from src.config import (
     LLM_MAX_TOKENS,
@@ -302,6 +313,11 @@ def generate_answer(
     # Build the context block from retrieved chunks
     context = build_context_block(chunks)
 
+    cache_key = _get_cache_key(query, chunks)
+    if cache_key in _semantic_cache:
+        logger.info("Semantic Cache HIT for query: '%s'", query[:60])
+        return _semantic_cache[cache_key]
+
     logger.info(
         "Generating answer for query: '%s' using %d chunks",
         query[:60], len(chunks)
@@ -325,14 +341,16 @@ def generate_answer(
         len(raw_text), len(sources), has_answer
     )
 
-    return Answer(
+    answer = Answer(
         text=raw_text,
         sources=sources,
         model=LLM_MODEL,
         chunks_used=len(chunks),
         has_answer=has_answer,
     )
-
+    
+    _semantic_cache[cache_key] = answer
+    return answer
 
 def stream_answer(
     query: str,

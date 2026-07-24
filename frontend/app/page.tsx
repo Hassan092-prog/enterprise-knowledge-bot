@@ -7,16 +7,24 @@ type Message = {
   content: string;
 };
 
-type Document = [string, number]; // [filename, page] (if we get it in that format, or just string if it's the filename)
+type Session = {
+  id: number;
+  title: string;
+  created_at: string;
+};
 
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([
-    { role: "assistant", content: "Hello! Upload some documents and ask me anything about them." },
+    { role: "assistant", content: "Hello! Start a new chat, upload documents, and ask me anything about them." },
   ]);
   const [input, setInput] = useState("");
   const [documents, setDocuments] = useState<string[]>([]);
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
+  
   const [isUploading, setIsUploading] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
+  
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -25,10 +33,22 @@ export default function Home() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Fetch documents on load
+  // Initial load
   useEffect(() => {
     fetchDocuments();
+    fetchSessions();
   }, []);
+
+  // Fetch messages when active session changes
+  useEffect(() => {
+    if (activeSessionId !== null) {
+      fetchMessages(activeSessionId);
+    } else {
+      setMessages([
+        { role: "assistant", content: "Hello! Start a new chat, upload documents, and ask me anything about them." },
+      ]);
+    }
+  }, [activeSessionId]);
 
   const fetchDocuments = async () => {
     try {
@@ -39,6 +59,55 @@ export default function Home() {
       }
     } catch (error) {
       console.error("Failed to fetch documents:", error);
+    }
+  };
+
+  const fetchSessions = async () => {
+    try {
+      const res = await fetch("http://localhost:8000/sessions");
+      if (res.ok) {
+        const data = await res.json();
+        setSessions(data || []);
+        // Automatically select the most recent session if none is selected
+        if (data.length > 0 && activeSessionId === null) {
+            setActiveSessionId(data[0].id);
+        } else if (data.length === 0) {
+            handleNewChat();
+        }
+      }
+    } catch (error) {
+      console.error("Failed to fetch sessions:", error);
+    }
+  };
+
+  const fetchMessages = async (sessionId: number) => {
+    try {
+      const res = await fetch(`http://localhost:8000/sessions/${sessionId}/messages`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.length > 0) {
+            setMessages(data);
+        } else {
+            setMessages([{ role: "assistant", content: "New chat started. What would you like to know?" }]);
+        }
+      }
+    } catch (error) {
+      console.error("Failed to fetch messages:", error);
+    }
+  };
+
+  const handleNewChat = async () => {
+    try {
+      const res = await fetch("http://localhost:8000/sessions", {
+          method: "POST"
+      });
+      if (res.ok) {
+          const newSession = await res.json();
+          await fetchSessions();
+          setActiveSessionId(newSession.id);
+      }
+    } catch (error) {
+       console.error("Failed to create new chat:", error);
     }
   };
 
@@ -88,6 +157,15 @@ export default function Home() {
 
   const handleSend = async () => {
     if (!input.trim()) return;
+    
+    // Ensure we have an active session
+    let currentSessionId = activeSessionId;
+    if (currentSessionId === null) {
+       await handleNewChat();
+       // Fetch sessions should update state, but to be safe and avoid race conditions we'd ideally await the return ID
+       // For now, if activeSessionId is null, handleNewChat sets it shortly.
+       return; 
+    }
 
     const userQuery = input.trim();
     setInput("");
@@ -101,7 +179,7 @@ export default function Home() {
       const res = await fetch("http://localhost:8000/query", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: userQuery }),
+        body: JSON.stringify({ query: userQuery, session_id: currentSessionId }),
       });
 
       if (!res.ok) {
@@ -152,11 +230,41 @@ export default function Home() {
       <div className="w-80 bg-slate-950 border-r border-slate-800 flex flex-col shadow-2xl z-10">
         <div className="p-6 border-b border-slate-800 bg-slate-900/50 backdrop-blur">
           <h1 className="text-xl font-bold bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent">
-            Enterprise RAG Bot
+            Enterprise RAG
           </h1>
           <p className="text-sm text-slate-500 mt-1">Multi-format knowledge base</p>
         </div>
 
+        {/* CHAT HISTORY SECTION */}
+        <div className="p-4 border-b border-slate-800 flex-1 overflow-y-auto custom-scrollbar">
+           <div className="flex justify-between items-center mb-4">
+               <h2 className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                 Chat History
+               </h2>
+               <button onClick={handleNewChat} className="text-xs bg-indigo-600 hover:bg-indigo-500 text-white px-2 py-1 rounded transition">
+                   + New
+               </button>
+           </div>
+           
+           <ul className="space-y-1">
+              {sessions.map((session) => (
+                <li key={session.id}>
+                    <button 
+                        onClick={() => setActiveSessionId(session.id)}
+                        className={`w-full text-left p-2 rounded text-sm truncate transition-colors ${
+                            activeSessionId === session.id 
+                                ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30" 
+                                : "text-slate-400 hover:bg-slate-800/50 hover:text-slate-200 border border-transparent"
+                        }`}
+                    >
+                        💬 Chat #{session.id} - {new Date(session.created_at).toLocaleDateString()}
+                    </button>
+                </li>
+              ))}
+           </ul>
+        </div>
+
+        {/* DOCUMENTS SECTION */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar">
           <h2 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
             Indexed Documents
@@ -201,9 +309,6 @@ export default function Home() {
           >
             {isUploading ? "Uploading..." : "Upload Document"}
           </button>
-          <p className="text-xs text-slate-500 text-center mt-3">
-            Supports PDF, DOCX, TXT, CSV
-          </p>
         </div>
       </div>
 
@@ -261,12 +366,13 @@ export default function Home() {
                     handleSend();
                   }
                 }}
-                placeholder="Ask a question based on the documents..."
-                className="flex-1 bg-transparent border-none py-4 px-6 text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-0"
+                disabled={activeSessionId === null}
+                placeholder={activeSessionId === null ? "Create a new chat to begin..." : "Ask a question based on the documents..."}
+                className="flex-1 bg-transparent border-none py-4 px-6 text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-0 disabled:opacity-50"
               />
               <button
                 onClick={handleSend}
-                disabled={!input.trim()}
+                disabled={!input.trim() || activeSessionId === null}
                 className="p-4 text-indigo-400 hover:text-indigo-300 disabled:text-slate-600 disabled:hover:text-slate-600 transition-colors"
               >
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6">

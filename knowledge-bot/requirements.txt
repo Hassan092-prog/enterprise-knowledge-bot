@@ -29,6 +29,7 @@ streamlit==1.40.2
 fastapi==0.115.6
 uvicorn==0.34.0
 python-multipart==0.0.20
+sqlalchemy==2.0.36
 
 # ── Environment & config ──────────────────────────────────────────────────
 python-dotenv==1.0.1
@@ -44,3 +45,7 @@ tqdm==4.67.1             # Progress bars during long ingestion jobs
 # ── Testing ───────────────────────────────────────────────────────────────
 pytest==8.3.4
 pytest-mock==3.14.0
+
+# ── Reranking & Caching ───────────────────────────────────────────────────
+sentence-transformers==3.3.1
+cachetools==5.5.0

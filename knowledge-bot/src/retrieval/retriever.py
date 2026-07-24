@@ -67,6 +67,7 @@ from typing import List, Optional
 import re
 
 from langchain_core.documents import Document
+from sentence_transformers import CrossEncoder
 
 from src.ingestion.chunker import chunk_documents, get_chunk_stats
 from src.ingestion.document_loader import load_document
@@ -129,10 +130,11 @@ class Retriever:
 
     def __init__(self) -> None:
         """
-        Initialise the VectorStore (loads ChromaDB from disk).
-        This is the only stateful dependency — reuse this instance.
+        Initialise the VectorStore and CrossEncoder.
         """
         self._store = VectorStore()
+        logger.info("Loading CrossEncoder model...")
+        self._reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
         logger.info("Retriever ready — %d chunks indexed", self._store.get_stats()["total_chunks"])
 
     # ──────────────────────────────────────────────────────────────────
@@ -293,70 +295,20 @@ class Retriever:
         candidates: List[Document],
     ) -> List[Document]:
         """
-        Re-score and re-order candidates using keyword overlap.
-
-        SCORING FORMULA:
-            final_score = (0.7 * cosine_similarity) + (0.3 * keyword_score)
-
-        WHY THIS WORKS:
-            Cosine similarity finds semantically related chunks.
-            Keyword overlap rewards chunks that contain the user's
-            actual words — important for technical queries where
-            the user wants a specific term (e.g. "EBITDA", "clause 4.2").
-
-            Combining both gives more robust ranking than either alone.
-
-        PRODUCTION ALTERNATIVE:
-            A cross-encoder model like ms-marco-MiniLM-L-6-v2 is more
-            accurate but requires: pip install sentence-transformers
-            and a 90MB model download. Our approach achieves significant
-            improvement at zero additional cost or latency.
-
-        Args:
-            query:      The user's original question.
-            candidates: Documents from vector_store.search().
-
-        Returns:
-            Same documents, re-ordered by combined score.
-            Each document gets a "rerank_score" added to its metadata.
+        Re-score and re-order candidates using a CrossEncoder model.
         """
-        # Tokenise query into lowercase words, strip punctuation
-        query_terms = set(
-            re.sub(r'[^\w\s]', '', query.lower()).split()
-        )
-
-        # Remove common stopwords that add noise to keyword scoring
-        stopwords = {
-            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at',
-            'to', 'for', 'of', 'with', 'by', 'from', 'is', 'was',
-            'are', 'were', 'be', 'been', 'has', 'have', 'had', 'do',
-            'does', 'did', 'will', 'would', 'could', 'should', 'what',
-            'how', 'when', 'where', 'who', 'which', 'that', 'this',
-        }
-        query_terms -= stopwords
-
-        scored = []
-        for doc in candidates:
-            cosine_sim = doc.metadata.get("similarity_score", 0.0)
-
-            # Keyword overlap: fraction of query terms found in the chunk
-            if query_terms:
-                chunk_text  = doc.page_content.lower()
-                matches     = sum(1 for term in query_terms if term in chunk_text)
-                keyword_score = matches / len(query_terms)
-            else:
-                keyword_score = 0.0
-
-            # Weighted combination
-            final_score = (0.7 * cosine_sim) + (0.3 * keyword_score)
-
-            doc.metadata["rerank_score"]   = round(final_score, 4)
-            doc.metadata["keyword_score"]  = round(keyword_score, 4)
-            scored.append(doc)
-
+        if not candidates:
+            return []
+            
+        pairs = [[query, doc.page_content] for doc in candidates]
+        scores = self._reranker.predict(pairs)
+        
+        for doc, score in zip(candidates, scores):
+            doc.metadata["rerank_score"] = float(score)
+            
         # Sort descending by rerank_score
-        scored.sort(key=lambda d: d.metadata["rerank_score"], reverse=True)
-        return scored
+        candidates.sort(key=lambda d: d.metadata.get("rerank_score", 0.0), reverse=True)
+        return candidates
 
     # ──────────────────────────────────────────────────────────────────
     # MMR DIVERSITY FILTER
