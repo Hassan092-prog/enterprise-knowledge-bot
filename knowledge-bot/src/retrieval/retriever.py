@@ -261,11 +261,41 @@ class Retriever:
             self._store.get_stats()["total_chunks"],
         )
 
-        candidates = self._store.search(
+        # Hybrid Search: Get candidates from both Vector and BM25
+        vector_candidates = self._store.search(
             query=query,
             k=n_candidates,
             source_filter=source_filter,
         )
+        
+        bm25_candidates = self._store.search_bm25(
+            query=query,
+            k=n_candidates,
+            source_filter=source_filter,
+        )
+        
+        # Combine using Reciprocal Rank Fusion (RRF)
+        rrf_k = 60
+        scores_map = {}
+        docs_map = {}
+        
+        for rank, doc in enumerate(vector_candidates):
+            chunk_id = doc.metadata.get("chunk_id", str(rank))
+            scores_map[chunk_id] = scores_map.get(chunk_id, 0.0) + 1.0 / (rrf_k + rank + 1)
+            docs_map[chunk_id] = doc
+            
+        for rank, doc in enumerate(bm25_candidates):
+            chunk_id = doc.metadata.get("chunk_id", str(rank + len(vector_candidates)))
+            scores_map[chunk_id] = scores_map.get(chunk_id, 0.0) + 1.0 / (rrf_k + rank + 1)
+            if chunk_id not in docs_map:
+                docs_map[chunk_id] = doc
+                
+        # Sort by RRF score and take top n_candidates
+        candidates = []
+        for chunk_id, _ in sorted(scores_map.items(), key=lambda x: x[1], reverse=True):
+            candidates.append(docs_map[chunk_id])
+            
+        candidates = candidates[:n_candidates]
 
         if not candidates:
             return []

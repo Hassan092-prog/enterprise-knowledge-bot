@@ -116,12 +116,31 @@ def _load_pdf(file_path: Path) -> List[Document]:
     except ImportError:
         raise ImportError("pypdf not installed. Run: pip install pypdf")
 
+    try:
+        from pdf2image import convert_from_path
+        import pytesseract
+    except ImportError:
+        convert_from_path = None
+        pytesseract = None
+
     reader = PdfReader(str(file_path))
     documents = []
 
     for page_num, page in enumerate(reader.pages, start=1):
         text = page.extract_text() or ""
         text = text.strip()
+
+        # Fallback to OCR if page seems to be a scanned image (no text)
+        if len(text) < 10 and convert_from_path and pytesseract:
+            logger.debug("Attempting OCR for page %d in %s", page_num, file_path.name)
+            try:
+                images = convert_from_path(str(file_path), first_page=page_num, last_page=page_num)
+                if images:
+                    ocr_text = pytesseract.image_to_string(images[0]).strip()
+                    if ocr_text:
+                        text = ocr_text
+            except Exception as e:
+                logger.warning("OCR failed for page %d in %s: %s", page_num, file_path.name, e)
 
         # Skip blank pages — they produce empty chunks and waste embeddings
         if not text:

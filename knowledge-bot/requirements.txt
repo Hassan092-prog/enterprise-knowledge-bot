@@ -21,6 +21,8 @@ chromadb==0.5.20
 pypdf==5.1.0             # PDF parsing
 python-docx==1.1.2       # DOCX parsing
 pandas==2.2.3            # CSV parsing
+pytesseract==0.3.13      # OCR for scanned PDFs
+pdf2image==1.17.0        # PDF to image for OCR
 
 # ── UI ────────────────────────────────────────────────────────────────────
 streamlit==1.40.2
@@ -49,3 +51,7 @@ pytest-mock==3.14.0
 # ── Reranking & Caching ───────────────────────────────────────────────────
 sentence-transformers==3.3.1
 cachetools==5.5.0
+
+# ── Hybrid Search (BM25) ──────────────────────────────────────────────────
+rank_bm25==0.2.2
+nltk==3.9.1

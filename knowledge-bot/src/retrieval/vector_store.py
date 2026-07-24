@@ -40,6 +40,12 @@ import chromadb
 from chromadb.config import Settings
 from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
+import re
+
+try:
+    from rank_bm25 import BM25Okapi
+except ImportError:
+    BM25Okapi = None
 
 from src.config import (
     CHROMA_COLLECTION_NAME,
@@ -105,6 +111,33 @@ class VectorStore:
             EMBEDDING_MODEL,
             self._collection.count(),
         )
+
+        self._bm25 = None
+        self._bm25_docs = []
+        self._build_bm25()
+
+    def _build_bm25(self):
+        """Rebuilds the BM25 index from all documents in ChromaDB."""
+        if not BM25Okapi:
+            return
+            
+        all_data = self._collection.get(include=["documents", "metadatas"])
+        if not all_data["documents"]:
+            self._bm25 = None
+            self._bm25_docs = []
+            return
+            
+        self._bm25_docs = [
+            Document(page_content=doc, metadata=meta) 
+            for doc, meta in zip(all_data["documents"], all_data["metadatas"])
+        ]
+        
+        tokenized_corpus = [
+            re.sub(r'[^\w\s]', '', doc.page_content.lower()).split() 
+            for doc in self._bm25_docs
+        ]
+        self._bm25 = BM25Okapi(tokenized_corpus)
+        logger.info("BM25 index built with %d chunks", len(self._bm25_docs))
 
     # ──────────────────────────────────────────────────────────────────
     # INGESTION
@@ -189,6 +222,10 @@ class VectorStore:
             len(new_chunks),
             self._collection.count(),
         )
+        
+        # Rebuild BM25 index after adding new documents
+        self._build_bm25()
+        
         return len(new_chunks)
 
     # ──────────────────────────────────────────────────────────────────
@@ -280,6 +317,36 @@ class VectorStore:
         )
         return documents
 
+    def search_bm25(
+        self,
+        query: str,
+        k: Optional[int] = None,
+        source_filter: Optional[str] = None,
+    ) -> List[Document]:
+        """
+        Find the k most relevant chunks using BM25 keyword matching.
+        """
+        if not self._bm25 or not query.strip():
+            return []
+            
+        k = k or RETRIEVAL_TOP_K
+        tokenized_query = re.sub(r'[^\w\s]', '', query.lower()).split()
+        
+        scores = self._bm25.get_scores(tokenized_query)
+        
+        scored_docs = []
+        for score, doc in zip(scores, self._bm25_docs):
+            if score > 0:
+                if source_filter and doc.metadata.get("source") != source_filter:
+                    continue
+                # Make a copy so we don't mutate the cached doc
+                scored_doc = Document(page_content=doc.page_content, metadata=doc.metadata.copy())
+                scored_doc.metadata["bm25_score"] = float(score)
+                scored_docs.append(scored_doc)
+                
+        scored_docs.sort(key=lambda d: d.metadata["bm25_score"], reverse=True)
+        return scored_docs[:k]
+
     # ──────────────────────────────────────────────────────────────────
     # MANAGEMENT
     # ──────────────────────────────────────────────────────────────────
@@ -338,6 +405,10 @@ class VectorStore:
             source_filename,
             self._collection.count(),
         )
+        
+        # Rebuild BM25 index after deleting documents
+        self._build_bm25()
+        
         return count
 
     def get_stats(self) -> dict:
