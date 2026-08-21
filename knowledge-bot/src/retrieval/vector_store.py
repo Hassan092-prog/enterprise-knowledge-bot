@@ -143,7 +143,7 @@ class VectorStore:
     # INGESTION
     # ──────────────────────────────────────────────────────────────────
 
-    def add_documents(self, chunks: List[Document]) -> int:
+    def add_documents(self, chunks: List[Document], user_id: Optional[int] = None, is_global: bool = False) -> int:
         """
         Embed a list of chunks and store them in ChromaDB.
 
@@ -190,6 +190,13 @@ class VectorStore:
         # ── Prepare data for ChromaDB ───────────────────────────────
         texts     = [c.page_content       for c in new_chunks]
         ids       = [c.metadata["chunk_id"] for c in new_chunks]
+        
+        # Inject user_id and is_global into metadata
+        for c in new_chunks:
+            if user_id is not None:
+                c.metadata["user_id"] = user_id
+            c.metadata["is_global"] = 1 if is_global else 0
+            
         metadatas = [c.metadata            for c in new_chunks]
 
         # ── Generate embeddings via OpenAI API ──────────────────────
@@ -237,6 +244,7 @@ class VectorStore:
         query: str,
         k: Optional[int] = None,
         source_filter: Optional[str] = None,
+        user_id: Optional[int] = None,
     ) -> List[Document]:
         """
         Find the k most semantically similar chunks to a query.
@@ -277,8 +285,14 @@ class VectorStore:
 
         # ── Build optional metadata filter ──────────────────────────
         # ChromaDB supports filtering by metadata fields.
-        # This lets users ask "search only within this document".
-        where = {"source": source_filter} if source_filter else None
+        if user_id is not None:
+            user_filter = {"$or": [{"user_id": user_id}, {"is_global": 1}]}
+            if source_filter:
+                where = {"$and": [{"source": source_filter}, user_filter]}
+            else:
+                where = user_filter
+        else:
+            where = {"source": source_filter} if source_filter else None
 
         # ── Query ChromaDB ──────────────────────────────────────────
         results = self._collection.query(
@@ -322,6 +336,7 @@ class VectorStore:
         query: str,
         k: Optional[int] = None,
         source_filter: Optional[str] = None,
+        user_id: Optional[int] = None,
     ) -> List[Document]:
         """
         Find the k most relevant chunks using BM25 keyword matching.
@@ -337,6 +352,9 @@ class VectorStore:
         scored_docs = []
         for score, doc in zip(scores, self._bm25_docs):
             if score > 0:
+                is_global = doc.metadata.get("is_global") == 1
+                if user_id is not None and doc.metadata.get("user_id") != user_id and not is_global:
+                    continue
                 if source_filter and doc.metadata.get("source") != source_filter:
                     continue
                 # Make a copy so we don't mutate the cached doc
@@ -351,7 +369,7 @@ class VectorStore:
     # MANAGEMENT
     # ──────────────────────────────────────────────────────────────────
 
-    def list_sources(self) -> List[str]:
+    def list_sources(self, user_id: Optional[int] = None) -> List[str]:
         """
         Return a list of unique source filenames currently indexed.
 
@@ -366,14 +384,37 @@ class VectorStore:
             return []
 
         # Get all metadata from the collection
-        all_items = self._collection.get(include=["metadatas"])
+        if user_id is not None:
+            where = {"$or": [{"user_id": user_id}, {"is_global": 1}]}
+        else:
+            where = None
+        all_items = self._collection.get(where=where, include=["metadatas"])
         sources = {
             meta.get("source", "unknown")
             for meta in all_items["metadatas"]
         }
         return sorted(sources)
 
-    def delete_source(self, source_filename: str) -> int:
+    def list_sources_by_type(self, user_id: Optional[int] = None) -> dict:
+        """Return sources grouped by personal vs global."""
+        if self._collection.count() == 0:
+            return {"personal": [], "global": []}
+            
+        where = {"$or": [{"user_id": user_id}, {"is_global": 1}]} if user_id is not None else None
+        all_items = self._collection.get(where=where, include=["metadatas"])
+        
+        personal = set()
+        global_docs = set()
+        for meta in all_items["metadatas"]:
+            source = meta.get("source", "unknown")
+            if meta.get("is_global") == 1:
+                global_docs.add(source)
+            else:
+                personal.add(source)
+                
+        return {"personal": sorted(personal), "global": sorted(global_docs)}
+
+    def delete_source(self, source_filename: str, user_id: Optional[int] = None) -> int:
         """
         Remove all chunks belonging to a specific source document.
 
@@ -387,8 +428,12 @@ class VectorStore:
             Number of chunks deleted.
         """
         # Find all chunk IDs for this source
+        where = {"source": source_filename}
+        if user_id is not None:
+            where["user_id"] = user_id
+            
         results = self._collection.get(
-            where={"source": source_filename},
+            where=where,
             include=["metadatas"],
         )
 
@@ -411,7 +456,7 @@ class VectorStore:
         
         return count
 
-    def get_stats(self) -> dict:
+    def get_stats(self, user_id: Optional[int] = None) -> dict:
         """
         Return summary statistics about the vector store.
 
@@ -424,9 +469,15 @@ class VectorStore:
                 "sources": ["report.pdf", "glossary.txt", ...]
             }
         """
-        sources = self.list_sources()
+        sources = self.list_sources(user_id=user_id)
+        if user_id is not None:
+            where = {"$or": [{"user_id": user_id}, {"is_global": 1}]}
+        else:
+            where = None
+        total_chunks = len(self._collection.get(where=where, include=[])["ids"]) if where else self._collection.count()
+        
         return {
-            "total_chunks":  self._collection.count(),
+            "total_chunks":  total_chunks,
             "total_sources": len(sources),
             "sources":       sources,
         }

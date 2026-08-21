@@ -1,6 +1,11 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import { useRouter } from "next/navigation";
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://192.168.1.92:8000";
 
 type Message = {
   role: "user" | "assistant";
@@ -19,52 +24,68 @@ export default function Home() {
   ]);
   const [input, setInput] = useState("");
   const [documents, setDocuments] = useState<string[]>([]);
+  const [globalDocuments, setGlobalDocuments] = useState<string[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [isGlobalDocsOpen, setIsGlobalDocsOpen] = useState(false);
   
   const [isUploading, setIsUploading] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const router = useRouter();
 
-  // Auto-scroll to bottom of chat
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
-
-  // Initial load
-  useEffect(() => {
-    fetchDocuments();
-    fetchSessions();
-  }, []);
-
-  // Fetch messages when active session changes
-  useEffect(() => {
-    if (activeSessionId !== null) {
-      fetchMessages(activeSessionId);
-    } else {
-      setMessages([
-        { role: "assistant", content: "Hello! Start a new chat, upload documents, and ask me anything about them." },
-      ]);
+  // Helper for authenticated fetch
+  const authFetch = async (url: string, options: RequestInit = {}) => {
+    const token = localStorage.getItem("token");
+    if (!token) {
+      router.push("/login");
+      throw new Error("No token found");
     }
-  }, [activeSessionId]);
+    const headers = {
+      ...options.headers,
+      Authorization: `Bearer ${token}`,
+    };
+    const res = await fetch(url, { ...options, headers });
+    if (res.status === 401) {
+      localStorage.removeItem("token");
+      router.push("/login");
+      throw new Error("Unauthorized");
+    }
+    return res;
+  };
+
 
   const fetchDocuments = async () => {
     try {
-      const res = await fetch("http://localhost:8000/documents");
+      const res = await authFetch(`${API_URL}/documents`);
       if (res.ok) {
         const data = await res.json();
         setDocuments(data.documents || []);
+        setGlobalDocuments(data.global_documents || []);
       }
     } catch (error) {
       console.error("Failed to fetch documents:", error);
     }
   };
 
+  const fetchMe = async () => {
+    try {
+      const res = await authFetch(`${API_URL}/auth/me`);
+      if (res.ok) {
+        const data = await res.json();
+        setIsAdmin(data.is_admin);
+      }
+    } catch (error) {
+      console.error("Failed to fetch user profile:", error);
+    }
+  };
+
   const fetchSessions = async () => {
     try {
-      const res = await fetch("http://localhost:8000/sessions");
+      const res = await authFetch(`${API_URL}/sessions`);
       if (res.ok) {
         const data = await res.json();
         setSessions(data || []);
@@ -82,7 +103,7 @@ export default function Home() {
 
   const fetchMessages = async (sessionId: number) => {
     try {
-      const res = await fetch(`http://localhost:8000/sessions/${sessionId}/messages`);
+      const res = await authFetch(`${API_URL}/sessions/${sessionId}/messages`);
       if (res.ok) {
         const data = await res.json();
         if (data.length > 0) {
@@ -98,7 +119,7 @@ export default function Home() {
 
   const handleNewChat = async () => {
     try {
-      const res = await fetch("http://localhost:8000/sessions", {
+      const res = await authFetch(`${API_URL}/sessions`, {
           method: "POST"
       });
       if (res.ok) {
@@ -120,7 +141,7 @@ export default function Home() {
     formData.append("file", file);
 
     try {
-      const res = await fetch("http://localhost:8000/upload", {
+      const res = await authFetch(`${API_URL}/upload`, {
         method: "POST",
         body: formData,
       });
@@ -144,7 +165,7 @@ export default function Home() {
 
   const handleDelete = async (filename: string) => {
     try {
-      const res = await fetch(`http://localhost:8000/documents/${filename}`, {
+      const res = await authFetch(`${API_URL}/documents/${filename}`, {
         method: "DELETE",
       });
       if (res.ok) {
@@ -155,11 +176,39 @@ export default function Home() {
     }
   };
 
+  // Auto-scroll to bottom of chat
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  // Initial load
+  useEffect(() => {
+    const token = localStorage.getItem("token");
+    if (!token) {
+      router.push("/login");
+      return;
+    }
+    fetchMe();
+    fetchDocuments();
+    fetchSessions();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Fetch messages when active session changes
+  useEffect(() => {
+    if (activeSessionId !== null) {
+      fetchMessages(activeSessionId);
+    } else {
+      setMessages([
+        { role: "assistant", content: "Hello! Start a new chat, upload documents, and ask me anything about them." },
+      ]);
+    }
+  }, [activeSessionId]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleSend = async () => {
     if (!input.trim()) return;
     
     // Ensure we have an active session
-    let currentSessionId = activeSessionId;
+    const currentSessionId = activeSessionId;
     if (currentSessionId === null) {
        await handleNewChat();
        // Fetch sessions should update state, but to be safe and avoid race conditions we'd ideally await the return ID
@@ -176,7 +225,7 @@ export default function Home() {
     setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
 
     try {
-      const res = await fetch("http://localhost:8000/query", {
+      const res = await authFetch(`${API_URL}/query`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query: userQuery, session_id: currentSessionId }),
@@ -228,11 +277,32 @@ export default function Home() {
       
       {/* SIDEBAR */}
       <div className="w-80 bg-slate-950 border-r border-slate-800 flex flex-col shadow-2xl z-10">
-        <div className="p-6 border-b border-slate-800 bg-slate-900/50 backdrop-blur">
-          <h1 className="text-xl font-bold bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent">
-            Enterprise RAG
-          </h1>
-          <p className="text-sm text-slate-500 mt-1">Multi-format knowledge base</p>
+        <div className="p-6 border-b border-slate-800 bg-slate-900/50 backdrop-blur flex justify-between items-center">
+          <div>
+            <h1 className="text-xl font-bold bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent flex items-center gap-2">
+              Enterprise RAG
+            </h1>
+            <p className="text-sm text-slate-500 mt-1">Multi-format knowledge base</p>
+          </div>
+          <div className="flex flex-col gap-2">
+            {isAdmin && (
+              <button
+                onClick={() => router.push("/admin")}
+                className="text-xs bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-500/50 text-indigo-300 px-2 py-1 rounded transition"
+              >
+                Admin
+              </button>
+            )}
+            <button
+              onClick={() => {
+                localStorage.removeItem("token");
+                router.push("/login");
+              }}
+              className="text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-1 rounded transition"
+            >
+              Logout
+            </button>
+          </div>
         </div>
 
         {/* CHAT HISTORY SECTION */}
@@ -292,6 +362,35 @@ export default function Home() {
               ))}
             </ul>
           )}
+          
+          {/* GLOBAL DOCUMENTS */}
+          <div className="mt-6">
+            <button
+              onClick={() => setIsGlobalDocsOpen(!isGlobalDocsOpen)}
+              className="w-full flex justify-between items-center text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 hover:text-slate-400 transition"
+            >
+              <span>Global Documents ({globalDocuments.length})</span>
+              <span>{isGlobalDocsOpen ? "▼" : "▶"}</span>
+            </button>
+            
+            {isGlobalDocsOpen && (
+              globalDocuments.length === 0 ? (
+                <div className="text-sm text-slate-600 text-center py-4 border border-dashed border-slate-800 rounded-xl bg-slate-900/20">
+                  No global documents.
+                </div>
+              ) : (
+                <ul className="space-y-2 mt-2">
+                  {globalDocuments.map((doc, idx) => (
+                    <li key={idx} className="flex items-center p-3 rounded-lg bg-slate-900/50 border border-slate-800 text-slate-400">
+                      <span className="text-sm truncate" title={doc}>
+                        📄 {doc}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )
+            )}
+          </div>
         </div>
 
         <div className="p-4 border-t border-slate-800 bg-slate-900/50">
@@ -333,8 +432,14 @@ export default function Home() {
                     : "bg-slate-800/80 border border-slate-700/50 text-slate-200 rounded-bl-none backdrop-blur-sm"
                 }`}
               >
-                <div className="whitespace-pre-wrap leading-relaxed text-sm md:text-base">
-                  {msg.content}
+                <div className={`whitespace-pre-wrap leading-relaxed text-sm md:text-base ${msg.role === "assistant" ? "markdown-body" : ""}`}>
+                  {msg.role === "assistant" ? (
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      {msg.content}
+                    </ReactMarkdown>
+                  ) : (
+                    msg.content
+                  )}
                 </div>
               </div>
             </div>

@@ -32,6 +32,10 @@ fastapi==0.115.6
 uvicorn==0.34.0
 python-multipart==0.0.20
 sqlalchemy==2.0.35          # <2.0.36 required by langchain-community 0.3.7
+psycopg2-binary==2.9.10
+PyJWT==2.8.0
+passlib==1.7.4
+bcrypt==4.1.2
 
 # ── Environment & config ──────────────────────────────────────────────────
 python-dotenv==1.0.1

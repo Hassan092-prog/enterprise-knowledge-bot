@@ -1,4 +1,4 @@
-﻿"""
+"""
 config.py — Central configuration for the Enterprise Knowledge Bot.
 
 WHY THIS FILE EXISTS:
@@ -55,6 +55,9 @@ MISTRAL_API_KEY: str = os.getenv("MISTRAL_API_KEY", "")
 
 # Which LLM provider to use: "openai" or "mistral"
 LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openai")
+
+# Production PostgreSQL Database URL (falls back to local SQLite if not set)
+DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 
 
 # ---------------------------------------------------------------------------

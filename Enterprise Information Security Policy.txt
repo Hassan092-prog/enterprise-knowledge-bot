@@ -1,0 +1,91 @@
+# Enterprise Information Security Policy
+
+Document ID: SEC-POL-001
+Version: 4.2
+Classification: Internal
+Effective Date: 2026-07-01
+Policy Owner: Information Security Office
+Review Cycle: Annual
+
+## 1. Purpose
+
+This policy establishes minimum information-security requirements for employees, contractors, applications, infrastructure, and corporate data.
+
+The objective is to protect organizational information against unauthorized access, modification, disclosure, destruction, and service disruption.
+
+## 2. Scope
+
+This policy applies to:
+
+* Corporate employees and contractors
+* Production and development environments
+* Corporate endpoints and mobile devices
+* Cloud infrastructure
+* Business applications
+* Customer and company information
+* Third-party systems processing company data
+
+## 3. Access Management
+
+Access must be granted according to the principle of least privilege.
+
+All privileged accounts must use multi-factor authentication. Shared administrative accounts are prohibited unless specifically approved by Information Security.
+
+User access must be reviewed periodically and removed when employment or contractual access ends.
+
+## 4. Data Classification
+
+Information must be classified into one of the following categories:
+
+PUBLIC
+Information approved for unrestricted distribution.
+
+INTERNAL
+Information intended for authorized personnel and normal business operations.
+
+CONFIDENTIAL
+Business-sensitive information requiring controlled access.
+
+RESTRICTED
+Highly sensitive information requiring explicit authorization and additional security controls.
+
+## 5. Password and Authentication Requirements
+
+Passwords must meet the organization's minimum complexity requirements and must not be reused across corporate and personal services.
+
+Multi-factor authentication is mandatory for administrative access and externally accessible corporate applications where supported.
+
+Authentication credentials must never be stored in source code, tickets, documentation, or unsecured files.
+
+## 6. Security Incident Reporting
+
+Employees must report suspected security incidents to the Security Operations team as soon as reasonably possible.
+
+Examples include:
+
+* Suspected credential compromise
+* Malware detection
+* Unauthorized access
+* Accidental disclosure of confidential information
+* Lost corporate devices
+* Suspicious email or login activity
+
+## 7. Logging and Monitoring
+
+Production systems must maintain security-relevant audit logs appropriate to their risk classification.
+
+Logs must be protected against unauthorized modification and retained according to applicable retention requirements.
+
+## 8. Exceptions
+
+Policy exceptions require documented business justification, risk assessment, compensating controls, and approval from the designated security authority.
+
+## 9. Enforcement
+
+Violations of this policy may result in access restrictions, mandatory remediation, disciplinary action, contractual remedies, or other measures permitted by applicable organizational policies.
+
+## 10. Revision History
+
+Version 4.2 - 2026-07-01 - Updated authentication and logging requirements.
+Version 4.1 - 2025-07-15 - Updated data classification definitions.
+Version 4.0 - 2024-06-30 - Major policy revision.

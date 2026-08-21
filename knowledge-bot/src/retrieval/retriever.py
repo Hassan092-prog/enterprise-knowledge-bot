@@ -141,7 +141,7 @@ class Retriever:
     # INGESTION ORCHESTRATION
     # ──────────────────────────────────────────────────────────────────
 
-    def ingest_file(self, file_path: str | Path) -> IngestResult:
+    def ingest_file(self, file_path: str | Path, user_id: Optional[int] = None, is_global: bool = False) -> IngestResult:
         """
         Full ingestion pipeline: parse → chunk → embed → store.
 
@@ -179,11 +179,11 @@ class Retriever:
 
         # ── Step 3: Check if already indexed ───────────────────────
         # list_sources() returns filenames currently in the vector store
-        already_existed = file_path.name in self._store.list_sources()
+        already_existed = file_path.name in self._store.list_sources(user_id=user_id)
 
         # ── Step 4: Store embeddings ────────────────────────────────
         # add_documents() is idempotent — skips existing chunk_ids
-        chunks_added = self._store.add_documents(chunks)
+        chunks_added = self._store.add_documents(chunks, user_id=user_id, is_global=is_global)
 
         logger.info(
             "Ingestion complete: '%s' → %d/%d chunks added "
@@ -199,7 +199,7 @@ class Retriever:
             already_existed=already_existed,
         )
 
-    def delete_document(self, source_filename: str) -> int:
+    def delete_document(self, source_filename: str, user_id: int) -> int:
         """
         Remove all chunks for a document from the vector store.
 
@@ -209,7 +209,7 @@ class Retriever:
         Returns:
             Number of chunks deleted.
         """
-        deleted = self._store.delete_source(source_filename)
+        deleted = self._store.delete_source(source_filename, user_id=user_id)
         logger.info("Deleted document '%s' (%d chunks)", source_filename, deleted)
         return deleted
 
@@ -220,6 +220,7 @@ class Retriever:
     def retrieve(
         self,
         query: str,
+        user_id: int,
         k: Optional[int] = None,
         source_filter: Optional[str] = None,
         use_mmr: bool = True,
@@ -266,12 +267,14 @@ class Retriever:
             query=query,
             k=n_candidates,
             source_filter=source_filter,
+            user_id=user_id,
         )
         
         bm25_candidates = self._store.search_bm25(
             query=query,
             k=n_candidates,
             source_filter=source_filter,
+            user_id=user_id,
         )
         
         # Combine using Reciprocal Rank Fusion (RRF)
@@ -438,13 +441,17 @@ class Retriever:
     # CONVENIENCE METHODS
     # ──────────────────────────────────────────────────────────────────
 
-    def get_knowledge_base_stats(self) -> dict:
-        """Return stats about the current knowledge base."""
-        return self._store.get_stats()
+    def get_knowledge_base_stats(self, user_id: int) -> dict:
+        """Return stats about the current knowledge base for a specific user."""
+        return self._store.get_stats(user_id=user_id)
 
-    def list_sources(self) -> List[str]:
-        """Return sorted list of indexed document filenames."""
-        return self._store.list_sources()
+    def list_sources(self, user_id: int) -> List[str]:
+        """Return sorted list of indexed document filenames for a user."""
+        return self._store.list_sources(user_id=user_id)
+
+    def list_sources_by_type(self, user_id: int) -> dict:
+        """Return sources grouped by personal vs global."""
+        return self._store.list_sources_by_type(user_id=user_id)
 
     def is_ready(self) -> bool:
         """Return True if the knowledge base has at least one document."""

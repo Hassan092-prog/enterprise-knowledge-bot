@@ -1,15 +1,32 @@
 services:
+  db:
+    image: postgres:15-alpine
+    container_name: knowledge-bot-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: chatdb
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./knowledge-bot/db_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
   backend:
     build:
       context: ./knowledge-bot
       dockerfile: Dockerfile
     container_name: knowledge-bot-backend
+    depends_on:
+      - db
     ports:
       - "8000:8000"
     volumes:
       - ./knowledge-bot/data:/app/data
     env_file:
       - ./knowledge-bot/.env
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@db:5432/chatdb
     restart: unless-stopped
 
   frontend:

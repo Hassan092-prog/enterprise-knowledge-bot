@@ -1,99 +1,36 @@
-# Multi-Format Enterprise Knowledge Bot
+# Knowledge Bot Backend API
 
-A production-grade RAG (Retrieval-Augmented Generation) system that allows users to upload enterprise documents (PDFs, DOCX, TXT, CSV) and ask natural language questions. The AI returns precise, cited answers grounded in the uploaded documents.
+The core RAG (Retrieval-Augmented Generation) engine and REST API for the Enterprise Knowledge Bot.
 
-Built as part of a deep-dive AI engineering curriculum at MJCET.
+## Overview
+This FastAPI service handles all the heavy lifting:
+- **Authentication:** JWT issuance and validation.
+- **Document Processing:** Loading PDFs, Word Docs, TXTs, and CSVs.
+- **Chunking & Embedding:** Splitting documents into smaller semantic chunks and converting them into dense vectors.
+- **Vector Database:** Interfacing with ChromaDB to store and retrieve vectors.
+- **LLM Integration:** Formatting retrieved context and querying Mistral or OpenAI models for the final answer.
+- **Role-Based Access Control:** Ensuring users only query documents they own, or global documents managed by Admins.
 
----
+## Stack
+- **Framework:** FastAPI
+- **Database:** PostgreSQL (via SQLAlchemy)
+- **Vector Store:** ChromaDB
+- **LLM Framework:** LangChain
 
-## What It Does
+## Key Components
 
-- Upload multiple documents in different formats (including OCR for scanned PDFs via Tesseract)
-- Ask questions in plain English
-- Receive answers with exact source citations (document name + page number)
-- Handles long documents that exceed LLM context windows
-- Supports both OpenAI (GPT-4) and Mistral (open-source, free)
-- Modern, scalable architecture with a Next.js frontend and FastAPI backend
+### `api/`
+Contains the REST endpoints:
+- `auth.py`: Login and Registration endpoints.
+- `admin.py`: Endpoints for managing Global Documents and viewing stats.
+- `main.py`: Core endpoints for chat sessions, document uploads, and querying.
+- `dependencies.py`: Dependency injection for JWT validation and RBAC.
 
-## System Architecture
+### `src/`
+Contains the business logic:
+- `ingestion/`: Logic for parsing files (`document_loader.py`) and splitting text (`chunker.py`).
+- `retrieval/`: Logic for storing/querying vectors (`vector_store.py`) and orchestrating the RAG pipeline (`retriever.py`).
+- `models.py`: SQLAlchemy database schemas.
 
-```
-Documents → Parser (OCR enabled) → Chunker → Embeddings → ChromaDB
-                                                              ↓
-User Query → Query Embedding → Semantic Search → Re-ranker
-                                                              ↓
-                                     Context + Prompt → LLM → Cited Answer
-```
-
-## Tech Stack
-
-| Component | Technology | Why |
-|---|---|---|
-| Frontend | Next.js / React | Modern, responsive UI |
-| Backend API | FastAPI | High-performance Python web framework |
-| LLM | GPT-4o-mini / Mistral | Answer generation |
-| Embeddings | text-embedding-3-small | Semantic representation |
-| Vector DB | ChromaDB | Fast similarity search |
-| Framework | LangChain | RAG pipeline orchestration |
-| Containerization | Docker & Docker Compose | Easy, reproducible deployment |
-| Language | Python 3.11+ / TypeScript | Industry standards |
-
-## Setup
-
-The easiest way to run the application is using Docker Compose.
-
-**1. Clone the repository**
-```bash
-git clone https://github.com/yourusername/knowledge-bot.git
-cd knowledge-bot
-```
-
-**2. Set up environment variables**
-```bash
-cp knowledge-bot/.env.example knowledge-bot/.env
-# Edit knowledge-bot/.env and add your OpenAI API key
-```
-
-**3. Run the application with Docker Compose**
-```bash
-docker-compose up --build
-```
-This will start the backend on port `8000` and the frontend on port `3000`.
-
-**4. Access the App**
-Open your browser and navigate to `http://localhost:3000`.
-
-## Project Structure
-
-```
-.
-├── docker-compose.yml       # Orchestrates frontend and backend containers
-├── frontend/                # Next.js web application
-│   ├── app/
-│   ├── public/
-│   ├── package.json
-│   └── Dockerfile
-├── knowledge-bot/           # FastAPI backend & RAG logic
-│   ├── api/                 # FastAPI endpoints
-│   ├── src/                 # RAG pipeline logic (ingestion, retrieval, generation)
-│   ├── data/                # Uploads & ChromaDB index (gitignored)
-│   ├── tests/               # Unit tests
-│   ├── Dockerfile           # Backend container setup (includes Tesseract OCR)
-│   ├── requirements.txt     
-│   └── .env.example         
-└── README.md
-```
-
-## Key Concepts Demonstrated
-
-- **RAG Pipeline**: Full retrieval-augmented generation from scratch
-- **Chunking Strategy**: Recursive character splitting with overlap
-- **Semantic Search**: Cosine similarity over dense embeddings
-- **Prompt Engineering**: Context injection with citation prompting
-- **Production Patterns**: Dockerization, REST APIs (FastAPI), separated Frontend (Next.js), OCR integration.
-
-## Author
-
-Built by Mohammed Hassan — B.E. AIML, MJCET Hyderabad  
-GitHub: https://github.com/Hassan092-prog  
-LinkedIn: https://www.linkedin.com/in/mohammed-hassan-4b7046314/
+## Configuration
+All configuration is handled via environment variables (usually passed in by Docker Compose). See `.env.example` for details.
