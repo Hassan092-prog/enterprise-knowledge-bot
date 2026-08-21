@@ -13,8 +13,25 @@ type Stats = {
   documents: string[];
 };
 
+type RoleRequest = {
+  id: number;
+  user_id: number;
+  username: string;
+  requested_role: string;
+  created_at: string;
+};
+
+type UserData = {
+  id: number;
+  username: string;
+  role: string;
+  created_at: string;
+};
+
 export default function AdminDashboard() {
   const [stats, setStats] = useState<Stats | null>(null);
+  const [requests, setRequests] = useState<RoleRequest[]>([]);
+  const [users, setUsers] = useState<UserData[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   
@@ -45,6 +62,16 @@ export default function AdminDashboard() {
       if (res.ok) {
         const data = await res.json();
         setStats(data);
+      }
+      
+      const reqRes = await authFetch(`${API_URL}/admin/requests`);
+      if (reqRes.ok) {
+        setRequests(await reqRes.json());
+      }
+      
+      const usersRes = await authFetch(`${API_URL}/admin/users`);
+      if (usersRes.ok) {
+        setUsers(await usersRes.json());
       }
     } catch (err: unknown) {
       if (err instanceof Error) {
@@ -101,6 +128,32 @@ export default function AdminDashboard() {
     } catch (error) {
       console.error("Delete error:", error);
     }
+  };
+
+  const handleApprove = async (id: number) => {
+    try {
+      const res = await authFetch(`${API_URL}/admin/requests/${id}/approve`, { method: "POST" });
+      if (res.ok) await fetchStats();
+    } catch (err) { console.error(err); }
+  };
+
+  const handleReject = async (id: number) => {
+    try {
+      const res = await authFetch(`${API_URL}/admin/requests/${id}/reject`, { method: "POST" });
+      if (res.ok) await fetchStats();
+    } catch (err) { console.error(err); }
+  };
+
+  const handleChangeRole = async (userId: number, role: string) => {
+    try {
+      const res = await authFetch(`${API_URL}/admin/users/${userId}/role`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role })
+      });
+      if (res.ok) await fetchStats();
+      else alert("Failed to change role");
+    } catch (err) { console.error(err); }
   };
 
   return (
@@ -180,6 +233,66 @@ export default function AdminDashboard() {
               ))}
             </ul>
           )}
+        </div>
+
+        {/* ROLE REQUESTS */}
+        <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-xl">
+          <h2 className="text-lg font-bold text-slate-200 mb-6">Pending Role Requests</h2>
+          {requests.length === 0 ? (
+            <div className="text-center py-6 border border-dashed border-slate-700 rounded-xl bg-slate-900/20 text-slate-500 text-sm">
+              No pending requests.
+            </div>
+          ) : (
+            <ul className="space-y-3">
+              {requests.map((req) => (
+                <li key={req.id} className="flex items-center justify-between p-4 rounded-xl bg-slate-900/50 border border-slate-700">
+                  <div>
+                    <div className="font-medium text-slate-200">User: {req.username}</div>
+                    <div className="text-xs text-slate-400">Requested Role: <span className="text-cyan-400 font-semibold uppercase">{req.requested_role}</span></div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={() => handleApprove(req.id)} className="px-3 py-1 bg-green-600/20 hover:bg-green-600/40 text-green-400 border border-green-600/50 rounded transition text-sm">Approve</button>
+                    <button onClick={() => handleReject(req.id)} className="px-3 py-1 bg-red-600/20 hover:bg-red-600/40 text-red-400 border border-red-600/50 rounded transition text-sm">Reject</button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        {/* USER MANAGEMENT */}
+        <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-xl">
+          <h2 className="text-lg font-bold text-slate-200 mb-6">User Management</h2>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="border-b border-slate-700 text-sm text-slate-400">
+                  <th className="pb-3 font-medium">Username</th>
+                  <th className="pb-3 font-medium">Joined</th>
+                  <th className="pb-3 font-medium">Role</th>
+                </tr>
+              </thead>
+              <tbody className="text-sm divide-y divide-slate-700/50">
+                {users.map(u => (
+                  <tr key={u.id} className="hover:bg-slate-700/20">
+                    <td className="py-3 text-slate-300 font-medium">{u.username}</td>
+                    <td className="py-3 text-slate-500">{new Date(u.created_at).toLocaleDateString()}</td>
+                    <td className="py-3">
+                      <select 
+                        value={u.role} 
+                        onChange={(e) => handleChangeRole(u.id, e.target.value)}
+                        className="bg-slate-900 border border-slate-600 text-slate-300 rounded px-2 py-1 text-xs focus:outline-none focus:border-indigo-500"
+                      >
+                        <option value="user">User</option>
+                        <option value="editor">Editor</option>
+                        <option value="admin">Admin</option>
+                      </select>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
 
       </div>

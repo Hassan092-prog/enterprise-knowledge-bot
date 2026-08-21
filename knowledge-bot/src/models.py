@@ -9,7 +9,7 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String, unique=True, index=True)
     hashed_password = Column(String)
-    is_admin = Column(Integer, default=0) # Using Integer (0/1) for SQLite compatibility, or Boolean
+    role = Column(String, default="user") # 'user', 'editor', or 'admin'
     created_at = Column(DateTime, default=datetime.utcnow)
 
     sessions = relationship("ChatSession", back_populates="user", cascade="all, delete-orphan")
@@ -35,3 +35,14 @@ class ChatMessage(Base):
     timestamp = Column(DateTime, default=datetime.utcnow)
 
     session = relationship("ChatSession", back_populates="messages")
+
+class AccessRequest(Base):
+    __tablename__ = "access_requests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    requested_role = Column(String) # 'editor' or 'admin'
+    status = Column(String, default="pending") # 'pending', 'approved', 'rejected'
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    user = relationship("User")

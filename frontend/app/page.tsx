@@ -27,7 +27,9 @@ export default function Home() {
   const [globalDocuments, setGlobalDocuments] = useState<string[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
-  const [isAdmin, setIsAdmin] = useState(false);
+  const [userRole, setUserRole] = useState<string>("user");
+  const [pendingRequest, setPendingRequest] = useState<string | null>(null);
+  const [isRequestingRole, setIsRequestingRole] = useState(false);
   const [isGlobalDocsOpen, setIsGlobalDocsOpen] = useState(false);
   
   const [isUploading, setIsUploading] = useState(false);
@@ -76,7 +78,15 @@ export default function Home() {
       const res = await authFetch(`${API_URL}/auth/me`);
       if (res.ok) {
         const data = await res.json();
-        setIsAdmin(data.is_admin);
+        setUserRole(data.role || "user");
+      }
+      
+      const reqRes = await authFetch(`${API_URL}/auth/my_request`);
+      if (reqRes.ok) {
+        const reqData = await reqRes.json();
+        if (reqData) {
+            setPendingRequest(reqData.status === "pending" ? reqData.requested_role : null);
+        }
       }
     } catch (error) {
       console.error("Failed to fetch user profile:", error);
@@ -160,6 +170,54 @@ export default function Home() {
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
       }
+    }
+  };
+
+  const handleGlobalUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsUploading(true);
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const res = await authFetch(`${API_URL}/admin/upload_global`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (res.ok) {
+        await fetchDocuments();
+      } else {
+        const err = await res.json();
+        alert(`Global Upload failed: ${err.detail}`);
+      }
+    } catch (error) {
+      console.error("Upload error:", error);
+      alert("Failed to connect to backend for global upload.");
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  const handleRoleRequest = async (role: string) => {
+    try {
+      const res = await authFetch(`${API_URL}/auth/request_role`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role }),
+      });
+      if (res.ok) {
+        setPendingRequest(role);
+        setIsRequestingRole(false);
+        alert(`Requested ${role} access successfully!`);
+      } else {
+        const err = await res.json();
+        alert(`Request failed: ${err.detail}`);
+      }
+    } catch (error) {
+        console.error("Role request error:", error);
     }
   };
 
@@ -285,13 +343,26 @@ export default function Home() {
             <p className="text-sm text-slate-500 mt-1">Multi-format knowledge base</p>
           </div>
           <div className="flex flex-col gap-2">
-            {isAdmin && (
+            {userRole === "admin" && (
               <button
                 onClick={() => router.push("/admin")}
                 className="text-xs bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-500/50 text-indigo-300 px-2 py-1 rounded transition"
               >
                 Admin
               </button>
+            )}
+            {userRole === "user" && !pendingRequest && (
+               <button
+                onClick={() => setIsRequestingRole(true)}
+                className="text-xs bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/50 text-cyan-300 px-2 py-1 rounded transition"
+               >
+                 Request Access
+               </button>
+            )}
+            {pendingRequest && (
+               <button disabled className="text-xs bg-slate-800 text-slate-500 border border-slate-700 px-2 py-1 rounded cursor-not-allowed">
+                 {pendingRequest} Pending...
+               </button>
             )}
             <button
               onClick={() => {
@@ -389,6 +460,24 @@ export default function Home() {
                   ))}
                 </ul>
               )
+            )}
+            {isGlobalDocsOpen && (userRole === "admin" || userRole === "editor") && (
+              <div className="mt-2">
+                <input
+                  type="file"
+                  id="globalUpload"
+                  onChange={handleGlobalUpload}
+                  className="hidden"
+                  accept=".txt,.pdf,.csv,.docx"
+                />
+                <button
+                  onClick={() => document.getElementById("globalUpload")?.click()}
+                  disabled={isUploading}
+                  className="w-full text-xs py-2 px-3 border border-indigo-500/30 text-indigo-300 hover:bg-indigo-500/10 rounded-lg transition"
+                >
+                  + Upload Global Doc
+                </button>
+              </div>
             )}
           </div>
         </div>
@@ -488,6 +577,45 @@ export default function Home() {
           </div>
         </div>
       </div>
+
+      {/* ROLE REQUEST MODAL */}
+      {isRequestingRole && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl max-w-md w-full shadow-2xl">
+            <h2 className="text-xl font-bold text-slate-100 mb-2">Request Elevated Access</h2>
+            <p className="text-sm text-slate-400 mb-6">
+              Select the role you need. An administrator will review your request.
+            </p>
+            
+            <div className="space-y-3">
+              <button
+                onClick={() => handleRoleRequest("editor")}
+                className="w-full text-left p-4 rounded-xl border border-slate-700 bg-slate-800 hover:border-cyan-500 hover:bg-slate-800/80 transition group"
+              >
+                <div className="font-semibold text-cyan-400 group-hover:text-cyan-300">Editor</div>
+                <div className="text-xs text-slate-400 mt-1">Can upload and manage Global Documents for all users.</div>
+              </button>
+              
+              <button
+                onClick={() => handleRoleRequest("admin")}
+                className="w-full text-left p-4 rounded-xl border border-slate-700 bg-slate-800 hover:border-indigo-500 hover:bg-slate-800/80 transition group"
+              >
+                <div className="font-semibold text-indigo-400 group-hover:text-indigo-300">Admin</div>
+                <div className="text-xs text-slate-400 mt-1">Full system access, role management, and analytics.</div>
+              </button>
+            </div>
+            
+            <div className="mt-6 flex justify-end">
+              <button
+                onClick={() => setIsRequestingRole(false)}
+                className="px-4 py-2 text-sm text-slate-400 hover:text-slate-200 transition"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

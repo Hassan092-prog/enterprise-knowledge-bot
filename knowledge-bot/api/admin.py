@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
+from pydantic import BaseModel
 from pathlib import Path
 
-from src.models import User, ChatSession, ChatMessage
-from api.dependencies import get_db, get_current_admin_user
+from src.models import User, ChatSession, ChatMessage, AccessRequest
+from api.dependencies import get_db, get_current_admin_user, get_current_editor_user
 from src.config import UPLOAD_DIR, MAX_FILE_SIZE_MB, SUPPORTED_EXTENSIONS
 
 
@@ -27,7 +28,7 @@ def get_admin_stats(db: Session = Depends(get_db), current_user: User = Depends(
     }
 
 @router.post("/upload_global")
-async def upload_global_document(file: UploadFile = File(...), current_user: User = Depends(get_current_admin_user)):
+async def upload_global_document(file: UploadFile = File(...), current_user: User = Depends(get_current_editor_user)):
     from api.main import retriever
     if not retriever:
         raise HTTPException(status_code=500, detail="Retriever not initialized")
@@ -54,7 +55,7 @@ async def upload_global_document(file: UploadFile = File(...), current_user: Use
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/documents_global/{filename}")
-def delete_global_document(filename: str, current_user: User = Depends(get_current_admin_user)):
+def delete_global_document(filename: str, current_user: User = Depends(get_current_editor_user)):
     from api.main import retriever
     if not retriever:
         raise HTTPException(status_code=500, detail="Retriever not initialized")
@@ -64,15 +65,21 @@ def delete_global_document(filename: str, current_user: User = Depends(get_curre
         raise HTTPException(status_code=404, detail="Document not found or could not be deleted")
     return {"status": "deleted", "filename": filename}
 
-@router.post("/promote/{username}")
-def promote_user(username: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_admin_user)):
-    user = db.query(User).filter(User.username == username).first()
+class RoleChangeRequest(BaseModel):
+    role: str
+
+@router.post("/users/{user_id}/role")
+def change_user_role(user_id: int, role_req: RoleChangeRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_admin_user)):
+    if role_req.role not in ["user", "editor", "admin"]:
+        raise HTTPException(status_code=400, detail="Invalid role")
+        
+    user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    user.is_admin = 1
+    user.role = role_req.role
     db.commit()
-    return {"status": "success", "message": f"User {username} promoted to admin"}
+    return {"status": "success", "message": f"User {user.username} role changed to {role_req.role}"}
 
 @router.post("/make_me_admin")
 def make_me_admin(db: Session = Depends(get_db)):
@@ -80,7 +87,49 @@ def make_me_admin(db: Session = Depends(get_db)):
     # We just make the first user an admin
     user = db.query(User).first()
     if user:
-        user.is_admin = 1
+        user.role = "admin"
         db.commit()
         return {"status": "success"}
     return {"status": "failed", "detail": "No users exist yet"}
+
+@router.get("/requests")
+def get_requests(db: Session = Depends(get_db), current_user: User = Depends(get_current_admin_user)):
+    requests = db.query(AccessRequest).filter(AccessRequest.status == "pending").all()
+    return [{
+        "id": req.id,
+        "user_id": req.user_id,
+        "username": req.user.username,
+        "requested_role": req.requested_role,
+        "created_at": req.created_at
+    } for req in requests]
+
+@router.post("/requests/{request_id}/approve")
+def approve_request(request_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_admin_user)):
+    req = db.query(AccessRequest).filter(AccessRequest.id == request_id).first()
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+    
+    req.status = "approved"
+    req.user.role = req.requested_role
+    db.commit()
+    return {"status": "success"}
+
+@router.post("/requests/{request_id}/reject")
+def reject_request(request_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_admin_user)):
+    req = db.query(AccessRequest).filter(AccessRequest.id == request_id).first()
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+    
+    req.status = "rejected"
+    db.commit()
+    return {"status": "success"}
+
+@router.get("/users")
+def get_users(db: Session = Depends(get_db), current_user: User = Depends(get_current_admin_user)):
+    users = db.query(User).all()
+    return [{
+        "id": u.id,
+        "username": u.username,
+        "role": u.role,
+        "created_at": u.created_at
+    } for u in users]
