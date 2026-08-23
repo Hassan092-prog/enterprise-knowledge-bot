@@ -2,8 +2,11 @@
 
 import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import toast from 'react-hot-toast';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://192.168.1.92:8000";
 
@@ -34,6 +37,11 @@ export default function Home() {
   
   const [isUploading, setIsUploading] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
+  
+  // Mention menu states
+  const [showMentionMenu, setShowMentionMenu] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState("");
+  const [mentionIndex, setMentionIndex] = useState(0);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -142,6 +150,36 @@ export default function Home() {
     }
   };
 
+  const handleDeleteSession = async (sessionId: number) => {
+    try {
+      const res = await authFetch(`${API_URL}/sessions/${sessionId}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        toast.success("Chat deleted");
+        if (activeSessionId === sessionId) {
+          setActiveSessionId(null);
+        }
+        await fetchSessions();
+      }
+    } catch (error) {
+      console.error("Delete session error:", error);
+    }
+  };
+
+  const handleUpdateSessionTitle = async (sessionId: number, newTitle: string) => {
+    try {
+      await authFetch(`${API_URL}/sessions/${sessionId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: newTitle }),
+      });
+      fetchSessions();
+    } catch (error) {
+      console.error("Update title error:", error);
+    }
+  };
+
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -157,14 +195,15 @@ export default function Home() {
       });
 
       if (res.ok) {
+        toast.success("Document uploaded successfully");
         await fetchDocuments();
       } else {
         const err = await res.json();
-        alert(`Upload failed: ${err.detail}`);
+        toast.error(`Upload failed: ${err.detail}`);
       }
     } catch (error) {
       console.error("Upload error:", error);
-      alert("Failed to connect to backend for upload.");
+      toast.error("Failed to connect to backend for upload.");
     } finally {
       setIsUploading(false);
       if (fileInputRef.current) {
@@ -188,14 +227,15 @@ export default function Home() {
       });
 
       if (res.ok) {
+        toast.success("Global document uploaded successfully");
         await fetchDocuments();
       } else {
         const err = await res.json();
-        alert(`Global Upload failed: ${err.detail}`);
+        toast.error(`Global Upload failed: ${err.detail}`);
       }
     } catch (error) {
       console.error("Upload error:", error);
-      alert("Failed to connect to backend for global upload.");
+      toast.error("Failed to connect to backend for global upload.");
     } finally {
       setIsUploading(false);
     }
@@ -211,10 +251,10 @@ export default function Home() {
       if (res.ok) {
         setPendingRequest(role);
         setIsRequestingRole(false);
-        alert(`Requested ${role} access successfully!`);
+        toast.success(`Requested ${role} access successfully!`);
       } else {
         const err = await res.json();
-        alert(`Request failed: ${err.detail}`);
+        toast.error(`Request failed: ${err.detail}`);
       }
     } catch (error) {
         console.error("Role request error:", error);
@@ -223,14 +263,19 @@ export default function Home() {
 
   const handleDelete = async (filename: string) => {
     try {
-      const res = await authFetch(`${API_URL}/documents/${filename}`, {
+      const res = await authFetch(`${API_URL}/documents/${encodeURIComponent(filename)}`, {
         method: "DELETE",
       });
       if (res.ok) {
+        toast.success("Document deleted");
         await fetchDocuments();
+      } else {
+        const err = await res.json();
+        toast.error(`Delete failed: ${err.detail || "Unknown error"}`);
       }
     } catch (error) {
       console.error("Delete error:", error);
+      toast.error("Failed to connect to backend for deletion.");
     }
   };
 
@@ -262,6 +307,33 @@ export default function Home() {
     }
   }, [activeSessionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setInput(val);
+
+    const match = val.match(/!([\w\.,_-]*)$/);
+    if (match) {
+      setShowMentionMenu(true);
+      setMentionQuery(match[1]);
+      setMentionIndex(0);
+    } else {
+      setShowMentionMenu(false);
+    }
+  };
+
+  const handleSelectMention = (doc: string) => {
+    const match = input.match(/!([\w\.,_-]*)$/);
+    if (match) {
+      const newInput = input.substring(0, match.index) + "!" + doc + " ";
+      setInput(newInput);
+      setShowMentionMenu(false);
+    }
+  };
+
+  const filteredDocs = [...documents, ...globalDocuments].filter(d => 
+    d.toLowerCase().includes(mentionQuery.toLowerCase())
+  );
+
   const handleSend = async () => {
     if (!input.trim()) return;
     
@@ -276,11 +348,23 @@ export default function Home() {
 
     const userQuery = input.trim();
     setInput("");
+    
+    const isFirstMessage = messages.length <= 1;
+    
     setMessages((prev) => [...prev, { role: "user", content: userQuery }]);
     setIsTyping(true);
 
     // Placeholder for assistant response
     setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+
+    if (isFirstMessage) {
+        let generatedTitle = userQuery.split(" ").slice(0, 4).join(" ");
+        if (generatedTitle.length > 35) {
+            generatedTitle = generatedTitle.substring(0, 32);
+        }
+        generatedTitle += (userQuery.length > generatedTitle.length ? "..." : "");
+        handleUpdateSessionTitle(currentSessionId, generatedTitle);
+    }
 
     try {
       const res = await authFetch(`${API_URL}/query`, {
@@ -389,16 +473,25 @@ export default function Home() {
            
            <ul className="space-y-1">
               {sessions.map((session) => (
-                <li key={session.id}>
+                <li key={session.id} className="group relative">
                     <button 
                         onClick={() => setActiveSessionId(session.id)}
-                        className={`w-full text-left p-2 rounded text-sm truncate transition-colors ${
+                        className={`w-full text-left p-2 rounded text-sm truncate transition-colors pr-8 ${
                             activeSessionId === session.id 
                                 ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30" 
                                 : "text-slate-400 hover:bg-slate-800/50 hover:text-slate-200 border border-transparent"
                         }`}
                     >
-                        💬 Chat #{session.id} - {new Date(session.created_at).toLocaleDateString()}
+                        💬 {session.title || `Chat #${session.id}`}
+                    </button>
+                    <button
+                      onClick={() => handleDeleteSession(session.id)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity p-1"
+                      title="Delete Chat"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                        <path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 006 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 10.23 1.482l.149-.022.841 10.518A2.75 2.75 0 007.596 19h4.807a2.75 2.75 0 002.742-2.53l.841-10.52.149.023a.75.75 0 00.23-1.482A41.03 41.03 0 0014 4.193V3.75A2.75 2.75 0 0011.25 1h-2.5zM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4zM8.58 7.72a.75.75 0 00-1.5.06l.3 7.5a.75.75 0 101.5-.06l-.3-7.5zm4.34.06a.75.75 0 10-1.5-.06l-.3 7.5a.75.75 0 101.5.06l.3-7.5z" clipRule="evenodd" />
+                      </svg>
                     </button>
                 </li>
               ))}
@@ -424,10 +517,12 @@ export default function Home() {
                   </span>
                   <button
                     onClick={() => handleDelete(doc)}
-                    className="text-slate-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                    className="text-slate-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity p-1"
                     title="Remove document"
                   >
-                    ✕
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                      <path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 006 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 10.23 1.482l.149-.022.841 10.518A2.75 2.75 0 007.596 19h4.807a2.75 2.75 0 002.742-2.53l.841-10.52.149.023a.75.75 0 00.23-1.482A41.03 41.03 0 0014 4.193V3.75A2.75 2.75 0 0011.25 1h-2.5zM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4zM8.58 7.72a.75.75 0 00-1.5.06l.3 7.5a.75.75 0 101.5-.06l-.3-7.5zm4.34.06a.75.75 0 10-1.5-.06l-.3 7.5a.75.75 0 101.5.06l.3-7.5z" clipRule="evenodd" />
+                    </svg>
                   </button>
                 </li>
               ))}
@@ -523,7 +618,28 @@ export default function Home() {
               >
                 <div className={`whitespace-pre-wrap leading-relaxed text-sm md:text-base ${msg.role === "assistant" ? "markdown-body" : ""}`}>
                   {msg.role === "assistant" ? (
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    <ReactMarkdown 
+                      remarkPlugins={[remarkGfm]}
+                      components={{
+                        code({node, inline, className, children, ...props}: any) {
+                          const match = /language-(\w+)/.exec(className || '')
+                          return !inline && match ? (
+                            <SyntaxHighlighter
+                              {...props}
+                              style={vscDarkPlus}
+                              language={match[1]}
+                              PreTag="div"
+                            >
+                              {String(children).replace(/\n$/, '')}
+                            </SyntaxHighlighter>
+                          ) : (
+                            <code {...props} className={className}>
+                              {children}
+                            </code>
+                          )
+                        }
+                      }}
+                    >
                       {msg.content}
                     </ReactMarkdown>
                   ) : (
@@ -548,13 +664,56 @@ export default function Home() {
         {/* INPUT AREA */}
         <div className="p-6 bg-transparent z-10 relative">
           <div className="max-w-4xl mx-auto relative group">
+            
+            {/* AUTOCOMPLETE MENU */}
+            {showMentionMenu && filteredDocs.length > 0 && (
+              <div className="absolute bottom-full left-0 mb-4 w-full max-w-md bg-slate-800 border border-slate-700 rounded-xl shadow-2xl overflow-hidden z-50 animate-in fade-in slide-in-from-bottom-2">
+                <div className="px-3 py-2 bg-slate-900/50 border-b border-slate-700 text-xs font-semibold text-slate-400 uppercase">
+                  Select a document
+                </div>
+                <ul className="max-h-60 overflow-y-auto custom-scrollbar">
+                  {filteredDocs.map((doc, idx) => (
+                    <li key={idx}>
+                      <button
+                        onClick={() => handleSelectMention(doc)}
+                        className={`w-full text-left px-4 py-3 text-sm transition-colors flex items-center gap-2 ${
+                          mentionIndex === idx 
+                            ? "bg-indigo-600 text-white" 
+                            : "text-slate-300 hover:bg-slate-700 hover:text-white"
+                        }`}
+                      >
+                        📄 {doc}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
             <div className="absolute -inset-1 bg-gradient-to-r from-indigo-500 to-cyan-500 rounded-2xl blur opacity-25 group-hover:opacity-40 transition duration-1000 group-hover:duration-200"></div>
             <div className="relative flex items-center bg-slate-800 border border-slate-700 rounded-2xl overflow-hidden shadow-2xl">
               <input
                 type="text"
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
+                onChange={handleInputChange}
                 onKeyDown={(e) => {
+                  if (showMentionMenu && filteredDocs.length > 0) {
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      setMentionIndex((prev) => Math.min(prev + 1, filteredDocs.length - 1));
+                      return;
+                    }
+                    if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      setMentionIndex((prev) => Math.max(prev - 1, 0));
+                      return;
+                    }
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      handleSelectMention(filteredDocs[mentionIndex]);
+                      return;
+                    }
+                  }
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
                     handleSend();

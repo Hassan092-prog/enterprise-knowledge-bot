@@ -71,6 +71,7 @@ from sentence_transformers import CrossEncoder
 
 from src.ingestion.chunker import chunk_documents, get_chunk_stats
 from src.ingestion.document_loader import load_document
+from src.retrieval.summarizer import generate_document_summary
 from src.logger import get_logger
 from src.retrieval.vector_store import VectorStore
 from src.config import RETRIEVAL_TOP_K
@@ -175,6 +176,20 @@ class Retriever:
 
         # ── Step 2: Chunk the document ──────────────────────────────
         chunks = chunk_documents(documents)
+        
+        # ── Step 2.5: Generate and add summary chunk ────────────────
+        if not file_path.name.lower().endswith(".csv"):
+            summary_text = generate_document_summary(documents)
+            summary_chunk = Document(
+                page_content=f"EXECUTIVE SUMMARY OF {file_path.name}:\n{summary_text}",
+                metadata={
+                    "source": file_path.name,
+                    "is_summary": True,
+                    "chunk_id": f"{file_path.stem}_chunk_summary"
+                }
+            )
+            chunks.append(summary_chunk)
+            
         stats  = get_chunk_stats(chunks)
 
         # ── Step 3: Check if already indexed ───────────────────────

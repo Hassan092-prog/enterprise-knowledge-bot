@@ -427,10 +427,10 @@ class VectorStore:
         Returns:
             Number of chunks deleted.
         """
-        # Find all chunk IDs for this source
-        where = {"source": source_filename}
         if user_id is not None:
-            where["user_id"] = user_id
+            where = {"$and": [{"source": source_filename}, {"user_id": user_id}]}
+        else:
+            where = {"source": source_filename}
             
         results = self._collection.get(
             where=where,

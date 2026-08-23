@@ -13,6 +13,7 @@ langchain==0.3.7
 langchain-community==0.3.7
 langchain-openai==0.2.9
 langchain-mistralai==0.2.3
+langchain-experimental==0.3.3
 
 # ── Vector database ───────────────────────────────────────────────────────
 chromadb==0.5.20

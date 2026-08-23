@@ -1,0 +1,21 @@
+Employee_ID,Full_Name,Department,Role,Region,Office_Location,Q1_Revenue_USD,Q2_Revenue_USD,Q3_Revenue_USD,YTD_Expenses_USD,Tenure_Years,Performance_Rating,Status
+EMP-8834,Aarav Sharma,Enterprise Sales,Account Executive,APAC,Hyderabad,125000,132000,145000,45000,5.2,Exceeds Expectations,Active
+EMP-8835,Priya Reddy,Field Marketing,Regional Director,APAC,Bengaluru,0,0,0,138000,3.8,Meets Expectations,Active
+EMP-8836,Rahul Kumar,Enterprise Sales,Senior AE,APAC,Chennai,145000,158000,162000,52000,7.1,Outstanding,Active
+EMP-8837,Ananya Singh,Corporate Finance,Financial Analyst,APAC,Hyderabad,0,0,0,32000,4.0,Meets Expectations,Active
+EMP-8838,Vikram Patel,Enterprise Sales,VP of Sales,APAC,Mumbai,462000,481000,510000,161000,8.5,Outstanding,Active
+EMP-8839,Neha Verma,Product Marketing,PMM,APAC,Delhi,0,0,0,47000,5.0,Exceeds Expectations,Active
+EMP-8840,Arjun Rao,Information Technology,Systems Engineer,APAC,Pune,0,0,0,29000,2.1,Meets Expectations,Active
+EMP-8841,Sneha Iyer,SMB Sales,Account Executive,APAC,Bengaluru,84000,91000,88000,29000,6.3,Exceeds Expectations,Active
+EMP-8842,Karan Mehta,Corporate Finance,Controller,APAC,Mumbai,0,0,0,35000,4.7,Meets Expectations,Active
+EMP-8843,Divya Nair,Demand Generation,Campaign Manager,APAC,Chennai,0,0,0,81000,3.2,Exceeds Expectations,Active
+EMP-8844,Rohan Das,Information Technology,Security Analyst,APAC,Hyderabad,0,0,0,31000,5.8,Meets Expectations,Active
+EMP-8845,Meera Joshi,Enterprise Sales,Account Executive,APAC,Delhi,156000,164000,172000,58000,9.1,Outstanding,Active
+EMP-8846,Aditya Shah,Corporate Finance,FP&A Manager,APAC,Pune,0,0,0,37000,6.0,Meets Expectations,Active
+EMP-8847,Kavya Menon,Field Marketing,Event Coordinator,APAC,Bengaluru,0,0,0,44000,7.4,Meets Expectations,Active
+EMP-8848,Sanjay Gupta,Enterprise Sales,Account Executive,APAC,Mumbai,171000,185000,192000,65000,10.2,Outstanding,Active
+EMP-8849,Sarah Jenkins,Enterprise Sales,Account Executive,EMEA,London,210000,225000,240000,85000,3.1,Exceeds Expectations,Active
+EMP-8850,Marcus Weber,Engineering,Backend Lead,EMEA,Berlin,0,0,0,42000,4.5,Outstanding,Active
+EMP-8851,Elena Rossi,Customer Success,CSM,EMEA,Milan,0,0,0,28000,2.8,Meets Expectations,Active
+EMP-8852,David Chen,Enterprise Sales,Account Executive,NAMER,New York,315000,342000,380000,112000,6.7,Outstanding,Active
+EMP-8853,Jessica Alba,Customer Success,VP Customer Success,NAMER,San Francisco,0,0,0,145000,8.2,Exceeds Expectations,Active

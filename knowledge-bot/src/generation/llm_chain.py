@@ -46,7 +46,7 @@ from typing import Generator, List, Optional
 from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
+from src.llm_factory import get_llm
 from cachetools import TTLCache
 import hashlib
 
@@ -63,8 +63,6 @@ from src.config import (
     LLM_MAX_TOKENS,
     LLM_MODEL,
     LLM_TEMPERATURE,
-    OPENAI_API_KEY,
-    MISTRAL_API_KEY,
     LLM_PROVIDER,
 )
 from src.logger import get_logger
@@ -256,22 +254,7 @@ def _build_chain(streaming: bool = False):
     #   For creative tasks you'd set this higher (0.7-1.0).
     #   For enterprise Q&A over documents, 0.0 is always correct.
     # streaming=True  → enables token-by-token output in the UI
-    if LLM_PROVIDER == "mistral":
-        from langchain_mistralai import ChatMistralAI
-        llm = ChatMistralAI(
-            model=LLM_MODEL,
-            temperature=LLM_TEMPERATURE,
-            max_tokens=LLM_MAX_TOKENS,
-            mistral_api_key=MISTRAL_API_KEY,
-        )
-    else:
-        llm = ChatOpenAI(
-            model=LLM_MODEL,
-            temperature=LLM_TEMPERATURE,
-            max_tokens=LLM_MAX_TOKENS,
-            openai_api_key=OPENAI_API_KEY,
-            streaming=streaming,
-        )
+    llm = get_llm(streaming=streaming)
 
     # ── Output parser ─────────────────────────────────────────────────
     # StrOutputParser extracts .content from the AIMessage object.

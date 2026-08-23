@@ -2,4 +2,3 @@ node_modules/
 .next/
 .git/
 README.md
-.env*

@@ -1,0 +1,83 @@
+{
+  "extract_metadata": {
+    "extract_id": "MDM-CUST-EXT-9921",
+    "extract_timestamp": "2026-08-22T04:15:00Z",
+    "system_of_record": "Salesforce Enterprise",
+    "record_count": 5,
+    "classification": "Confidential"
+  },
+  "customers": [
+    {
+      "customer_id": "C-10001",
+      "company_name": "TechCorp Global Solutions",
+      "industry": "Information Technology",
+      "annual_revenue_tier": "Tier 1 (>$1B)",
+      "headquarters": {
+        "city": "San Francisco",
+        "state": "CA",
+        "country": "USA"
+      },
+      "account_manager": "EMP-8852",
+      "contract_status": "Active",
+      "renewal_date": "2027-03-15",
+      "products_subscribed": ["Cloud Infrastructure Pro", "Enterprise CyberSec Suite", "Data Analytics Max"]
+    },
+    {
+      "customer_id": "C-10002",
+      "company_name": "Nexus Retail Group",
+      "industry": "Retail & E-commerce",
+      "annual_revenue_tier": "Tier 2 ($500M - $1B)",
+      "headquarters": {
+        "city": "London",
+        "country": "UK"
+      },
+      "account_manager": "EMP-8849",
+      "contract_status": "Active",
+      "renewal_date": "2026-11-01",
+      "products_subscribed": ["Cloud Commerce Engine", "Customer Insights AI"]
+    },
+    {
+      "customer_id": "C-10003",
+      "company_name": "Apex Healthcare Partners",
+      "industry": "Healthcare",
+      "annual_revenue_tier": "Tier 1 (>$1B)",
+      "headquarters": {
+        "city": "Boston",
+        "state": "MA",
+        "country": "USA"
+      },
+      "account_manager": "EMP-8852",
+      "contract_status": "In Negotiation",
+      "renewal_date": "2026-09-30",
+      "products_subscribed": ["HIPAA Compliant Storage", "Telehealth Platform Services"]
+    },
+    {
+      "customer_id": "C-10004",
+      "company_name": "Starlight Logistics",
+      "industry": "Transportation",
+      "annual_revenue_tier": "Tier 3 (<$500M)",
+      "headquarters": {
+        "city": "Mumbai",
+        "country": "India"
+      },
+      "account_manager": "EMP-8848",
+      "contract_status": "Churned",
+      "renewal_date": "2025-12-31",
+      "products_subscribed": ["Fleet Tracking Basic"]
+    },
+    {
+      "customer_id": "C-10005",
+      "company_name": "Aurora Financial Services",
+      "industry": "Finance",
+      "annual_revenue_tier": "Tier 1 (>$1B)",
+      "headquarters": {
+        "city": "Frankfurt",
+        "country": "Germany"
+      },
+      "account_manager": "EMP-8850",
+      "contract_status": "Active",
+      "renewal_date": "2028-06-30",
+      "products_subscribed": ["Algorithmic Trading Core", "Enterprise CyberSec Suite", "Secure Ledger Pro"]
+    }
+  ]
+}

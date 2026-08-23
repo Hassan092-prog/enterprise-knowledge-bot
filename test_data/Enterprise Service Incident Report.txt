@@ -1,0 +1,40 @@
+POST-INCIDENT REPORT
+Document ID: PIR-2026-0814-API
+Classification: Internal - Confidential
+Date of Incident: August 14, 2026
+Status: Resolved
+
+1. INCIDENT OVERVIEW
+Service Affected: Enterprise Order Processing API (EOPA)
+Severity: SEV-1 (Critical Business Impact)
+Duration: 47 minutes (14:12 UTC - 14:59 UTC)
+Affected Regions: APAC and EMEA
+
+2. EXECUTIVE SUMMARY
+On August 14, 2026, the Enterprise Order Processing API experienced complete exhaustion of its database connection pool, resulting in a severe service degradation. Over the course of 47 minutes, a total of 18,742 incoming requests failed with HTTP 503 (Service Unavailable) errors, and 3,184 customer orders were delayed in the processing queue. The root cause was identified as a misconfigured auto-scaling rule deployed earlier that morning, which increased the maximum number of API worker nodes to 250 without a corresponding increase in the backend PostgreSQL connection pool limits. 
+
+3. IMPACT METRICS
+- Failed Requests: 18,742
+- Delayed Orders: 3,184
+- Customer Impact: 126 B2B enterprise customers reported timeouts.
+- Financial Impact: Estimated $215,000 in delayed revenue realization (all delayed orders successfully processed post-recovery).
+- Data Loss: 0 bytes (No permanent data loss occurred; transactions were safely rolled back).
+
+4. TIMELINE OF EVENTS (UTC)
+- 14:12: Datadog alerts trigger for elevated HTTP 503 error rates on the EOPA endpoints.
+- 14:15: PagerDuty notifies the on-call Site Reliability Engineer (SRE), Sarah Jenkins.
+- 14:22: SRE identifies that the database connection pool is sitting at 100% capacity (500/500 connections active).
+- 14:31: Incident Command Center established on Slack (#inc-2026-0814). SEV-1 declared.
+- 14:40: Temporary mitigation applied: The auto-scaling worker limit is manually capped back to 100 nodes. Connection pool begins to drain.
+- 14:45: Database connection limits safely expanded using PgBouncer configuration adjustments.
+- 14:59: API latency and error rates return to baseline. Incident marked Resolved.
+- 15:10 - 17:00: Asynchronous order queues processed and fully drained. All delayed orders fulfilled.
+
+5. ROOT CAUSE ANALYSIS
+A DevOps engineer deployed an update to the Kubernetes Horizontal Pod Autoscaler (HPA) rules for the EOPA service at 09:00 UTC. The update increased the `maxReplicas` from 100 to 250 to handle anticipated Black Friday load testing. However, the backend PostgreSQL database was strictly configured with a hard limit of 500 connections. When a natural traffic spike occurred at 14:12 UTC, the HPA scaled the workers to 150. Since each worker is configured to hold up to 5 concurrent connections, the total connection demand (750) instantly exceeded the database capacity (500), causing all subsequent connection requests to block and time out.
+
+6. CORRECTIVE ACTIONS
+- ACTION 1: Implement PgBouncer at the cluster level for robust connection multiplexing (Assigned to: Database Team, Due: Aug 20).
+- ACTION 2: Update the CI/CD deployment checklist to require cross-referencing worker limits with database capacity metrics prior to approval (Assigned to: DevOps, Due: Aug 18).
+- ACTION 3: Add synthetic load testing to the staging environment to simulate connection pool exhaustion (Assigned to: QA, Due: Aug 25).
+- ACTION 4: Review all Tier-1 microservices for similar vulnerable HPA configurations (Assigned to: Architecture Board, Due: Sep 01).
