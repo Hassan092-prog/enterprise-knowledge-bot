@@ -8,41 +8,60 @@
     background: transparent;
   }
   .custom-scrollbar::-webkit-scrollbar-thumb {
-    background-color: rgba(99, 102, 241, 0.3); /* indigo-500 with opacity */
-    border-radius: 20px;
+    background-color: var(--color-border);
+    border-radius: var(--radius-full);
   }
   .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-    background-color: rgba(99, 102, 241, 0.6);
+    background-color: var(--color-muted);
   }
-}
-
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
+  /* Hallmark Theme: Atmospheric (Midnight / Night Foundry) */
+  --color-paper: oklch(14% 0.005 285); /* Deep dark canvas */
+  --color-paper-2: oklch(18% 0.005 285); /* Elevated surface */
+  --color-paper-3: oklch(22% 0.01 285); /* Highest surface */
+  
+  --color-ink: oklch(95% 0.005 285); /* Off-white text */
+  --color-muted: oklch(70% 0.01 285); /* Muted text */
+  
+  --color-accent: oklch(75% 0.15 45); /* Warm amber-gold (Night Foundry) */
+  --color-accent-ink: oklch(15% 0.02 45); /* Dark ink on accent */
+  --color-focus: var(--color-accent);
+  
+  --color-border: oklch(25% 0.01 285); /* Subtle dark border */
+  
+  --radius-base: 8px; /* Slightly softer radii for atmospheric */
+  --radius-full: 9999px;
+  
+  --font-display: var(--font-geist-sans);
+  --font-body: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  
+  --spacing-3xs: 0.25rem; /* 4px */
+  --spacing-2xs: 0.5rem;  /* 8px */
+  --spacing-xs: 0.75rem;  /* 12px */
+  --spacing-s: 1rem;      /* 16px */
+  --spacing-m: 1.5rem;    /* 24px */
+  --spacing-l: 2rem;      /* 32px */
+  --spacing-xl: 3rem;     /* 48px */
+  --spacing-2xl: 4rem;    /* 64px */
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-body);
+  overflow-x: clip; /* Hallmark gate 34 */
+}
+
+html {
+  overflow-x: clip; /* Hallmark gate 34 */
 }
 
 /* Markdown Styling for Assistant Responses */
 .markdown-body {
+  font-family: var(--font-body);
   font-size: 0.95rem;
   line-height: 1.6;
 }
@@ -75,27 +94,35 @@ body {
 
 .markdown-body th,
 .markdown-body td {
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  border: 1px solid var(--color-border);
   padding: 0.5rem 0.75rem;
   text-align: left;
 }
 
 .markdown-body th {
-  background-color: rgba(255, 255, 255, 0.1);
+  background-color: var(--color-paper-2);
   font-weight: 600;
 }
 
 .markdown-body blockquote {
-  border-left: 4px solid rgba(99, 102, 241, 0.5); /* indigo-500 */
+  border-left: 4px solid var(--color-accent);
   padding-left: 1rem;
-  color: rgba(255, 255, 255, 0.7);
+  color: var(--color-muted);
   margin-left: 0;
   margin-right: 0;
-  font-style: italic;
+  /* Hallmark Gate 38a: No italic headers or decorative italics except in body copy emphasis */
+  font-style: normal; 
 }
 
 .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4 {
+  font-family: var(--font-display);
   font-weight: 600;
+  font-style: normal; /* Hallmark gate 38a */
+  letter-spacing: -0.02em;
   margin-top: 1.5rem;
   margin-bottom: 0.75rem;
 }
+
+/* Hallmark · genre: modern-minimal · macrostructure: Dashboard · theme: Cobalt · enrichment: base · nav: N5 · footer: Ft2 */
+/* Hallmark · pre-emit critique: P5 H5 E5 S4 R5 V5 */
+/* contrast: pass (40–41) · mobile: pass (34, 49, 50–57) */

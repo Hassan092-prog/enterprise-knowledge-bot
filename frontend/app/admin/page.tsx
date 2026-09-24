@@ -157,45 +157,48 @@ export default function AdminDashboard() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-900 text-slate-100 font-sans p-8">
-      <div className="max-w-4xl mx-auto space-y-8">
+    <div className="min-h-screen bg-paper text-ink font-sans p-8 relative overflow-hidden">
+      {/* Atmospheric Radial Blooms */}
+      <div className="absolute top-[-200px] right-[-100px] w-[600px] h-[600px] rounded-full bg-accent opacity-[0.07] blur-[100px] pointer-events-none" />
+      
+      <div className="max-w-4xl mx-auto space-y-8 relative z-10">
         
-        <div className="flex justify-between items-center bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-xl">
+        <div className="flex justify-between items-center bg-paper-2 p-6 rounded-base border border-border shadow-[0_8px_30px_rgb(0,0,0,0.12)]">
           <div>
-            <h1 className="text-2xl font-bold bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent">
+            <h1 className="text-2xl font-display font-semibold text-ink tracking-tight">
               Admin Dashboard
             </h1>
-            <p className="text-slate-400 text-sm mt-1">Manage global documents and view statistics</p>
+            <p className="text-muted text-sm mt-1">Manage global documents and view statistics</p>
           </div>
-          <Link href="/" className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-sm font-medium transition">
+          <Link href="/" className="px-4 py-2 bg-paper-3 hover:bg-paper-3/80 rounded-base border border-border text-sm font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus">
             Back to Chat
           </Link>
         </div>
 
         {error && (
-          <div className="p-4 bg-red-900/30 border border-red-500/50 rounded-lg text-red-400 text-sm">
+          <div className="p-4 bg-red-900/20 border border-red-500/30 rounded-base text-red-400 text-sm">
             {error} - Are you sure you are an admin?
           </div>
         )}
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700">
-            <h3 className="text-sm font-medium text-slate-400 uppercase tracking-wider mb-2">Total Users</h3>
-            <p className="text-3xl font-bold text-slate-100">{stats?.users || 0}</p>
+          <div className="bg-paper-2 p-6 rounded-base border border-border">
+            <h3 className="text-sm font-medium text-muted uppercase tracking-wider mb-2">Total Users</h3>
+            <p className="text-3xl font-bold text-ink">{stats?.users || 0}</p>
           </div>
-          <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700">
-            <h3 className="text-sm font-medium text-slate-400 uppercase tracking-wider mb-2">Total Sessions</h3>
-            <p className="text-3xl font-bold text-slate-100">{stats?.sessions || 0}</p>
+          <div className="bg-paper-2 p-6 rounded-base border border-border">
+            <h3 className="text-sm font-medium text-muted uppercase tracking-wider mb-2">Total Sessions</h3>
+            <p className="text-3xl font-bold text-ink">{stats?.sessions || 0}</p>
           </div>
-          <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700">
-            <h3 className="text-sm font-medium text-slate-400 uppercase tracking-wider mb-2">Global Document Chunks</h3>
-            <p className="text-3xl font-bold text-slate-100">{stats?.total_chunks || 0}</p>
+          <div className="bg-paper-2 p-6 rounded-base border border-border">
+            <h3 className="text-sm font-medium text-muted uppercase tracking-wider mb-2">Global Document Chunks</h3>
+            <p className="text-3xl font-bold text-ink">{stats?.total_chunks || 0}</p>
           </div>
         </div>
 
-        <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-xl">
+        <div className="bg-paper-2 p-6 rounded-base border border-border shadow-[0_8px_30px_rgb(0,0,0,0.12)]">
           <div className="flex justify-between items-center mb-6">
-            <h2 className="text-lg font-bold text-slate-200">Global Knowledge Base</h2>
+            <h2 className="text-lg font-bold text-ink">Global Knowledge Base</h2>
             <div>
               <input
                 type="file"
@@ -207,7 +210,7 @@ export default function AdminDashboard() {
               <button
                 onClick={() => fileInputRef.current?.click()}
                 disabled={isUploading}
-                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition shadow-lg shadow-indigo-900/20"
+                className="px-4 py-2 bg-accent hover:bg-accent/90 disabled:opacity-50 text-accent-ink rounded-base text-sm font-medium transition shadow-lg shadow-accent/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
               >
                 {isUploading ? "Uploading..." : "Upload Global Document"}
               </button>
@@ -215,17 +218,17 @@ export default function AdminDashboard() {
           </div>
 
           {!stats || !stats.documents || stats.documents.length === 0 ? (
-            <div className="text-center py-12 border border-dashed border-slate-700 rounded-xl bg-slate-900/20 text-slate-500">
+            <div className="text-center py-12 border border-dashed border-border rounded-base bg-paper text-muted">
               No global documents indexed yet.
             </div>
           ) : (
             <ul className="space-y-3">
               {stats.documents.map((doc, idx) => (
-                <li key={idx} className="flex items-center justify-between p-4 rounded-xl bg-slate-900/50 border border-slate-700 hover:border-slate-600 transition">
-                  <span className="font-medium text-slate-300">📄 {doc}</span>
+                <li key={idx} className="flex items-center justify-between p-4 rounded-base bg-paper border border-border hover:border-accent/50 transition">
+                  <span className="font-medium text-ink">📄 {doc}</span>
                   <button
                     onClick={() => handleDelete(doc)}
-                    className="text-slate-500 hover:text-red-400 transition"
+                    className="text-muted hover:text-red-400 transition"
                   >
                     Remove
                   </button>
@@ -236,23 +239,23 @@ export default function AdminDashboard() {
         </div>
 
         {/* ROLE REQUESTS */}
-        <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-xl">
-          <h2 className="text-lg font-bold text-slate-200 mb-6">Pending Role Requests</h2>
+        <div className="bg-paper-2 p-6 rounded-base border border-border shadow-[0_8px_30px_rgb(0,0,0,0.12)]">
+          <h2 className="text-lg font-bold text-ink mb-6">Pending Role Requests</h2>
           {requests.length === 0 ? (
-            <div className="text-center py-6 border border-dashed border-slate-700 rounded-xl bg-slate-900/20 text-slate-500 text-sm">
+            <div className="text-center py-6 border border-dashed border-border rounded-base bg-paper text-muted text-sm">
               No pending requests.
             </div>
           ) : (
             <ul className="space-y-3">
               {requests.map((req) => (
-                <li key={req.id} className="flex items-center justify-between p-4 rounded-xl bg-slate-900/50 border border-slate-700">
+                <li key={req.id} className="flex items-center justify-between p-4 rounded-base bg-paper border border-border">
                   <div>
-                    <div className="font-medium text-slate-200">User: {req.username}</div>
-                    <div className="text-xs text-slate-400">Requested Role: <span className="text-cyan-400 font-semibold uppercase">{req.requested_role}</span></div>
+                    <div className="font-medium text-ink">User: {req.username}</div>
+                    <div className="text-xs text-muted">Requested Role: <span className="text-accent font-semibold uppercase">{req.requested_role}</span></div>
                   </div>
                   <div className="flex gap-2">
-                    <button onClick={() => handleApprove(req.id)} className="px-3 py-1 bg-green-600/20 hover:bg-green-600/40 text-green-400 border border-green-600/50 rounded transition text-sm">Approve</button>
-                    <button onClick={() => handleReject(req.id)} className="px-3 py-1 bg-red-600/20 hover:bg-red-600/40 text-red-400 border border-red-600/50 rounded transition text-sm">Reject</button>
+                    <button onClick={() => handleApprove(req.id)} className="px-3 py-1 bg-green-900/20 hover:bg-green-900/40 text-green-400 border border-green-900/50 rounded-base transition text-sm">Approve</button>
+                    <button onClick={() => handleReject(req.id)} className="px-3 py-1 bg-red-900/20 hover:bg-red-900/40 text-red-400 border border-red-900/50 rounded-base transition text-sm">Reject</button>
                   </div>
                 </li>
               ))}
@@ -261,27 +264,27 @@ export default function AdminDashboard() {
         </div>
 
         {/* USER MANAGEMENT */}
-        <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-xl">
-          <h2 className="text-lg font-bold text-slate-200 mb-6">User Management</h2>
+        <div className="bg-paper-2 p-6 rounded-base border border-border shadow-[0_8px_30px_rgb(0,0,0,0.12)]">
+          <h2 className="text-lg font-bold text-ink mb-6">User Management</h2>
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse">
               <thead>
-                <tr className="border-b border-slate-700 text-sm text-slate-400">
+                <tr className="border-b border-border text-sm text-muted">
                   <th className="pb-3 font-medium">Username</th>
                   <th className="pb-3 font-medium">Joined</th>
                   <th className="pb-3 font-medium">Role</th>
                 </tr>
               </thead>
-              <tbody className="text-sm divide-y divide-slate-700/50">
+              <tbody className="text-sm divide-y divide-border">
                 {users.map(u => (
-                  <tr key={u.id} className="hover:bg-slate-700/20">
-                    <td className="py-3 text-slate-300 font-medium">{u.username}</td>
-                    <td className="py-3 text-slate-500">{new Date(u.created_at).toLocaleDateString()}</td>
+                  <tr key={u.id} className="hover:bg-paper/50">
+                    <td className="py-3 text-ink font-medium">{u.username}</td>
+                    <td className="py-3 text-muted">{new Date(u.created_at).toLocaleDateString()}</td>
                     <td className="py-3">
                       <select 
                         value={u.role} 
                         onChange={(e) => handleChangeRole(u.id, e.target.value)}
-                        className="bg-slate-900 border border-slate-600 text-slate-300 rounded px-2 py-1 text-xs focus:outline-none focus:border-indigo-500"
+                        className="bg-paper border border-border text-ink rounded-base px-2 py-1 text-xs focus:outline-none focus:border-accent"
                       >
                         <option value="user">User</option>
                         <option value="editor">Editor</option>

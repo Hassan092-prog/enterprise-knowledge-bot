@@ -1,4 +1,9 @@
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: knowledge-bot-redis
+    restart: unless-stopped
+
   db:
     image: postgres:15-alpine
     container_name: knowledge-bot-db
@@ -12,6 +17,15 @@ services:
       - ./knowledge-bot/db_data:/var/lib/postgresql/data
     restart: unless-stopped
 
+  chromadb:
+    image: chromadb/chroma:0.5.20
+    container_name: knowledge-bot-chromadb
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./knowledge-bot/chroma_data:/chroma/chroma
+    restart: unless-stopped
+
   backend:
     build:
       context: ./knowledge-bot
@@ -19,6 +33,8 @@ services:
     container_name: knowledge-bot-backend
     depends_on:
       - db
+      - chromadb
+      - redis
     ports:
       - "8000:8000"
     volumes:
@@ -27,6 +43,30 @@ services:
       - ./knowledge-bot/.env
     environment:
       - DATABASE_URL=postgresql://postgres:password@db:5432/chatdb
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - REDIS_URL=redis://redis:6379/0
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./knowledge-bot
+      dockerfile: Dockerfile
+    container_name: knowledge-bot-worker
+    command: celery -A src.worker.celery_app worker --loglevel=info
+    depends_on:
+      - redis
+      - db
+      - chromadb
+    volumes:
+      - ./knowledge-bot/data:/app/data
+    env_file:
+      - ./knowledge-bot/.env
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@db:5432/chatdb
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - REDIS_URL=redis://redis:6379/0
     restart: unless-stopped
 
   frontend:

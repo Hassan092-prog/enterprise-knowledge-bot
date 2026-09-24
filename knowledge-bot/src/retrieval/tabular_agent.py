@@ -3,7 +3,6 @@ from langchain_community.utilities import SQLDatabase
 from sqlalchemy import create_engine
 from src.llm_factory import get_llm
 import pandas as pd
-import os
 from pathlib import Path
 from src.config import UPLOAD_DIR, LLM_PROVIDER
 from src.logger import get_logger
@@ -27,7 +26,14 @@ def run_tabular_query(query: str, filename: str) -> str:
     if df.empty:
         return f"The file {filename} is empty or could not be parsed correctly."
         
-    llm = get_llm(temperature=0, model="mistral-large-latest" if LLM_PROVIDER == "mistral" else "gpt-4o-mini")
+    if LLM_PROVIDER == "groq":
+        tabular_model = "openai/gpt-oss-120b"
+    elif LLM_PROVIDER == "mistral":
+        tabular_model = "mistral-large-latest"
+    else:
+        tabular_model = "gpt-4o-mini"
+        
+    llm = get_llm(temperature=0, model=tabular_model)
     
     try:
         # Load CSV into an in-memory SQLite database

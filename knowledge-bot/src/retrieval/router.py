@@ -51,7 +51,14 @@ def route_query(query: str, available_documents: List[str]) -> Tuple[bool, Optio
     if not csv_docs:
         return False, None
         
-    llm = get_llm(temperature=0, model="mistral-large-latest" if LLM_PROVIDER == "mistral" else "gpt-4o-mini")
+    if LLM_PROVIDER == "groq":
+        router_model = "openai/gpt-oss-120b"
+    elif LLM_PROVIDER == "mistral":
+        router_model = "mistral-large-latest"
+    else:
+        router_model = "gpt-4o-mini"
+        
+    llm = get_llm(temperature=0, model=router_model)
         
     parser = JsonOutputParser()
     prompt = PromptTemplate(

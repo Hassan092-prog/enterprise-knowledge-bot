@@ -2,7 +2,6 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-import shutil
 import os
 from pathlib import Path
 from sqlalchemy.orm import Session
@@ -81,9 +80,9 @@ async def upload_document(file: UploadFile = File(...), current_user: User = Dep
     save_path.write_bytes(contents)
     
     try:
-        import asyncio
-        result = await asyncio.to_thread(retriever.ingest_file, save_path, current_user.id)
-        return {"filename": file.filename, "chunks_added": result.chunks_added}
+        from src.worker import process_document
+        task = process_document.delay(str(save_path), current_user.id)
+        return {"filename": file.filename, "status": "processing", "task_id": task.id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

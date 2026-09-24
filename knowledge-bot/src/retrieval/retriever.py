@@ -468,9 +468,6 @@ class Retriever:
         """Return sources grouped by personal vs global."""
         return self._store.list_sources_by_type(user_id=user_id)
 
-    def is_ready(self) -> bool:
-        """Return True if the knowledge base has at least one document."""
-        return not self._store.is_empty()
     def is_empty(self) -> bool:
         """Return True if no documents have been indexed yet."""
         return self._store.is_empty()

@@ -47,54 +47,56 @@ export default function Login() {
   };
 
   return (
-    <div className="flex h-screen items-center justify-center bg-slate-900 text-slate-100 font-sans">
-      <div className="w-full max-w-md p-8 bg-slate-800 rounded-2xl shadow-2xl border border-slate-700 relative overflow-hidden">
-        <div className="absolute top-0 right-0 w-[200px] h-[200px] bg-indigo-500/20 blur-[80px] rounded-full pointer-events-none"></div>
-        
-        <h1 className="text-3xl font-bold bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent mb-2 text-center">
+    <div className="flex h-screen items-center justify-center bg-paper text-ink font-sans relative overflow-hidden">
+      {/* Atmospheric Radial Blooms */}
+      <div className="absolute top-[-200px] right-[-100px] w-[600px] h-[600px] rounded-full bg-accent opacity-[0.07] blur-[100px] pointer-events-none" />
+      <div className="absolute bottom-[100px] left-[-100px] w-[500px] h-[500px] rounded-full bg-accent opacity-[0.05] blur-[80px] pointer-events-none" />
+      
+      <div className="w-full max-w-md p-8 bg-paper-2 rounded-base shadow-[0_8px_30px_rgb(0,0,0,0.12)] border border-border relative z-10">
+        <h1 className="text-3xl font-display font-semibold text-ink mb-2 text-center tracking-tight">
           Enterprise RAG
         </h1>
-        <p className="text-slate-400 text-center mb-8">Sign in to your account</p>
+        <p className="text-muted text-center mb-8">Sign in to your account</p>
 
         {error && (
-          <div className="mb-4 p-3 bg-red-900/30 border border-red-500/50 rounded-lg text-red-400 text-sm text-center">
+          <div className="mb-4 p-3 bg-red-900/20 border border-red-500/30 rounded-base text-red-400 text-sm text-center">
             {error}
           </div>
         )}
 
         <form onSubmit={handleLogin} className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-slate-400 mb-1">Username</label>
+            <label className="block text-sm font-medium text-muted mb-1">Username</label>
             <input
               type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              className="w-full bg-slate-900 border border-slate-700 rounded-xl py-3 px-4 text-slate-100 focus:outline-none focus:border-indigo-500 transition-colors"
+              className="w-full bg-paper border border-border rounded-base py-3 px-4 text-ink focus:outline-none focus:border-accent transition-colors"
               required
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-slate-400 mb-1">Password</label>
+            <label className="block text-sm font-medium text-muted mb-1">Password</label>
             <input
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="w-full bg-slate-900 border border-slate-700 rounded-xl py-3 px-4 text-slate-100 focus:outline-none focus:border-indigo-500 transition-colors"
+              className="w-full bg-paper border border-border rounded-base py-3 px-4 text-ink focus:outline-none focus:border-accent transition-colors"
               required
             />
           </div>
           <button
             type="submit"
             disabled={isLoading}
-            className="w-full py-3 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium transition-colors disabled:opacity-50 mt-4 shadow-lg shadow-indigo-900/20"
+            className="w-full py-3 px-4 rounded-base bg-accent hover:bg-accent/90 text-accent-ink font-medium transition-colors disabled:opacity-50 mt-4 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus shadow-lg shadow-accent/20"
           >
             {isLoading ? "Signing in..." : "Sign In"}
           </button>
         </form>
 
-        <p className="mt-6 text-center text-sm text-slate-500">
+        <p className="mt-6 text-center text-sm text-muted">
           Don&apos;t have an account?{" "}
-          <Link href="/register" className="text-indigo-400 hover:text-indigo-300 transition-colors">
+          <Link href="/register" className="text-accent hover:text-accent/80 transition-colors">
             Register here
           </Link>
         </p>

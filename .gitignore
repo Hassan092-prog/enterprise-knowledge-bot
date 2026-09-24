@@ -9,4 +9,7 @@ venv/
 node_modules/
 .next/
 knowledge-bot/data/
+knowledge-bot/chroma_data/
+knowledge-bot/db_data/
 files/
+.agents/

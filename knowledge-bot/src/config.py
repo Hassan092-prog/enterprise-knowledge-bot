@@ -52,9 +52,10 @@ OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 
 # We also support Mistral as a free/open-source alternative
 MISTRAL_API_KEY: str = os.getenv("MISTRAL_API_KEY", "")
+GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
 
-# Which LLM provider to use: "openai" or "mistral"
-LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openai")
+# Which LLM provider to use: "openai", "mistral", or "groq"
+LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openai").lower()
 
 # Production PostgreSQL Database URL (falls back to local SQLite if not set)
 DATABASE_URL: str = os.getenv("DATABASE_URL", "")
@@ -64,7 +65,13 @@ DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 # LLM Settings
 # ---------------------------------------------------------------------------
 # The model that GENERATES answers (the "G" in RAG)
-LLM_MODEL: str = ("mistral-small-latest" if LLM_PROVIDER == "mistral" else "gpt-4o-mini")
+if LLM_PROVIDER == "mistral":
+    LLM_MODEL = "mistral-small-latest"
+elif LLM_PROVIDER == "groq":
+    # OpenAI GPT-OSS 120B — largest available model on Groq's LPU hardware
+    LLM_MODEL = "openai/gpt-oss-120b"
+else:
+    LLM_MODEL = "gpt-4o-mini"
 
 # Controls randomness: 0 = deterministic, 1 = creative
 # For factual Q&A over documents, we want LOW temperature (0.0 - 0.2)
@@ -83,10 +90,17 @@ LLM_MAX_TOKENS: int = 1024
 #   1. Ingestion (converting document chunks to vectors)
 #   2. Retrieval  (converting user queries to vectors)
 # If you use different models, the vectors are incompatible.
-EMBEDDING_MODEL: str = ("mistral-embed" if LLM_PROVIDER == "mistral" else "text-embedding-3-small")
-
-# Embedding dimension (must match the model above)
-EMBEDDING_DIMENSION: int = 1536
+if LLM_PROVIDER == "mistral":
+    EMBEDDING_MODEL = "mistral-embed"
+    EMBEDDING_DIMENSION = 1536
+elif LLM_PROVIDER == "groq":
+    # Groq has no embeddings API, so we use a local sentence-transformers model.
+    # all-MiniLM-L6-v2 is ~80MB, runs on CPU, and is free.
+    EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+    EMBEDDING_DIMENSION = 384
+else:
+    EMBEDDING_MODEL = "text-embedding-3-small"
+    EMBEDDING_DIMENSION = 1536
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +129,10 @@ RETRIEVAL_TOP_K: int = 5
 
 # ChromaDB collection name (like a table name in a traditional database)
 CHROMA_COLLECTION_NAME: str = "knowledge_base"
+
+# External ChromaDB Settings (for horizontal scaling)
+CHROMA_HOST: str = os.getenv("CHROMA_HOST", "")
+CHROMA_PORT: int = int(os.getenv("CHROMA_PORT", "8000"))
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +171,14 @@ def validate_config() -> None:
         errors.append(
             "MISTRAL_API_KEY is not set. Add it to your .env file."
         )
+
+    if LLM_PROVIDER == "groq" and not GROQ_API_KEY:
+        errors.append(
+            "GROQ_API_KEY is not set. Add it to your .env file."
+        )
+
+    # Note: Groq uses local sentence-transformers for embeddings,
+    # so no OPENAI_API_KEY is required when using Groq.
 
     if errors:
         raise EnvironmentError(

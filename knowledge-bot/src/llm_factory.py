@@ -11,7 +11,7 @@ WHY THIS EXISTS (Factory Pattern):
     hardcoded dependencies. The factory pattern abstract this logic.
 """
 
-from src.config import LLM_PROVIDER, MISTRAL_API_KEY, OPENAI_API_KEY, LLM_MODEL
+from src.config import LLM_PROVIDER, MISTRAL_API_KEY, OPENAI_API_KEY, GROQ_API_KEY, LLM_MODEL
 
 def get_llm(temperature: float = 0.0, max_tokens: int = 1024, model: str = None, streaming: bool = False):
     """
@@ -26,6 +26,14 @@ def get_llm(temperature: float = 0.0, max_tokens: int = 1024, model: str = None,
             temperature=temperature,
             max_tokens=max_tokens,
             mistral_api_key=MISTRAL_API_KEY,
+        )
+    elif LLM_PROVIDER == "groq":
+        from langchain_groq import ChatGroq
+        return ChatGroq(
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            groq_api_key=GROQ_API_KEY,
         )
     else:
         from langchain_openai import ChatOpenAI

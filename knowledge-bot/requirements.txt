@@ -13,6 +13,7 @@ langchain==0.3.7
 langchain-community==0.3.7
 langchain-openai==0.2.9
 langchain-mistralai==0.2.3
+langchain-groq==0.2.1
 langchain-experimental==0.3.3
 
 # ── Vector database ───────────────────────────────────────────────────────
@@ -60,3 +61,7 @@ cachetools==5.5.0
 # ── Hybrid Search (BM25) ──────────────────────────────────────────────────
 rank_bm25==0.2.2
 nltk==3.9.1
+
+# ── Background Tasks (Celery & Redis) ─────────────────────────────────────
+celery[redis]==5.4.0
+redis==5.0.3

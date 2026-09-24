@@ -422,22 +422,22 @@ export default function Home() {
   };
 
   return (
-    <div className="flex h-screen bg-slate-900 text-slate-100 font-sans selection:bg-indigo-500/30">
+    <div className="flex h-screen bg-paper text-ink font-sans selection:bg-accent selection:text-accent-ink">
       
       {/* SIDEBAR */}
-      <div className="w-80 bg-slate-950 border-r border-slate-800 flex flex-col shadow-2xl z-10">
-        <div className="p-6 border-b border-slate-800 bg-slate-900/50 backdrop-blur flex justify-between items-center">
+      <div className="w-80 bg-paper-2 border-r border-border flex flex-col z-10">
+        <div className="p-m border-b border-border bg-paper-2 flex justify-between items-center">
           <div>
-            <h1 className="text-xl font-bold bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent flex items-center gap-2">
+            <h1 className="text-xl font-bold text-ink tracking-tight flex items-center gap-2">
               Enterprise RAG
             </h1>
-            <p className="text-sm text-slate-500 mt-1">Multi-format knowledge base</p>
+            <p className="text-sm text-muted mt-1">Knowledge base</p>
           </div>
           <div className="flex flex-col gap-2">
             {userRole === "admin" && (
               <button
                 onClick={() => router.push("/admin")}
-                className="text-xs bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-500/50 text-indigo-300 px-2 py-1 rounded transition"
+                className="text-xs bg-paper border border-border hover:border-accent text-ink px-2 py-1 rounded-base transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
               >
                 Admin
               </button>
@@ -445,14 +445,14 @@ export default function Home() {
             {userRole === "user" && !pendingRequest && (
                <button
                 onClick={() => setIsRequestingRole(true)}
-                className="text-xs bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/50 text-cyan-300 px-2 py-1 rounded transition"
+                className="text-xs bg-paper border border-border hover:border-accent text-ink px-2 py-1 rounded-base transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
                >
                  Request Access
                </button>
             )}
             {pendingRequest && (
-               <button disabled className="text-xs bg-slate-800 text-slate-500 border border-slate-700 px-2 py-1 rounded cursor-not-allowed">
-                 {pendingRequest} Pending...
+               <button disabled className="text-xs bg-paper-3 text-muted border border-border px-2 py-1 rounded-base cursor-not-allowed">
+                 {pendingRequest} Pending
                </button>
             )}
             <button
@@ -460,7 +460,7 @@ export default function Home() {
                 localStorage.removeItem("token");
                 router.push("/login");
               }}
-              className="text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-1 rounded transition"
+              className="text-xs bg-paper border border-border hover:border-accent text-ink px-2 py-1 rounded-base transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
             >
               Logout
             </button>
@@ -468,12 +468,15 @@ export default function Home() {
         </div>
 
         {/* CHAT HISTORY SECTION */}
-        <div className="p-4 border-b border-slate-800 flex-1 overflow-y-auto custom-scrollbar">
+        <div className="p-m border-b border-border flex-1 overflow-y-auto custom-scrollbar">
            <div className="flex justify-between items-center mb-4">
-               <h2 className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                 Chat History
+               <h2 className="text-xs font-semibold text-muted uppercase tracking-wider">
+                 History
                </h2>
-               <button onClick={handleNewChat} className="text-xs bg-indigo-600 hover:bg-indigo-500 text-white px-2 py-1 rounded transition">
+               <button 
+                  onClick={handleNewChat} 
+                  className="text-xs bg-paper border border-border hover:border-accent text-ink px-2 py-1 rounded-base transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
+               >
                    + New
                </button>
            </div>
@@ -483,17 +486,19 @@ export default function Home() {
                 <li key={session.id} className="group relative">
                     <button 
                         onClick={() => setActiveSessionId(session.id)}
-                        className={`w-full text-left p-2 rounded text-sm truncate transition-colors pr-8 ${
+                        className={`w-full text-left p-2 rounded-base text-sm truncate transition-colors pr-8 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus ${
                             activeSessionId === session.id 
-                                ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30" 
-                                : "text-slate-400 hover:bg-slate-800/50 hover:text-slate-200 border border-transparent"
+                                ? "bg-accent text-accent-ink" 
+                                : "text-ink hover:bg-paper border border-transparent hover:border-border"
                         }`}
                     >
-                        💬 {session.title || `Chat #${session.id}`}
+                        {session.title || `Chat #${session.id}`}
                     </button>
                     <button
                       onClick={() => handleDeleteSession(session.id)}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity p-1"
+                      className={`absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-base transition-opacity focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus ${
+                          activeSessionId === session.id ? "text-accent-ink hover:text-paper" : "text-muted hover:text-ink opacity-0 group-hover:opacity-100"
+                      }`}
                       title="Delete Chat"
                     >
                       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
@@ -506,25 +511,25 @@ export default function Home() {
         </div>
 
         {/* DOCUMENTS SECTION */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar">
-          <h2 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
-            Indexed Documents
+        <div className="flex-1 overflow-y-auto p-m space-y-4 custom-scrollbar">
+          <h2 className="text-xs font-semibold text-muted uppercase tracking-wider mb-2">
+            Documents
           </h2>
           
           {documents.length === 0 ? (
-            <div className="text-sm text-slate-600 text-center py-8 border border-dashed border-slate-800 rounded-xl bg-slate-900/20">
+            <div className="text-sm text-muted text-center py-8 border border-border rounded-base bg-paper">
               No documents yet.
             </div>
           ) : (
             <ul className="space-y-2">
               {documents.map((doc, idx) => (
-                <li key={idx} className="group flex items-center justify-between p-3 rounded-lg bg-slate-900 border border-slate-800 hover:border-indigo-500/50 hover:bg-slate-800/50 transition-all">
-                  <span className="text-sm truncate mr-2" title={doc}>
-                    📄 {doc}
+                <li key={idx} className="group flex items-center justify-between p-3 rounded-base bg-paper border border-border hover:border-accent transition-colors">
+                  <span className="text-sm truncate mr-2 text-ink" title={doc}>
+                    {doc}
                   </span>
                   <button
                     onClick={() => handleDelete(doc)}
-                    className="text-slate-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity p-1"
+                    className="text-muted hover:text-ink opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-base focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
                     title="Remove document"
                   >
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
@@ -540,7 +545,7 @@ export default function Home() {
           <div className="mt-6">
             <button
               onClick={() => setIsGlobalDocsOpen(!isGlobalDocsOpen)}
-              className="w-full flex justify-between items-center text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 hover:text-slate-400 transition"
+              className="w-full flex justify-between items-center text-xs font-semibold text-muted uppercase tracking-wider mb-2 hover:text-ink transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
             >
               <span>Global Documents ({globalDocuments.length})</span>
               <span>{isGlobalDocsOpen ? "▼" : "▶"}</span>
@@ -548,15 +553,15 @@ export default function Home() {
             
             {isGlobalDocsOpen && (
               globalDocuments.length === 0 ? (
-                <div className="text-sm text-slate-600 text-center py-4 border border-dashed border-slate-800 rounded-xl bg-slate-900/20">
+                <div className="text-sm text-muted text-center py-4 border border-border rounded-base bg-paper">
                   No global documents.
                 </div>
               ) : (
                 <ul className="space-y-2 mt-2">
                   {globalDocuments.map((doc, idx) => (
-                    <li key={idx} className="flex items-center p-3 rounded-lg bg-slate-900/50 border border-slate-800 text-slate-400">
+                    <li key={idx} className="flex items-center p-3 rounded-base bg-paper border border-border text-ink">
                       <span className="text-sm truncate" title={doc}>
-                        📄 {doc}
+                        {doc}
                       </span>
                     </li>
                   ))}
@@ -575,16 +580,16 @@ export default function Home() {
                 <button
                   onClick={() => document.getElementById("globalUpload")?.click()}
                   disabled={isUploading}
-                  className="w-full text-xs py-2 px-3 border border-indigo-500/30 text-indigo-300 hover:bg-indigo-500/10 rounded-lg transition"
+                  className="w-full text-xs py-2 px-3 border border-border text-ink bg-paper hover:border-accent rounded-base transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
                 >
-                  + Upload Global Doc
+                  Upload Global Doc
                 </button>
               </div>
             )}
           </div>
         </div>
 
-        <div className="p-4 border-t border-slate-800 bg-slate-900/50">
+        <div className="p-m border-t border-border bg-paper-2">
           <input
             type="file"
             ref={fileInputRef}
@@ -595,7 +600,7 @@ export default function Home() {
           <button
             onClick={() => fileInputRef.current?.click()}
             disabled={isUploading}
-            className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium transition-colors shadow-lg shadow-indigo-900/20"
+            className="w-full flex items-center justify-center gap-2 py-2 px-4 rounded-base bg-paper border border-border hover:border-accent text-ink disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
           >
             {isUploading ? "Uploading..." : "Upload Document"}
           </button>
@@ -603,12 +608,13 @@ export default function Home() {
       </div>
 
       {/* CHAT AREA */}
-      <div className="flex-1 flex flex-col bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-slate-900 via-slate-900 to-slate-950 relative overflow-hidden">
+      <div className="flex-1 flex flex-col bg-paper relative overflow-hidden">
         
-        {/* Background ambient light */}
-        <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-indigo-500/10 blur-[120px] rounded-full pointer-events-none"></div>
+        {/* Atmospheric Radial Blooms */}
+        <div className="absolute top-[-200px] right-[-100px] w-[600px] h-[600px] rounded-full bg-accent opacity-[0.07] blur-[100px] pointer-events-none" />
+        <div className="absolute bottom-[100px] left-[-100px] w-[500px] h-[500px] rounded-full bg-accent opacity-[0.05] blur-[80px] pointer-events-none" />
 
-        <div className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar z-10 relative">
+        <div className="flex-1 overflow-y-auto p-l space-y-6 custom-scrollbar z-10 relative">
           {messages.map((msg, i) => (
             <div
               key={i}
@@ -617,10 +623,10 @@ export default function Home() {
               }`}
             >
               <div
-                className={`max-w-3xl rounded-2xl px-5 py-4 shadow-sm ${
+                className={`max-w-3xl rounded-base px-5 py-4 ${
                   msg.role === "user"
-                    ? "bg-indigo-600 text-white rounded-br-none"
-                    : "bg-slate-800/80 border border-slate-700/50 text-slate-200 rounded-bl-none backdrop-blur-sm"
+                    ? "bg-accent text-accent-ink border border-transparent shadow-[0_4px_24px_rgba(0,0,0,0.1)] shadow-accent/20"
+                    : "bg-paper-2 text-ink border border-border"
                 }`}
               >
                 <div className={`whitespace-pre-wrap leading-relaxed text-sm md:text-base ${msg.role === "assistant" ? "markdown-body" : ""}`}>
@@ -658,10 +664,10 @@ export default function Home() {
           ))}
           {isTyping && (
             <div className="flex justify-start">
-              <div className="bg-slate-800/80 border border-slate-700/50 text-slate-400 rounded-2xl rounded-bl-none px-5 py-4 w-24 flex items-center justify-center gap-1 backdrop-blur-sm">
-                <span className="w-2 h-2 rounded-full bg-slate-500 animate-bounce [animation-delay:-0.3s]"></span>
-                <span className="w-2 h-2 rounded-full bg-slate-500 animate-bounce [animation-delay:-0.15s]"></span>
-                <span className="w-2 h-2 rounded-full bg-slate-500 animate-bounce"></span>
+              <div className="bg-paper border border-border text-muted rounded-base px-5 py-4 w-24 flex items-center justify-center gap-1">
+                <span className="w-2 h-2 rounded-full bg-border animate-bounce [animation-delay:-0.3s]"></span>
+                <span className="w-2 h-2 rounded-full bg-border animate-bounce [animation-delay:-0.15s]"></span>
+                <span className="w-2 h-2 rounded-full bg-border animate-bounce"></span>
               </div>
             </div>
           )}
@@ -669,13 +675,13 @@ export default function Home() {
         </div>
 
         {/* INPUT AREA */}
-        <div className="p-6 bg-transparent z-10 relative">
+        <div className="p-4 md:px-6 md:py-4 bg-paper border-t border-border z-10 relative">
           <div className="max-w-4xl mx-auto relative group">
             
             {/* AUTOCOMPLETE MENU */}
             {showMentionMenu && filteredDocs.length > 0 && (
-              <div className="absolute bottom-full left-0 mb-4 w-full max-w-md bg-slate-800 border border-slate-700 rounded-xl shadow-2xl overflow-hidden z-50 animate-in fade-in slide-in-from-bottom-2">
-                <div className="px-3 py-2 bg-slate-900/50 border-b border-slate-700 text-xs font-semibold text-slate-400 uppercase">
+              <div className="absolute bottom-full left-0 mb-2 w-full max-w-md bg-paper border border-border rounded-base shadow-sm overflow-hidden z-50">
+                <div className="px-3 py-2 bg-paper-2 border-b border-border text-xs font-semibold text-muted uppercase">
                   Select a document
                 </div>
                 <ul className="max-h-60 overflow-y-auto custom-scrollbar">
@@ -685,11 +691,11 @@ export default function Home() {
                         onClick={() => handleSelectMention(doc)}
                         className={`w-full text-left px-4 py-3 text-sm transition-colors flex items-center gap-2 ${
                           mentionIndex === idx 
-                            ? "bg-indigo-600 text-white" 
-                            : "text-slate-300 hover:bg-slate-700 hover:text-white"
+                            ? "bg-accent text-accent-ink" 
+                            : "text-ink hover:bg-paper-2"
                         }`}
                       >
-                        📄 {doc}
+                        {doc}
                       </button>
                     </li>
                   ))}
@@ -697,8 +703,7 @@ export default function Home() {
               </div>
             )}
 
-            <div className="absolute -inset-1 bg-gradient-to-r from-indigo-500 to-cyan-500 rounded-2xl blur opacity-25 group-hover:opacity-40 transition duration-1000 group-hover:duration-200"></div>
-            <div className="relative flex items-center bg-slate-800 border border-slate-700 rounded-2xl overflow-hidden shadow-2xl">
+            <div className="relative flex items-center bg-paper border border-border hover:border-accent rounded-base overflow-hidden transition-colors">
               <input
                 type="text"
                 value={input}
@@ -727,17 +732,15 @@ export default function Home() {
                   }
                 }}
                 disabled={activeSessionId === null}
-                placeholder={activeSessionId === null ? "Create a new chat to begin..." : "Ask a question based on the documents..."}
-                className="flex-1 bg-transparent border-none py-4 px-6 text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-0 disabled:opacity-50"
+                placeholder={activeSessionId === null ? "Create a new chat to begin..." : "Ask a question..."}
+                className="flex-1 bg-transparent border-none py-4 px-4 text-ink placeholder-muted focus:outline-none focus:ring-0 disabled:opacity-50 text-sm md:text-base"
               />
               <button
                 onClick={handleSend}
                 disabled={!input.trim() || activeSessionId === null}
-                className="p-4 text-indigo-400 hover:text-indigo-300 disabled:text-slate-600 disabled:hover:text-slate-600 transition-colors"
+                className="px-4 py-2 mr-2 bg-accent text-accent-ink border border-accent rounded-base disabled:bg-paper-3 disabled:border-border disabled:text-muted transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
               >
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6">
-                  <path d="M3.478 2.404a.75.75 0 00-.926.941l2.432 7.905H13.5a.75.75 0 010 1.5H4.984l-2.432 7.905a.75.75 0 00.926.94 60.519 60.519 0 0018.445-8.986.75.75 0 000-1.218A60.517 60.517 0 003.478 2.404z" />
-                </svg>
+                Send
               </button>
             </div>
           </div>
@@ -746,35 +749,35 @@ export default function Home() {
 
       {/* ROLE REQUEST MODAL */}
       {isRequestingRole && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl max-w-md w-full shadow-2xl">
-            <h2 className="text-xl font-bold text-slate-100 mb-2">Request Elevated Access</h2>
-            <p className="text-sm text-slate-400 mb-6">
+        <div className="fixed inset-0 bg-ink/20 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-paper border border-border p-l rounded-base max-w-md w-full shadow-sm">
+            <h2 className="text-xl font-bold text-ink mb-2 tracking-tight">Request Access</h2>
+            <p className="text-sm text-muted mb-6">
               Select the role you need. An administrator will review your request.
             </p>
             
             <div className="space-y-3">
               <button
                 onClick={() => handleRoleRequest("editor")}
-                className="w-full text-left p-4 rounded-xl border border-slate-700 bg-slate-800 hover:border-cyan-500 hover:bg-slate-800/80 transition group"
+                className="w-full text-left p-4 rounded-base border border-border bg-paper hover:border-accent transition-colors group focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
               >
-                <div className="font-semibold text-cyan-400 group-hover:text-cyan-300">Editor</div>
-                <div className="text-xs text-slate-400 mt-1">Can upload and manage Global Documents for all users.</div>
+                <div className="font-semibold text-ink">Editor</div>
+                <div className="text-xs text-muted mt-1">Upload and manage Global Documents for all users.</div>
               </button>
               
               <button
                 onClick={() => handleRoleRequest("admin")}
-                className="w-full text-left p-4 rounded-xl border border-slate-700 bg-slate-800 hover:border-indigo-500 hover:bg-slate-800/80 transition group"
+                className="w-full text-left p-4 rounded-base border border-border bg-paper hover:border-accent transition-colors group focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
               >
-                <div className="font-semibold text-indigo-400 group-hover:text-indigo-300">Admin</div>
-                <div className="text-xs text-slate-400 mt-1">Full system access, role management, and analytics.</div>
+                <div className="font-semibold text-ink">Admin</div>
+                <div className="text-xs text-muted mt-1">Full system access, role management, and analytics.</div>
               </button>
             </div>
             
             <div className="mt-6 flex justify-end">
               <button
                 onClick={() => setIsRequestingRole(false)}
-                className="px-4 py-2 text-sm text-slate-400 hover:text-slate-200 transition"
+                className="px-4 py-2 text-sm text-ink border border-transparent hover:border-border rounded-base transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
               >
                 Cancel
               </button>

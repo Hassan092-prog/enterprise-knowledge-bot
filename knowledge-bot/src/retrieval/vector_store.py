@@ -34,7 +34,6 @@ DATA FLOW — RETRIEVAL:
 
 from pathlib import Path
 from typing import List, Optional
-from urllib import response
 
 import chromadb
 from chromadb.config import Settings
@@ -55,6 +54,8 @@ from src.config import (
     OPENAI_API_KEY,
     RETRIEVAL_TOP_K,
     VECTORSTORE_DIR,
+    CHROMA_HOST,
+    CHROMA_PORT,
 )
 from src.logger import get_logger
 
@@ -82,10 +83,19 @@ class VectorStore:
         from dotenv import load_dotenv
         load_dotenv()
 
-        self._client = chromadb.PersistentClient(
-            path=str(VECTORSTORE_DIR),
-            settings=Settings(anonymized_telemetry=False),
-        )
+        if CHROMA_HOST:
+            logger.info("Connecting to remote ChromaDB at %s:%s", CHROMA_HOST, CHROMA_PORT)
+            self._client = chromadb.HttpClient(
+                host=CHROMA_HOST,
+                port=CHROMA_PORT,
+                settings=Settings(anonymized_telemetry=False),
+            )
+        else:
+            logger.info("Using local PersistentClient ChromaDB at %s", VECTORSTORE_DIR)
+            self._client = chromadb.PersistentClient(
+                path=str(VECTORSTORE_DIR),
+                settings=Settings(anonymized_telemetry=False),
+            )
         self._collection = self._client.get_or_create_collection(
             name=CHROMA_COLLECTION_NAME,
             metadata={"hnsw:space": "cosine"},
@@ -96,9 +106,17 @@ class VectorStore:
             api_key = os.environ.get("MISTRAL_API_KEY", "")
             self._mistral_client = Mistral(api_key=api_key)
             self._embeddings = None
+            self._local_embedder = None
+        elif LLM_PROVIDER == "groq":
+            from sentence_transformers import SentenceTransformer
+            self._mistral_client = None
+            self._embeddings = None
+            self._local_embedder = SentenceTransformer(EMBEDDING_MODEL)
+            logger.info("Loaded local embedding model: %s", EMBEDDING_MODEL)
         else:
             from langchain_openai import OpenAIEmbeddings
             self._mistral_client = None
+            self._local_embedder = None
             self._embeddings = OpenAIEmbeddings(
                 model=EMBEDDING_MODEL,
                 openai_api_key=OPENAI_API_KEY,
@@ -199,10 +217,7 @@ class VectorStore:
             
         metadatas = [c.metadata            for c in new_chunks]
 
-        # ── Generate embeddings via OpenAI API ──────────────────────
-        # embed_documents() sends all texts in one batched API call.
-        # Returns List[List[float]] — one 1536-dim vector per text.
-        # This is the step that costs money (fractions of a cent per chunk).
+        # ── Generate embeddings ──────────────────────────────────────
         logger.info("Generating embeddings for %d chunks...", len(new_chunks))
         if self._mistral_client:
             response = self._mistral_client.embeddings.create(
@@ -210,6 +225,8 @@ class VectorStore:
                 inputs=texts,
             )
             embeddings_list = [item.embedding for item in response.data]
+        elif self._local_embedder:
+            embeddings_list = self._local_embedder.encode(texts).tolist()
         else:
             embeddings_list = self._embeddings.embed_documents(texts)
         logger.info("Embeddings generated successfully")
@@ -273,13 +290,14 @@ class VectorStore:
 
         # ── Embed the query ─────────────────────────────────────────
         # CRITICAL: must use the SAME model as add_documents().
-        # embed_query() returns a single vector: List[float]
         if self._mistral_client:
             response = self._mistral_client.embeddings.create(
                 model=EMBEDDING_MODEL,
                 inputs=[query],
             )
             query_embedding = response.data[0].embedding
+        elif self._local_embedder:
+            query_embedding = self._local_embedder.encode(query).tolist()
         else:
             query_embedding = self._embeddings.embed_query(query)
 
