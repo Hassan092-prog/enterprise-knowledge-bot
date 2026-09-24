@@ -36,10 +36,11 @@ def run_tabular_query(query: str, filename: str) -> str:
         db = SQLDatabase(engine)
         toolkit = SQLDatabaseToolkit(db=db, llm=llm)
         
+        agent_type = "tool-calling" if LLM_PROVIDER != "mistral" else "zero-shot-react-description"
         agent = create_sql_agent(
             llm=llm,
             toolkit=toolkit,
-            agent_type="tool-calling",
+            agent_type=agent_type,
             verbose=True,
             handle_parsing_errors=True
         )

@@ -25,15 +25,17 @@ Standard ChatGPT cannot do this securely, nor does it have access to company-spe
 - **Markdown Streaming UI:** Beautiful, dark-mode native Next.js frontend. The LLM's response streams in real-time, instantly rendering Markdown (tables, code blocks, bold text) as it arrives.
 - **Multi-Format Ingestion:** Upload PDFs, DOCX, TXT, and CSVs. Automatically handles parsing, chunking, and embedding.
 - **Hybrid Search Architecture:** Uses ChromaDB for dense vector embeddings and BM25 for sparse keyword search.
+- **Tabular Data Agent:** Features an intelligent router that detects queries targeting CSV documents and routes them to a dedicated Pandas Agent for complex tabular analysis, aggregations, and data calculations.
 
 ## 🏗️ System Architecture
 
 ```text
 User/Admin Upload → Parser → Chunker → Embedder → ChromaDB (Tagged with user_id or is_global)
                                                                ↓
-User Query → Auth Check → Query Embedding → Semantic Search (Filtered by Identity)
-                                                               ↓
-                                      Context + Prompt → LLM (Mistral/OpenAI) → Streaming UI
+User Query → Auth Check → Query Routing ──(CSV)──> Pandas Tabular Agent → Streaming UI
+                                  └──(Text)─> Hybrid Search (Vector + BM25)
+                                                   ↓
+                                         Context + Prompt → LLM (Mistral/OpenAI) → Streaming UI
 ```
 
 ## 🛠️ Tech Stack

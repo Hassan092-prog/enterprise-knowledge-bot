@@ -34,7 +34,9 @@ export default function Login() {
       localStorage.setItem("token", data.access_token);
       router.push("/");
     } catch (err: unknown) {
-      if (err instanceof Error) {
+      if (err instanceof TypeError && err.message.includes('Failed to fetch')) {
+        setError("Cannot connect to the backend server. Please check your network connection.");
+      } else if (err instanceof Error) {
         setError(err.message);
       } else {
         setError("An unknown error occurred");

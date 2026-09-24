@@ -38,6 +38,8 @@ retriever = None
 @app.on_event("startup")
 async def startup_event():
     global retriever
+    from src.config import validate_config
+    validate_config()
     Base.metadata.create_all(bind=engine)
     retriever = Retriever()
 
@@ -203,9 +205,13 @@ def query_bot(request: QueryRequest, db: Session = Depends(get_db), current_user
         def generate_tabular():
             from src.database import SessionLocal
             
-            # Since Pandas agent doesn't stream token-by-token out of the box, we yield the whole thing
-            response = run_tabular_query(request.query, target_file)
-            yield response
+            try:
+                # Since Pandas agent doesn't stream token-by-token out of the box, we yield the whole thing
+                response = run_tabular_query(request.query, target_file)
+                yield response
+            except Exception as e:
+                response = f"\n\n[Error executing tabular query: {str(e)}]"
+                yield response
             
             with SessionLocal() as session:
                 bot_msg = ChatMessage(session_id=request.session_id, role="assistant", content=response)
@@ -220,9 +226,14 @@ def query_bot(request: QueryRequest, db: Session = Depends(get_db), current_user
     def generate():
         from src.database import SessionLocal
         full_response = ""
-        for chunk in stream_answer(request.query, chunks):
-            full_response += chunk
-            yield chunk
+        try:
+            for chunk in stream_answer(request.query, chunks):
+                full_response += chunk
+                yield chunk
+        except Exception as e:
+            error_msg = f"\n\n[Error generating response: {str(e)}]"
+            full_response += error_msg
+            yield error_msg
             
         with SessionLocal() as session:
             bot_msg = ChatMessage(session_id=request.session_id, role="assistant", content=full_response)

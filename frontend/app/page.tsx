@@ -58,13 +58,20 @@ export default function Home() {
       ...options.headers,
       Authorization: `Bearer ${token}`,
     };
-    const res = await fetch(url, { ...options, headers });
-    if (res.status === 401) {
-      localStorage.removeItem("token");
-      router.push("/login");
-      throw new Error("Unauthorized");
+    try {
+      const res = await fetch(url, { ...options, headers });
+      if (res.status === 401) {
+        localStorage.removeItem("token");
+        router.push("/login");
+        throw new Error("Unauthorized");
+      }
+      return res;
+    } catch (err: any) {
+      if (err.name === 'TypeError' && err.message.includes('Failed to fetch')) {
+        toast.error("Cannot connect to the backend server. Please check your network configuration.");
+      }
+      throw err;
     }
-    return res;
   };
 
 
