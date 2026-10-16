@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import ReactMarkdown, { Components } from 'react-markdown';
+import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
@@ -22,32 +22,34 @@ type Session = {
 };
 
 export default function Home() {
-  const [messages, setMessages] = useState<Message[]>([
-    { role: "assistant", content: "Hello! Start a new chat, upload documents, and ask me anything about them." },
-  ]);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [documents, setDocuments] = useState<string[]>([]);
   const [globalDocuments, setGlobalDocuments] = useState<string[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
   const [userRole, setUserRole] = useState<string>("user");
+  const [username, setUsername] = useState<string>("");
   const [pendingRequest, setPendingRequest] = useState<string | null>(null);
   const [isRequestingRole, setIsRequestingRole] = useState(false);
-  const [isGlobalDocsOpen, setIsGlobalDocsOpen] = useState(false);
+  const [activeDocTab, setActiveDocTab] = useState<"personal" | "global">("personal");
   
   const [isUploading, setIsUploading] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   
-  // Mention menu states
+  // Mention menu states (@ and !)
   const [showMentionMenu, setShowMentionMenu] = useState(false);
   const [mentionQuery, setMentionQuery] = useState("");
+  const [mentionPrefix, setMentionPrefix] = useState<"@" | "!">("@");
   const [mentionIndex, setMentionIndex] = useState(0);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const globalFileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
 
-  // Helper for authenticated fetch
+  // Authenticated fetch helper
   const authFetch = async (url: string, options: RequestInit = {}) => {
     const token = localStorage.getItem("token");
     if (!token) {
@@ -66,14 +68,13 @@ export default function Home() {
         throw new Error("Unauthorized");
       }
       return res;
-    } catch (err: any) {
-      if (err.name === 'TypeError' && err.message.includes('Failed to fetch')) {
-        toast.error("Cannot connect to the backend server. Please check your network configuration.");
+    } catch (err: unknown) {
+      if (err instanceof TypeError && err.message.includes('Failed to fetch')) {
+        toast.error("Network error: Cannot connect to backend server.");
       }
       throw err;
     }
   };
-
 
   const fetchDocuments = async () => {
     try {
@@ -94,13 +95,14 @@ export default function Home() {
       if (res.ok) {
         const data = await res.json();
         setUserRole(data.role || "user");
+        setUsername(data.username || "");
       }
       
       const reqRes = await authFetch(`${API_URL}/auth/my_request`);
       if (reqRes.ok) {
         const reqData = await reqRes.json();
         if (reqData) {
-            setPendingRequest(reqData.status === "pending" ? reqData.requested_role : null);
+          setPendingRequest(reqData.status === "pending" ? reqData.requested_role : null);
         }
       }
     } catch (error) {
@@ -114,11 +116,10 @@ export default function Home() {
       if (res.ok) {
         const data = await res.json();
         setSessions(data || []);
-        // Automatically select the most recent session if none is selected
         if (data.length > 0 && activeSessionId === null) {
-            setActiveSessionId(data[0].id);
+          setActiveSessionId(data[0].id);
         } else if (data.length === 0) {
-            handleNewChat();
+          handleNewChat();
         }
       }
     } catch (error) {
@@ -131,39 +132,38 @@ export default function Home() {
       const res = await authFetch(`${API_URL}/sessions/${sessionId}/messages`);
       if (res.ok) {
         const data = await res.json();
-        if (data.length > 0) {
-            setMessages(data);
-        } else {
-            setMessages([{ role: "assistant", content: "New chat started. What would you like to know?" }]);
-        }
+        setMessages(data || []);
       }
     } catch (error) {
       console.error("Failed to fetch messages:", error);
     }
   };
 
+
   const handleNewChat = async () => {
     try {
       const res = await authFetch(`${API_URL}/sessions`, {
-          method: "POST"
+        method: "POST",
       });
       if (res.ok) {
-          const newSession = await res.json();
-          await fetchSessions();
-          setActiveSessionId(newSession.id);
+        const newSession = await res.json();
+        await fetchSessions();
+        setActiveSessionId(newSession.id);
+        setTimeout(() => inputRef.current?.focus(), 100);
       }
     } catch (error) {
-       console.error("Failed to create new chat:", error);
+      console.error("Failed to create new chat:", error);
     }
   };
 
-  const handleDeleteSession = async (sessionId: number) => {
+  const handleDeleteSession = async (sessionId: number, e: React.MouseEvent) => {
+    e.stopPropagation();
     try {
       const res = await authFetch(`${API_URL}/sessions/${sessionId}`, {
         method: "DELETE",
       });
       if (res.ok) {
-        toast.success("Chat deleted");
+        toast.success("Session deleted");
         if (activeSessionId === sessionId) {
           setActiveSessionId(null);
         }
@@ -202,11 +202,43 @@ export default function Home() {
       });
 
       if (res.ok) {
-        toast.success("Document uploaded successfully");
-        await fetchDocuments();
+        const data = await res.json();
+        const taskId = data.task_id;
+        if (taskId) {
+          toast.loading("Indexing document chunks in Celery worker...", { id: "upload-task" });
+          let attempts = 0;
+          const pollInterval = setInterval(async () => {
+            attempts++;
+            try {
+              const statusRes = await authFetch(`${API_URL}/tasks/${taskId}`);
+              if (statusRes.ok) {
+                const statusData = await statusRes.json();
+                if (statusData.ready) {
+                  clearInterval(pollInterval);
+                  if (statusData.successful) {
+                    toast.success("Document ingested and vector indexed!", { id: "upload-task" });
+                  } else {
+                    toast.error(`Ingestion error: ${statusData.result || "Worker fault"}`, { id: "upload-task" });
+                  }
+                  await fetchDocuments();
+                }
+              }
+            } catch {
+              // continue polling
+            }
+            if (attempts > 30) {
+              clearInterval(pollInterval);
+              toast.error("Upload worker timed out", { id: "upload-task" });
+              await fetchDocuments();
+            }
+          }, 1500);
+        } else {
+          toast.success("Document uploaded successfully");
+          await fetchDocuments();
+        }
       } else {
         const err = await res.json();
-        toast.error(`Upload failed: ${err.detail}`);
+        toast.error(`Upload rejected: ${err.detail}`);
       }
     } catch (error) {
       console.error("Upload error:", error);
@@ -234,17 +266,20 @@ export default function Home() {
       });
 
       if (res.ok) {
-        toast.success("Global document uploaded successfully");
+        toast.success("Global document ingested successfully");
         await fetchDocuments();
       } else {
         const err = await res.json();
-        toast.error(`Global Upload failed: ${err.detail}`);
+        toast.error(`Global upload failed: ${err.detail}`);
       }
     } catch (error) {
       console.error("Upload error:", error);
       toast.error("Failed to connect to backend for global upload.");
     } finally {
       setIsUploading(false);
+      if (globalFileInputRef.current) {
+        globalFileInputRef.current.value = "";
+      }
     }
   };
 
@@ -258,27 +293,28 @@ export default function Home() {
       if (res.ok) {
         setPendingRequest(role);
         setIsRequestingRole(false);
-        toast.success(`Requested ${role} access successfully!`);
+        toast.success(`Access request for ${role.toUpperCase()} submitted.`);
       } else {
         const err = await res.json();
-        toast.error(`Request failed: ${err.detail}`);
+        toast.error(`Request rejected: ${err.detail}`);
       }
     } catch (error) {
-        console.error("Role request error:", error);
+      console.error("Role request error:", error);
     }
   };
 
-  const handleDelete = async (filename: string) => {
+  const handleDeleteDoc = async (filename: string, e: React.MouseEvent) => {
+    e.stopPropagation();
     try {
       const res = await authFetch(`${API_URL}/documents/${encodeURIComponent(filename)}`, {
         method: "DELETE",
       });
       if (res.ok) {
-        toast.success("Document deleted");
+        toast.success("Document removed from index");
         await fetchDocuments();
       } else {
         const err = await res.json();
-        toast.error(`Delete failed: ${err.detail || "Unknown error"}`);
+        toast.error(`Deletion failed: ${err.detail || "Unknown error"}`);
       }
     } catch (error) {
       console.error("Delete error:", error);
@@ -289,7 +325,7 @@ export default function Home() {
   // Auto-scroll to bottom of chat
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, isTyping]);
 
   // Initial load
   useEffect(() => {
@@ -307,10 +343,6 @@ export default function Home() {
   useEffect(() => {
     if (activeSessionId !== null) {
       fetchMessages(activeSessionId);
-    } else {
-      setMessages([
-        { role: "assistant", content: "Hello! Start a new chat, upload documents, and ask me anything about them." },
-      ]);
     }
   }, [activeSessionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -318,10 +350,11 @@ export default function Home() {
     const val = e.target.value;
     setInput(val);
 
-    const match = val.match(/!([\w\.,_-]*)$/);
+    const match = val.match(/([@!])([\w\.,_-]*)$/);
     if (match) {
       setShowMentionMenu(true);
-      setMentionQuery(match[1]);
+      setMentionPrefix(match[1] as "@" | "!");
+      setMentionQuery(match[2]);
       setMentionIndex(0);
     } else {
       setShowMentionMenu(false);
@@ -329,11 +362,12 @@ export default function Home() {
   };
 
   const handleSelectMention = (doc: string) => {
-    const match = input.match(/!([\w\.,_-]*)$/);
+    const match = input.match(/([@!])([\w\.,_-]*)$/);
     if (match) {
-      const newInput = input.substring(0, match.index) + "!" + doc + " ";
+      const newInput = input.substring(0, match.index) + mentionPrefix + doc + " ";
       setInput(newInput);
       setShowMentionMenu(false);
+      inputRef.current?.focus();
     }
   };
 
@@ -341,36 +375,43 @@ export default function Home() {
     d.toLowerCase().includes(mentionQuery.toLowerCase())
   );
 
-  const handleSend = async () => {
-    if (!input.trim()) return;
+  const handleSend = async (queryText?: string) => {
+    const userQuery = (queryText || input).trim();
+    if (!userQuery) return;
     
-    // Ensure we have an active session
-    const currentSessionId = activeSessionId;
+    let currentSessionId = activeSessionId;
     if (currentSessionId === null) {
-       await handleNewChat();
-       // Fetch sessions should update state, but to be safe and avoid race conditions we'd ideally await the return ID
-       // For now, if activeSessionId is null, handleNewChat sets it shortly.
-       return; 
+      try {
+        const res = await authFetch(`${API_URL}/sessions`, { method: "POST" });
+        if (res.ok) {
+          const newSession = await res.json();
+          currentSessionId = newSession.id;
+          setActiveSessionId(newSession.id);
+          await fetchSessions();
+        } else {
+          return;
+        }
+      } catch {
+        return;
+      }
     }
 
-    const userQuery = input.trim();
     setInput("");
+    setShowMentionMenu(false);
     
     const isFirstMessage = messages.length <= 1;
-    
     setMessages((prev) => [...prev, { role: "user", content: userQuery }]);
     setIsTyping(true);
 
-    // Placeholder for assistant response
+    // Placeholder for streaming assistant response
     setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
 
-    if (isFirstMessage) {
-        let generatedTitle = userQuery.split(" ").slice(0, 4).join(" ");
-        if (generatedTitle.length > 35) {
-            generatedTitle = generatedTitle.substring(0, 32);
-        }
-        generatedTitle += (userQuery.length > generatedTitle.length ? "..." : "");
-        handleUpdateSessionTitle(currentSessionId, generatedTitle);
+    if (isFirstMessage && currentSessionId) {
+      let generatedTitle = userQuery.split(" ").slice(0, 5).join(" ");
+      if (generatedTitle.length > 32) {
+        generatedTitle = generatedTitle.substring(0, 30) + "...";
+      }
+      handleUpdateSessionTitle(currentSessionId, generatedTitle);
     }
 
     try {
@@ -381,7 +422,7 @@ export default function Home() {
       });
 
       if (!res.ok) {
-        throw new Error("Failed to get response");
+        throw new Error("Failed to receive telemetry response");
       }
 
       const reader = res.body?.getReader();
@@ -412,7 +453,7 @@ export default function Home() {
         const newMessages = [...prev];
         newMessages[newMessages.length - 1] = {
           role: "assistant",
-          content: "Sorry, I encountered an error connecting to the server.",
+          content: "System alert: Error connecting to inference pipeline. Check model configuration or server status.",
         };
         return newMessages;
       });
@@ -421,239 +462,448 @@ export default function Home() {
     }
   };
 
+  const activeSessionTitle = sessions.find(s => s.id === activeSessionId)?.title || (activeSessionId ? `Investigation #${activeSessionId}` : "New Investigation");
+
   return (
-    <div className="flex h-screen bg-paper text-ink font-sans selection:bg-accent selection:text-accent-ink">
+    <div className="flex h-screen bg-paper text-ink overflow-hidden">
       
-      {/* SIDEBAR */}
-      <div className="w-80 bg-paper-2 border-r border-border flex flex-col z-10">
-        <div className="p-m border-b border-border bg-paper-2 flex justify-between items-center">
-          <div>
-            <h1 className="text-xl font-bold text-ink tracking-tight flex items-center gap-2">
-              Enterprise RAG
-            </h1>
-            <p className="text-sm text-muted mt-1">Knowledge base</p>
+      {/* SIDEBAR: SESSIONS & KNOWLEDGE BASE */}
+      <aside className="w-80 bg-paper-2 border-r border-rule flex flex-col z-20 shrink-0">
+        
+        {/* Brand & Workspace Header */}
+        <div className="p-4 border-b border-rule flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <span className="w-2.5 h-2.5 rounded-full bg-accent animate-pulse" />
+            <div>
+              <div className="font-display font-semibold text-sm tracking-tight text-ink uppercase">
+                Knowledge Engine
+              </div>
+              <div className="font-mono text-[10px] uppercase text-muted tracking-wider">
+                Hybrid RAG + SQL Console
+              </div>
+            </div>
           </div>
-          <div className="flex flex-col gap-2">
+          <button 
+            onClick={handleNewChat}
+            className="p-1.5 rounded-base border border-rule hover:border-accent bg-paper hover:bg-paper-3 text-ink transition-colors cursor-pointer text-xs font-mono"
+            title="Start New Investigation (Ctrl+N)"
+          >
+            + New
+          </button>
+        </div>
+
+        {/* User Identity / Access Control Bar */}
+        <div className="px-4 py-2.5 border-b border-rule bg-paper flex items-center justify-between text-xs">
+          <div className="flex items-center gap-2 overflow-hidden">
+            <span className="font-mono text-[10px] px-1.5 py-0.5 rounded border border-rule bg-paper-2 text-muted uppercase">
+              {userRole}
+            </span>
+            <span className="truncate text-ink-secondary font-medium" title={username}>
+              {username || "Analyst"}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-1.5">
             {userRole === "admin" && (
               <button
                 onClick={() => router.push("/admin")}
-                className="text-xs bg-paper border border-border hover:border-accent text-ink px-2 py-1 rounded-base transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
+                className="font-mono text-[11px] px-2 py-0.5 rounded border border-rule hover:border-accent text-ink transition-colors cursor-pointer"
               >
                 Admin
               </button>
             )}
             {userRole === "user" && !pendingRequest && (
-               <button
+              <button
                 onClick={() => setIsRequestingRole(true)}
-                className="text-xs bg-paper border border-border hover:border-accent text-ink px-2 py-1 rounded-base transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
-               >
-                 Request Access
-               </button>
+                className="font-mono text-[11px] px-2 py-0.5 rounded border border-rule hover:border-accent text-accent transition-colors cursor-pointer"
+              >
+                Request Role
+              </button>
             )}
             {pendingRequest && (
-               <button disabled className="text-xs bg-paper-3 text-muted border border-border px-2 py-1 rounded-base cursor-not-allowed">
-                 {pendingRequest} Pending
-               </button>
+              <span className="font-mono text-[10px] px-1.5 py-0.5 rounded border border-rule text-muted">
+                {pendingRequest} req
+              </span>
             )}
             <button
               onClick={() => {
                 localStorage.removeItem("token");
                 router.push("/login");
               }}
-              className="text-xs bg-paper border border-border hover:border-accent text-ink px-2 py-1 rounded-base transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
+              className="text-muted hover:text-ruby p-1 transition-colors cursor-pointer"
+              title="Terminate Session"
             >
-              Logout
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+              </svg>
             </button>
           </div>
         </div>
 
-        {/* CHAT HISTORY SECTION */}
-        <div className="p-m border-b border-border flex-1 overflow-y-auto custom-scrollbar">
-           <div className="flex justify-between items-center mb-4">
-               <h2 className="text-xs font-semibold text-muted uppercase tracking-wider">
-                 History
-               </h2>
-               <button 
-                  onClick={handleNewChat} 
-                  className="text-xs bg-paper border border-border hover:border-accent text-ink px-2 py-1 rounded-base transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
-               >
-                   + New
-               </button>
-           </div>
-           
-           <ul className="space-y-1">
-              {sessions.map((session) => (
-                <li key={session.id} className="group relative">
-                    <button 
-                        onClick={() => setActiveSessionId(session.id)}
-                        className={`w-full text-left p-2 rounded-base text-sm truncate transition-colors pr-8 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus ${
-                            activeSessionId === session.id 
-                                ? "bg-accent text-accent-ink" 
-                                : "text-ink hover:bg-paper border border-transparent hover:border-border"
-                        }`}
-                    >
-                        {session.title || `Chat #${session.id}`}
-                    </button>
-                    <button
-                      onClick={() => handleDeleteSession(session.id)}
-                      className={`absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-base transition-opacity focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus ${
-                          activeSessionId === session.id ? "text-accent-ink hover:text-paper" : "text-muted hover:text-ink opacity-0 group-hover:opacity-100"
-                      }`}
-                      title="Delete Chat"
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                        <path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 006 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 10.23 1.482l.149-.022.841 10.518A2.75 2.75 0 007.596 19h4.807a2.75 2.75 0 002.742-2.53l.841-10.52.149.023a.75.75 0 00.23-1.482A41.03 41.03 0 0014 4.193V3.75A2.75 2.75 0 0011.25 1h-2.5zM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4zM8.58 7.72a.75.75 0 00-1.5.06l.3 7.5a.75.75 0 101.5-.06l-.3-7.5zm4.34.06a.75.75 0 10-1.5-.06l-.3 7.5a.75.75 0 101.5.06l.3-7.5z" clipRule="evenodd" />
-                      </svg>
-                    </button>
-                </li>
-              ))}
-           </ul>
-        </div>
+        {/* SESSIONS HISTORY SECTION */}
+        <div className="flex-1 min-h-[160px] overflow-y-auto p-3 custom-scrollbar border-b border-rule">
+          <div className="flex items-center justify-between mb-2 px-1">
+            <span className="font-mono text-[11px] uppercase tracking-wider text-muted font-medium">
+              Investigations ({sessions.length})
+            </span>
+          </div>
 
-        {/* DOCUMENTS SECTION */}
-        <div className="flex-1 overflow-y-auto p-m space-y-4 custom-scrollbar">
-          <h2 className="text-xs font-semibold text-muted uppercase tracking-wider mb-2">
-            Documents
-          </h2>
-          
-          {documents.length === 0 ? (
-            <div className="text-sm text-muted text-center py-8 border border-border rounded-base bg-paper">
-              No documents yet.
+          {sessions.length === 0 ? (
+            <div className="text-center py-6 border border-dashed border-rule rounded-base text-muted text-xs font-mono">
+              [NO_ACTIVE_INVESTIGATIONS]
             </div>
           ) : (
-            <ul className="space-y-2">
-              {documents.map((doc, idx) => (
-                <li key={idx} className="group flex items-center justify-between p-3 rounded-base bg-paper border border-border hover:border-accent transition-colors">
-                  <span className="text-sm truncate mr-2 text-ink" title={doc}>
-                    {doc}
-                  </span>
+            <div className="space-y-1">
+              {sessions.map((session) => (
+                <div
+                  key={session.id}
+                  onClick={() => setActiveSessionId(session.id)}
+                  className={`group relative flex items-center justify-between px-3 py-2 rounded-base cursor-pointer transition-colors text-xs ${
+                    activeSessionId === session.id
+                      ? "bg-accent-subtle border border-accent/40 text-ink font-medium"
+                      : "text-ink-secondary hover:bg-paper hover:text-ink border border-transparent"
+                  }`}
+                >
+                  <div className="truncate pr-5">
+                    {session.title || `Investigation #${session.id}`}
+                  </div>
                   <button
-                    onClick={() => handleDelete(doc)}
-                    className="text-muted hover:text-ink opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-base focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
-                    title="Remove document"
+                    onClick={(e) => handleDeleteSession(session.id, e)}
+                    className="opacity-0 group-hover:opacity-100 p-1 text-muted hover:text-ruby transition-opacity"
+                    title="Delete investigation"
                   >
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                      <path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 006 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 10.23 1.482l.149-.022.841 10.518A2.75 2.75 0 007.596 19h4.807a2.75 2.75 0 002.742-2.53l.841-10.52.149.023a.75.75 0 00.23-1.482A41.03 41.03 0 0014 4.193V3.75A2.75 2.75 0 0011.25 1h-2.5zM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4zM8.58 7.72a.75.75 0 00-1.5.06l.3 7.5a.75.75 0 101.5-.06l-.3-7.5zm4.34.06a.75.75 0 10-1.5-.06l-.3 7.5a.75.75 0 101.5.06l.3-7.5z" clipRule="evenodd" />
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
+                      <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
                     </svg>
                   </button>
-                </li>
+                </div>
               ))}
-            </ul>
+            </div>
           )}
-          
-          {/* GLOBAL DOCUMENTS */}
-          <div className="mt-6">
+        </div>
+
+        {/* KNOWLEDGE REPOSITORY SECTION */}
+        <div className="flex-1 min-h-[220px] flex flex-col p-3 bg-paper">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex gap-2">
+              <button
+                onClick={() => setActiveDocTab("personal")}
+                className={`font-mono text-[11px] uppercase tracking-wider pb-1 transition-colors cursor-pointer border-b-2 ${
+                  activeDocTab === "personal"
+                    ? "border-accent text-ink font-semibold"
+                    : "border-transparent text-muted hover:text-ink"
+                }`}
+              >
+                Personal ({documents.length})
+              </button>
+              <button
+                onClick={() => setActiveDocTab("global")}
+                className={`font-mono text-[11px] uppercase tracking-wider pb-1 transition-colors cursor-pointer border-b-2 ${
+                  activeDocTab === "global"
+                    ? "border-accent text-ink font-semibold"
+                    : "border-transparent text-muted hover:text-ink"
+                }`}
+              >
+                Global ({globalDocuments.length})
+              </button>
+            </div>
             <button
-              onClick={() => setIsGlobalDocsOpen(!isGlobalDocsOpen)}
-              className="w-full flex justify-between items-center text-xs font-semibold text-muted uppercase tracking-wider mb-2 hover:text-ink transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
+              onClick={() => {
+                fetchDocuments();
+                fetchSessions();
+              }}
+              className="text-muted hover:text-ink p-1 font-mono text-[11px] transition-colors"
+              title="Refresh repository"
             >
-              <span>Global Documents ({globalDocuments.length})</span>
-              <span>{isGlobalDocsOpen ? "▼" : "▶"}</span>
+              ↻
             </button>
-            
-            {isGlobalDocsOpen && (
-              globalDocuments.length === 0 ? (
-                <div className="text-sm text-muted text-center py-4 border border-border rounded-base bg-paper">
-                  No global documents.
+          </div>
+
+          <div className="flex-1 overflow-y-auto custom-scrollbar space-y-1.5 my-1">
+            {activeDocTab === "personal" ? (
+              documents.length === 0 ? (
+                <div className="text-center py-6 border border-dashed border-rule rounded-base text-muted text-xs font-mono">
+                  [NO_PERSONAL_DOCUMENTS]
                 </div>
               ) : (
-                <ul className="space-y-2 mt-2">
-                  {globalDocuments.map((doc, idx) => (
-                    <li key={idx} className="flex items-center p-3 rounded-base bg-paper border border-border text-ink">
-                      <span className="text-sm truncate" title={doc}>
+                documents.map((doc, idx) => (
+                  <div
+                    key={idx}
+                    className="group flex items-center justify-between p-2 rounded-base bg-paper-2 border border-rule hover:border-rule-focus text-xs transition-colors"
+                  >
+                    <div className="flex items-center gap-1.5 overflow-hidden">
+                      <span className="font-mono text-[9px] uppercase px-1 py-0.5 rounded bg-paper border border-rule text-muted">
+                        {doc.split('.').pop()}
+                      </span>
+                      <span className="truncate text-ink-secondary" title={doc}>
                         {doc}
                       </span>
-                    </li>
-                  ))}
-                </ul>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={() => {
+                          const prefix = doc.endsWith('.csv') ? '!' : '@';
+                          setInput((prev) => `${prev} ${prefix}${doc} `);
+                          inputRef.current?.focus();
+                        }}
+                        className="text-muted hover:text-accent p-0.5 font-mono text-[10px]"
+                        title="Target document in prompt"
+                      >
+                        Target
+                      </button>
+                      <button
+                        onClick={(e) => handleDeleteDoc(doc, e)}
+                        className="opacity-0 group-hover:opacity-100 p-0.5 text-muted hover:text-ruby transition-opacity"
+                        title="Remove document"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )
+            ) : (
+              globalDocuments.length === 0 ? (
+                <div className="text-center py-6 border border-dashed border-rule rounded-base text-muted text-xs font-mono">
+                  [NO_GLOBAL_DOCUMENTS]
+                </div>
+              ) : (
+                globalDocuments.map((doc, idx) => (
+                  <div
+                    key={idx}
+                    className="flex items-center justify-between p-2 rounded-base bg-paper-2 border border-rule text-xs"
+                  >
+                    <div className="flex items-center gap-1.5 overflow-hidden">
+                      <span className="font-mono text-[9px] uppercase px-1 py-0.5 rounded bg-paper border border-rule text-muted">
+                        {doc.split('.').pop()}
+                      </span>
+                      <span className="truncate text-ink-secondary" title={doc}>
+                        {doc}
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => {
+                        const prefix = doc.endsWith('.csv') ? '!' : '@';
+                        setInput((prev) => `${prev} ${prefix}${doc} `);
+                        inputRef.current?.focus();
+                      }}
+                      className="text-muted hover:text-accent font-mono text-[10px]"
+                      title="Target document in prompt"
+                    >
+                      Target
+                    </button>
+                  </div>
+                ))
               )
             )}
-            {isGlobalDocsOpen && (userRole === "admin" || userRole === "editor") && (
-              <div className="mt-2">
-                <input
-                  type="file"
-                  id="globalUpload"
-                  onChange={handleGlobalUpload}
-                  className="hidden"
-                  accept=".txt,.pdf,.csv,.docx"
-                />
+          </div>
+
+          {/* Upload trigger */}
+          <div className="pt-2 border-t border-rule mt-auto">
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={handleUpload}
+              className="hidden"
+              accept=".txt,.pdf,.csv,.docx"
+            />
+            <input
+              type="file"
+              ref={globalFileInputRef}
+              onChange={handleGlobalUpload}
+              className="hidden"
+              accept=".txt,.pdf,.csv,.docx"
+            />
+            {activeDocTab === "personal" ? (
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isUploading}
+                className="w-full py-2 px-3 rounded-base bg-paper-2 hover:bg-paper-3 border border-rule hover:border-accent text-ink text-xs font-mono uppercase tracking-wider font-medium transition-colors disabled:opacity-50 cursor-pointer flex items-center justify-center gap-2"
+              >
+                {isUploading ? "Processing Task..." : "+ Ingest Document"}
+              </button>
+            ) : (
+              (userRole === "admin" || userRole === "editor") ? (
                 <button
-                  onClick={() => document.getElementById("globalUpload")?.click()}
+                  onClick={() => globalFileInputRef.current?.click()}
                   disabled={isUploading}
-                  className="w-full text-xs py-2 px-3 border border-border text-ink bg-paper hover:border-accent rounded-base transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
+                  className="w-full py-2 px-3 rounded-base bg-paper-2 hover:bg-paper-3 border border-rule hover:border-accent text-ink text-xs font-mono uppercase tracking-wider font-medium transition-colors disabled:opacity-50 cursor-pointer flex items-center justify-center gap-2"
                 >
-                  Upload Global Doc
+                  {isUploading ? "Uploading Global..." : "+ Ingest Global Doc"}
                 </button>
-              </div>
+              ) : (
+                <div className="text-center font-mono text-[10px] text-muted py-1">
+                  [GLOBAL_UPLOAD: EDITOR_ROLE_REQUIRED]
+                </div>
+              )
             )}
           </div>
         </div>
+      </aside>
 
-        <div className="p-m border-t border-border bg-paper-2">
-          <input
-            type="file"
-            ref={fileInputRef}
-            onChange={handleUpload}
-            className="hidden"
-            accept=".txt,.pdf,.csv,.docx"
-          />
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            disabled={isUploading}
-            className="w-full flex items-center justify-center gap-2 py-2 px-4 rounded-base bg-paper border border-border hover:border-accent text-ink disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
-          >
-            {isUploading ? "Uploading..." : "Upload Document"}
-          </button>
-        </div>
-      </div>
-
-      {/* CHAT AREA */}
-      <div className="flex-1 flex flex-col bg-paper relative overflow-hidden">
+      {/* MAIN INVESTIGATION CONSOLE */}
+      <main className="flex-1 flex flex-col bg-paper relative overflow-hidden">
         
-        {/* Atmospheric Radial Blooms */}
-        <div className="absolute top-[-200px] right-[-100px] w-[600px] h-[600px] rounded-full bg-accent opacity-[0.07] blur-[100px] pointer-events-none" />
-        <div className="absolute bottom-[100px] left-[-100px] w-[500px] h-[500px] rounded-full bg-accent opacity-[0.05] blur-[80px] pointer-events-none" />
+        {/* TOP STATUS BAR */}
+        <header className="h-12 border-b border-rule px-6 flex items-center justify-between bg-paper-2 shrink-0 z-10">
+          <div className="flex items-center gap-3">
+            <span className="font-mono text-xs uppercase text-muted font-medium">Session:</span>
+            <span className="font-display font-medium text-sm text-ink truncate max-w-md">
+              {activeSessionTitle}
+            </span>
+          </div>
 
-        <div className="flex-1 overflow-y-auto p-l space-y-6 custom-scrollbar z-10 relative">
+          <div className="flex items-center gap-4 text-xs font-mono text-muted">
+            <div className="hidden md:flex items-center gap-2">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald" />
+              <span>ChromaDB Ready · 384d</span>
+            </div>
+            <div className="hidden sm:flex items-center gap-2 border-l border-rule pl-4">
+              <span className="w-1.5 h-1.5 rounded-full bg-accent" />
+              <span>Groq / GPT-OSS-120B</span>
+            </div>
+          </div>
+        </header>
+
+        {/* MESSAGE STREAM AREA */}
+        <div className="flex-1 overflow-y-auto px-4 md:px-8 py-6 space-y-6 custom-scrollbar">
+          
+          {/* Workstation Readiness Dossier (When no messages exist yet) */}
+          {messages.length === 0 && (
+            <div className="max-w-3xl mx-auto my-6 p-6 bg-paper-2 rounded-card border border-rule shadow-sm">
+              <div className="flex items-center gap-2 mb-2 pb-2 border-b border-rule">
+                <span className="w-2 h-2 rounded-full bg-accent" />
+                <span className="font-mono text-xs uppercase tracking-wider text-muted font-medium">
+                  Workspace Dossier Ready
+                </span>
+              </div>
+              <h2 className="text-lg font-display font-semibold text-ink mb-1">
+                Enterprise Knowledge & Tabular Engine
+              </h2>
+              <p className="text-xs text-muted mb-6">
+                Direct vector queries via hybrid ChromaDB + BM25 fusion or SQL analytical execution across CSV tables.
+              </p>
+
+              <div className="space-y-2">
+                <span className="font-mono text-[11px] uppercase tracking-wider text-muted block mb-1">
+                  Preset Inquiries:
+                </span>
+                <button
+                  onClick={() => handleSend("Which department has the highest YTD expenses in !Employee_ID,Employee_Name,Departmen.csv?")}
+                  className="w-full text-left p-3 rounded-base bg-paper hover:bg-paper-3 border border-rule hover:border-accent text-xs font-body text-ink transition-all flex items-center justify-between group cursor-pointer"
+                >
+                  <div className="flex items-center gap-2 overflow-hidden">
+                    <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-emerald-subtle text-emerald border border-emerald/30 uppercase font-semibold shrink-0">
+                      SQL
+                    </span>
+                    <span className="truncate">Which department has the highest YTD expenses in <strong>!Employee_ID,Employee_Name,Departmen.csv</strong>?</span>
+                  </div>
+                  <span className="font-mono text-[11px] text-muted group-hover:text-accent shrink-0 ml-3">Execute SQL →</span>
+                </button>
+                <button
+                  onClick={() => handleSend("What is the total Q1 revenue generated by the Enterprise Sales department?")}
+                  className="w-full text-left p-3 rounded-base bg-paper hover:bg-paper-3 border border-rule hover:border-accent text-xs font-body text-ink transition-all flex items-center justify-between group cursor-pointer"
+                >
+                  <div className="flex items-center gap-2 overflow-hidden">
+                    <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-emerald-subtle text-emerald border border-emerald/30 uppercase font-semibold shrink-0">
+                      CALC
+                    </span>
+                    <span className="truncate">What is the total Q1 revenue generated by the Enterprise Sales department?</span>
+                  </div>
+                  <span className="font-mono text-[11px] text-muted group-hover:text-accent shrink-0 ml-3">Calculate →</span>
+                </button>
+                <button
+                  onClick={() => handleSend("Summarize the policy guidelines and procedures mentioned in the uploaded documents.")}
+                  className="w-full text-left p-3 rounded-base bg-paper hover:bg-paper-3 border border-rule hover:border-accent text-xs font-body text-ink transition-all flex items-center justify-between group cursor-pointer"
+                >
+                  <div className="flex items-center gap-2 overflow-hidden">
+                    <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-accent-subtle text-accent border border-accent/30 uppercase font-semibold shrink-0">
+                      RRF
+                    </span>
+                    <span className="truncate">Summarize the policy guidelines and procedures mentioned in uploaded documents.</span>
+                  </div>
+                  <span className="font-mono text-[11px] text-muted group-hover:text-accent shrink-0 ml-3">RRF Retrieve →</span>
+                </button>
+              </div>
+
+              <div className="mt-6 pt-4 border-t border-rule flex items-center justify-between text-[11px] font-mono text-muted">
+                <span>Target files: Type <code className="text-ink bg-paper px-1 rounded border border-rule">@file</code> or <code className="text-ink bg-paper px-1 rounded border border-rule">!table</code></span>
+                <span>Hybrid RRF Reranker Active</span>
+              </div>
+            </div>
+          )}
+
+          {/* Actual Messages */}
           {messages.map((msg, i) => (
             <div
               key={i}
-              className={`flex ${
-                msg.role === "user" ? "justify-end" : "justify-start"
-              }`}
+              className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
             >
               <div
-                className={`max-w-3xl rounded-base px-5 py-4 ${
+                className={`max-w-3xl rounded-card p-5 ${
                   msg.role === "user"
-                    ? "bg-accent text-accent-ink border border-transparent shadow-[0_4px_24px_rgba(0,0,0,0.1)] shadow-accent/20"
-                    : "bg-paper-2 text-ink border border-border"
+                    ? "bg-paper-3 text-ink border border-rule-focus"
+                    : "bg-paper-2 text-ink-secondary border border-rule shadow-sm"
                 }`}
               >
-                <div className={`whitespace-pre-wrap leading-relaxed text-sm md:text-base ${msg.role === "assistant" ? "markdown-body" : ""}`}>
+                {/* Assistant Telemetry Header */}
+                {msg.role === "assistant" && (
+                  <div className="flex items-center justify-between pb-3 mb-3 border-b border-rule text-[11px] font-mono text-muted">
+                    <div className="flex items-center gap-2">
+                      <span className="w-1.5 h-1.5 rounded-full bg-accent" />
+                      <span className="uppercase tracking-wider">Inference Telemetry</span>
+                    </div>
+                    <span>GPT-OSS-120B // RRF-Rerank</span>
+                  </div>
+                )}
+
+                {/* Content Render */}
+                <div className={msg.role === "assistant" ? "markdown-body" : "text-sm text-ink font-body leading-relaxed whitespace-pre-wrap"}>
                   {msg.role === "assistant" ? (
                     <ReactMarkdown 
                       remarkPlugins={[remarkGfm]}
                       components={{
                         code({node, inline, className, children, ...props}: any) {
-                          const match = /language-(\w+)/.exec(className || '')
-                          return !inline && match ? (
-                            <SyntaxHighlighter
-                              {...props}
-                              style={vscDarkPlus}
-                              language={match[1]}
-                              PreTag="div"
-                            >
-                              {String(children).replace(/\n$/, '')}
-                            </SyntaxHighlighter>
-                          ) : (
-                            <code {...props} className={className}>
+                          const match = /language-(\w+)/.exec(className || '');
+                          if (!inline && match) {
+                            return (
+                              <div className="my-3 rounded-base overflow-hidden border border-rule">
+                                <div className="px-3 py-1 bg-paper-3 border-b border-rule text-[10px] font-mono uppercase text-muted flex justify-between items-center">
+                                  <span>{match[1]}</span>
+                                  <span>Engine Output</span>
+                                </div>
+                                <SyntaxHighlighter
+                                  {...props}
+                                  style={vscDarkPlus}
+                                  language={match[1]}
+                                  PreTag="div"
+                                  customStyle={{ margin: 0, background: 'var(--color-paper)' }}
+                                >
+                                  {String(children).replace(/\n$/, '')}
+                                </SyntaxHighlighter>
+                              </div>
+                            );
+                          }
+                          const text = String(children);
+                          if (text.startsWith('📄')) {
+                            return (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-brass/40 bg-brass-subtle text-brass font-mono text-[11px] font-medium align-middle mx-1 shadow-xs">
+                                {children}
+                              </span>
+                            );
+                          }
+                          return (
+                            <code {...props} className="font-mono text-xs px-1.5 py-0.5 rounded bg-paper-3 border border-rule text-ink">
                               {children}
                             </code>
-                          )
+                          );
                         }
                       }}
                     >
-                      {msg.content}
+                      {msg.content.replace(
+                        /[\[\u3010\(]Source:\s*([^,\]\u3011\)]+)(?:,\s*(?:Page\s*)?([^\]\u3011\)]+))?[\]\u3011\)]/gi,
+                        (_, file, page) => (page ? `\`📄 ${file.trim()} · Page ${page.trim()}\`` : `\`📄 ${file.trim()}\``)
+                      )}
                     </ReactMarkdown>
                   ) : (
                     msg.content
@@ -662,40 +912,48 @@ export default function Home() {
               </div>
             </div>
           ))}
+
+          {/* Tactile Processing Telemetry readout (Zero bouncing dots) */}
           {isTyping && (
             <div className="flex justify-start">
-              <div className="bg-paper border border-border text-muted rounded-base px-5 py-4 w-24 flex items-center justify-center gap-1">
-                <span className="w-2 h-2 rounded-full bg-border animate-bounce [animation-delay:-0.3s]"></span>
-                <span className="w-2 h-2 rounded-full bg-border animate-bounce [animation-delay:-0.15s]"></span>
-                <span className="w-2 h-2 rounded-full bg-border animate-bounce"></span>
+              <div className="bg-paper-2 border border-rule rounded-card px-4 py-3 flex items-center gap-3">
+                <span className="w-2 h-2 rounded-full bg-accent animate-ping" />
+                <span className="font-mono text-xs text-muted">
+                  [PROCESSING] Executing hybrid retrieval & inference pipeline...
+                </span>
               </div>
             </div>
           )}
+
           <div ref={messagesEndRef} />
         </div>
 
-        {/* INPUT AREA */}
-        <div className="p-4 md:px-6 md:py-4 bg-paper border-t border-border z-10 relative">
-          <div className="max-w-4xl mx-auto relative group">
+        {/* BOTTOM COMMAND CONSOLE / INPUT AREA */}
+        <div className="p-4 md:px-8 md:py-4 bg-paper border-t border-rule shrink-0 z-20">
+          <div className="max-w-4xl mx-auto relative">
             
-            {/* AUTOCOMPLETE MENU */}
+            {/* AUTOCOMPLETE FLOATING MENU (@ and !) */}
             {showMentionMenu && filteredDocs.length > 0 && (
-              <div className="absolute bottom-full left-0 mb-2 w-full max-w-md bg-paper border border-border rounded-base shadow-sm overflow-hidden z-50">
-                <div className="px-3 py-2 bg-paper-2 border-b border-border text-xs font-semibold text-muted uppercase">
-                  Select a document
+              <div className="absolute bottom-full left-0 mb-2 w-full max-w-md bg-paper-2 border border-rule rounded-card shadow-lg overflow-hidden z-50">
+                <div className="px-3 py-2 bg-paper-3 border-b border-rule flex justify-between items-center text-[11px] font-mono text-muted uppercase">
+                  <span>Target {mentionPrefix === '!' ? 'Tabular Dataset' : 'Document'}</span>
+                  <span>Use ↑↓ and Return</span>
                 </div>
-                <ul className="max-h-60 overflow-y-auto custom-scrollbar">
+                <ul className="max-h-56 overflow-y-auto custom-scrollbar p-1">
                   {filteredDocs.map((doc, idx) => (
                     <li key={idx}>
                       <button
                         onClick={() => handleSelectMention(doc)}
-                        className={`w-full text-left px-4 py-3 text-sm transition-colors flex items-center gap-2 ${
+                        className={`w-full text-left px-3 py-2 rounded-base text-xs font-mono transition-colors flex items-center justify-between cursor-pointer ${
                           mentionIndex === idx 
                             ? "bg-accent text-accent-ink" 
-                            : "text-ink hover:bg-paper-2"
+                            : "text-ink hover:bg-paper-3"
                         }`}
                       >
-                        {doc}
+                        <span className="truncate">{doc}</span>
+                        <span className="text-[10px] opacity-70 uppercase">
+                          {doc.split('.').pop()}
+                        </span>
                       </button>
                     </li>
                   ))}
@@ -703,8 +961,10 @@ export default function Home() {
               </div>
             )}
 
-            <div className="relative flex items-center bg-paper border border-border hover:border-accent rounded-base overflow-hidden transition-colors">
+            {/* Input Bar */}
+            <div className="relative flex items-center bg-paper-2 border border-rule focus-within:border-accent rounded-card overflow-hidden transition-colors">
               <input
+                ref={inputRef}
                 type="text"
                 value={input}
                 onChange={handleInputChange}
@@ -725,59 +985,84 @@ export default function Home() {
                       handleSelectMention(filteredDocs[mentionIndex]);
                       return;
                     }
+                    if (e.key === "Escape") {
+                      setShowMentionMenu(false);
+                      return;
+                    }
                   }
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
                     handleSend();
                   }
                 }}
-                disabled={activeSessionId === null}
-                placeholder={activeSessionId === null ? "Create a new chat to begin..." : "Ask a question..."}
-                className="flex-1 bg-transparent border-none py-4 px-4 text-ink placeholder-muted focus:outline-none focus:ring-0 disabled:opacity-50 text-sm md:text-base"
+                disabled={isTyping}
+                placeholder={
+                  isTyping 
+                    ? "Inference pipeline streaming response..." 
+                    : "Ask anything or query data (use @ for documents, ! for tables)..."
+                }
+                className="flex-1 bg-transparent border-none py-3 px-4 text-ink placeholder:text-muted focus:outline-none text-xs sm:text-sm font-body disabled:opacity-50"
               />
               <button
-                onClick={handleSend}
-                disabled={!input.trim() || activeSessionId === null}
-                className="px-4 py-2 mr-2 bg-accent text-accent-ink border border-accent rounded-base disabled:bg-paper-3 disabled:border-border disabled:text-muted transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
+                onClick={() => handleSend()}
+                disabled={!input.trim() || isTyping}
+                className="px-4 py-2 mr-2 rounded-base bg-accent hover:bg-accent-hover active:scale-[0.99] text-accent-ink text-xs font-mono uppercase tracking-wider font-semibold disabled:bg-paper-3 disabled:border-rule disabled:text-muted transition-all cursor-pointer disabled:cursor-not-allowed focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
               >
-                Send
+                ↵ Submit
               </button>
+            </div>
+
+            <div className="mt-2 flex items-center justify-between text-[11px] font-mono text-muted px-1">
+              <div className="flex gap-3">
+                <span>[Return] Send query</span>
+                <span>[@] Target doc</span>
+                <span>[!] SQL table</span>
+              </div>
+              <span className="hidden sm:inline">Engine: Groq OSS-120B</span>
             </div>
           </div>
         </div>
-      </div>
+      </main>
 
-      {/* ROLE REQUEST MODAL */}
+      {/* PRIVILEGE ESCALATION MODAL */}
       {isRequestingRole && (
-        <div className="fixed inset-0 bg-ink/20 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-paper border border-border p-l rounded-base max-w-md w-full shadow-sm">
-            <h2 className="text-xl font-bold text-ink mb-2 tracking-tight">Request Access</h2>
-            <p className="text-sm text-muted mb-6">
-              Select the role you need. An administrator will review your request.
+        <div className="fixed inset-0 bg-paper/80 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+          <div className="bg-paper-2 border border-rule p-6 rounded-card max-w-md w-full shadow-lg">
+            <div className="flex items-center gap-2 mb-2 pb-2 border-b border-rule">
+              <span className="w-2 h-2 rounded-full bg-accent" />
+              <span className="font-mono text-xs uppercase tracking-wider text-muted font-medium">
+                Authorization Gateway
+              </span>
+            </div>
+            <h2 className="text-lg font-display font-semibold text-ink mb-1">
+              Request Privilege Escalation
+            </h2>
+            <p className="text-xs text-muted mb-5">
+              Select access tier for administrative or global editorial rights.
             </p>
             
             <div className="space-y-3">
               <button
                 onClick={() => handleRoleRequest("editor")}
-                className="w-full text-left p-4 rounded-base border border-border bg-paper hover:border-accent transition-colors group focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
+                className="w-full text-left p-4 rounded-base border border-rule bg-paper hover:border-accent transition-colors group cursor-pointer"
               >
-                <div className="font-semibold text-ink">Editor</div>
-                <div className="text-xs text-muted mt-1">Upload and manage Global Documents for all users.</div>
+                <div className="font-semibold text-sm text-ink">EDITOR</div>
+                <div className="text-xs text-muted mt-0.5">Ingest and curate global documents across all enterprise sessions.</div>
               </button>
               
               <button
                 onClick={() => handleRoleRequest("admin")}
-                className="w-full text-left p-4 rounded-base border border-border bg-paper hover:border-accent transition-colors group focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
+                className="w-full text-left p-4 rounded-base border border-rule bg-paper hover:border-accent transition-colors group cursor-pointer"
               >
-                <div className="font-semibold text-ink">Admin</div>
-                <div className="text-xs text-muted mt-1">Full system access, role management, and analytics.</div>
+                <div className="font-semibold text-sm text-ink">ADMINISTRATOR</div>
+                <div className="text-xs text-muted mt-0.5">Full console telemetry, user role assignment, and corpus administration.</div>
               </button>
             </div>
             
             <div className="mt-6 flex justify-end">
               <button
                 onClick={() => setIsRequestingRole(false)}
-                className="px-4 py-2 text-sm text-ink border border-transparent hover:border-border rounded-base transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
+                className="px-4 py-2 text-xs font-mono uppercase tracking-wider text-muted hover:text-ink border border-rule hover:border-rule-focus rounded-base transition-colors cursor-pointer"
               >
                 Cancel
               </button>
@@ -788,3 +1073,4 @@ export default function Home() {
     </div>
   );
 }
+

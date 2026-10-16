@@ -66,12 +66,12 @@ DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 # ---------------------------------------------------------------------------
 # The model that GENERATES answers (the "G" in RAG)
 if LLM_PROVIDER == "mistral":
-    LLM_MODEL = "mistral-small-latest"
+    LLM_MODEL = os.getenv("LLM_MODEL", "mistral-small-latest")
 elif LLM_PROVIDER == "groq":
-    # OpenAI GPT-OSS 120B — largest available model on Groq's LPU hardware
-    LLM_MODEL = "openai/gpt-oss-120b"
+    # OpenAI GPT-OSS 120B on Groq LPU hardware
+    LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-120b")
 else:
-    LLM_MODEL = "gpt-4o-mini"
+    LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
 
 # Controls randomness: 0 = deterministic, 1 = creative
 # For factual Q&A over documents, we want LOW temperature (0.0 - 0.2)

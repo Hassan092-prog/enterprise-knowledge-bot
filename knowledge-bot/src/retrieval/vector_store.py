@@ -401,16 +401,16 @@ class VectorStore:
         if self._collection.count() == 0:
             return []
 
-        # Get all metadata from the collection
-        if user_id is not None:
-            where = {"$or": [{"user_id": user_id}, {"is_global": 1}]}
-        else:
-            where = None
-        all_items = self._collection.get(where=where, include=["metadatas"])
-        sources = {
-            meta.get("source", "unknown")
-            for meta in all_items["metadatas"]
-        }
+        all_items = self._collection.get(include=["metadatas"])
+        sources = set()
+        for meta in all_items.get("metadatas", []):
+            if not meta:
+                continue
+            source = meta.get("source", "unknown")
+            is_glob = meta.get("is_global") in [1, True, "1", "true"]
+            owner_id = meta.get("user_id")
+            if is_glob or user_id is None or (owner_id == user_id or str(owner_id) == str(user_id)):
+                sources.add(source)
         return sorted(sources)
 
     def list_sources_by_type(self, user_id: Optional[int] = None) -> dict:
@@ -418,16 +418,21 @@ class VectorStore:
         if self._collection.count() == 0:
             return {"personal": [], "global": []}
             
-        where = {"$or": [{"user_id": user_id}, {"is_global": 1}]} if user_id is not None else None
-        all_items = self._collection.get(where=where, include=["metadatas"])
-        
+        all_items = self._collection.get(include=["metadatas"])
         personal = set()
         global_docs = set()
-        for meta in all_items["metadatas"]:
+        for meta in all_items.get("metadatas", []):
+            if not meta:
+                continue
             source = meta.get("source", "unknown")
-            if meta.get("is_global") == 1:
+            is_glob = meta.get("is_global") in [1, True, "1", "true"]
+            owner_id = meta.get("user_id")
+            
+            if is_glob:
                 global_docs.add(source)
-            else:
+            elif user_id is not None and (owner_id == user_id or str(owner_id) == str(user_id)):
+                personal.add(source)
+            elif user_id is None:
                 personal.add(source)
                 
         return {"personal": sorted(personal), "global": sorted(global_docs)}

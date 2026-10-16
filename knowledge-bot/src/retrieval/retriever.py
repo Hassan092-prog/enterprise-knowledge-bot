@@ -269,44 +269,48 @@ class Retriever:
             logger.warning("retrieve() called with empty query")
             return []
 
-        # ── Step 1: Fetch candidates ────────────────────────────────
+        # ── Step 1: Expand query ─────────────────────────────────────
+        queries = self._expand_query(query)
+
+        # ── Step 2: Fetch candidates ────────────────────────────────
         # Retrieve more than we need so re-ranking has room to work.
         # If top-k=5, we fetch 20 candidates then re-rank to best 5.
         n_candidates = min(
             k * _CANDIDATE_MULTIPLIER,
-            self._store.get_stats()["total_chunks"],
+            self._store.get_stats(user_id=user_id)["total_chunks"] if user_id else self._store.get_stats()["total_chunks"],
         )
 
-        # Hybrid Search: Get candidates from both Vector and BM25
-        vector_candidates = self._store.search(
-            query=query,
-            k=n_candidates,
-            source_filter=source_filter,
-            user_id=user_id,
-        )
-        
-        bm25_candidates = self._store.search_bm25(
-            query=query,
-            k=n_candidates,
-            source_filter=source_filter,
-            user_id=user_id,
-        )
-        
-        # Combine using Reciprocal Rank Fusion (RRF)
         rrf_k = 60
         scores_map = {}
         docs_map = {}
-        
-        for rank, doc in enumerate(vector_candidates):
-            chunk_id = doc.metadata.get("chunk_id", str(rank))
-            scores_map[chunk_id] = scores_map.get(chunk_id, 0.0) + 1.0 / (rrf_k + rank + 1)
-            docs_map[chunk_id] = doc
+
+        for q in queries:
+            # Hybrid Search: Get candidates from both Vector and BM25
+            vector_candidates = self._store.search(
+                query=q,
+                k=n_candidates,
+                source_filter=source_filter,
+                user_id=user_id,
+            )
             
-        for rank, doc in enumerate(bm25_candidates):
-            chunk_id = doc.metadata.get("chunk_id", str(rank + len(vector_candidates)))
-            scores_map[chunk_id] = scores_map.get(chunk_id, 0.0) + 1.0 / (rrf_k + rank + 1)
-            if chunk_id not in docs_map:
+            bm25_candidates = self._store.search_bm25(
+                query=q,
+                k=n_candidates,
+                source_filter=source_filter,
+                user_id=user_id,
+            )
+            
+            # Combine using Reciprocal Rank Fusion (RRF)
+            for rank, doc in enumerate(vector_candidates):
+                chunk_id = doc.metadata.get("chunk_id", str(rank))
+                scores_map[chunk_id] = scores_map.get(chunk_id, 0.0) + 1.0 / (rrf_k + rank + 1)
                 docs_map[chunk_id] = doc
+                
+            for rank, doc in enumerate(bm25_candidates):
+                chunk_id = doc.metadata.get("chunk_id", str(rank + len(vector_candidates)))
+                scores_map[chunk_id] = scores_map.get(chunk_id, 0.0) + 1.0 / (rrf_k + rank + 1)
+                if chunk_id not in docs_map:
+                    docs_map[chunk_id] = doc
                 
         # Sort by RRF score and take top n_candidates
         candidates = []
@@ -471,3 +475,32 @@ class Retriever:
     def is_empty(self) -> bool:
         """Return True if no documents have been indexed yet."""
         return self._store.is_empty()
+
+    def _expand_query(self, query: str) -> List[str]:
+        """
+        Use the LLM to generate variations of the user's query to improve recall.
+        Returns the original query plus up to 3 variations.
+        """
+        try:
+            from langchain_core.prompts import ChatPromptTemplate
+            from src.llm_factory import get_llm
+            from langchain_core.output_parsers import StrOutputParser
+
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", "You are an expert search assistant. Your task is to take a user's query and generate 3 different, synonymous search queries to improve retrieval recall in a vector database. Focus on resolving vocabulary mismatch. Output ONLY the 3 queries, one per line, without bullet points, numbers, or any other text."),
+                ("human", "{query}")
+            ])
+            
+            llm = get_llm(streaming=False)
+            chain = prompt | llm | StrOutputParser()
+            
+            result = chain.invoke({"query": query})
+            variations = [line.strip().lstrip("-*1234567890. ") for line in result.split("\n") if line.strip()]
+            
+            # Add original query and ensure uniqueness
+            all_queries = list(dict.fromkeys([query] + variations))
+            logger.info(f"Query Expansion: '{query}' -> {all_queries[1:]}")
+            return all_queries
+        except Exception as e:
+            logger.warning(f"Query expansion failed: {e}. Falling back to original query.")
+            return [query]

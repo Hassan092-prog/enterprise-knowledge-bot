@@ -35,11 +35,11 @@ export default function Login() {
       router.push("/");
     } catch (err: unknown) {
       if (err instanceof TypeError && err.message.includes('Failed to fetch')) {
-        setError("Cannot connect to the backend server. Please check your network connection.");
+        setError("Cannot connect to backend server. Verify network connectivity.");
       } else if (err instanceof Error) {
         setError(err.message);
       } else {
-        setError("An unknown error occurred");
+        setError("An unexpected authentication error occurred.");
       }
     } finally {
       setIsLoading(false);
@@ -47,60 +47,82 @@ export default function Login() {
   };
 
   return (
-    <div className="flex h-screen items-center justify-center bg-paper text-ink font-sans relative overflow-hidden">
-      {/* Atmospheric Radial Blooms */}
-      <div className="absolute top-[-200px] right-[-100px] w-[600px] h-[600px] rounded-full bg-accent opacity-[0.07] blur-[100px] pointer-events-none" />
-      <div className="absolute bottom-[100px] left-[-100px] w-[500px] h-[500px] rounded-full bg-accent opacity-[0.05] blur-[80px] pointer-events-none" />
-      
-      <div className="w-full max-w-md p-8 bg-paper-2 rounded-base shadow-[0_8px_30px_rgb(0,0,0,0.12)] border border-border relative z-10">
-        <h1 className="text-3xl font-display font-semibold text-ink mb-2 text-center tracking-tight">
-          Enterprise RAG
+    <div className="flex min-h-screen items-center justify-center bg-paper text-ink p-4">
+      <div className="w-full max-w-sm p-6 sm:p-8 bg-paper-2 rounded-card border border-rule shadow-sm">
+        {/* Terminal Header Landmark */}
+        <div className="flex items-center justify-between pb-4 mb-6 border-b border-rule">
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-accent animate-pulse" />
+            <span className="font-mono text-xs uppercase tracking-wider text-muted font-medium">
+              Knowledge Engine
+            </span>
+          </div>
+          <span className="font-mono text-[10px] uppercase tracking-wider text-muted px-2 py-0.5 rounded border border-rule bg-paper">
+            Auth v1.2
+          </span>
+        </div>
+
+        <h1 className="text-xl font-display font-semibold text-ink tracking-tight mb-1">
+          Sign In
         </h1>
-        <p className="text-muted text-center mb-8">Sign in to your account</p>
+        <p className="text-xs text-muted mb-6">
+          Authenticate to access global vector indices and tabular data.
+        </p>
 
         {error && (
-          <div className="mb-4 p-3 bg-red-900/20 border border-red-500/30 rounded-base text-red-400 text-sm text-center">
-            {error}
+          <div className="mb-5 p-3 bg-ruby-subtle border border-ruby/30 rounded-base text-ruby text-xs font-mono">
+            [ERR] {error}
           </div>
         )}
 
         <form onSubmit={handleLogin} className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-muted mb-1">Username</label>
+            <label className="block font-mono text-[11px] uppercase tracking-wider text-muted mb-1.5">
+              Username
+            </label>
             <input
               type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              className="w-full bg-paper border border-border rounded-base py-3 px-4 text-ink focus:outline-none focus:border-accent transition-colors"
+              className="w-full bg-paper border border-rule focus:border-accent focus:outline-none rounded-base py-2 px-3 text-sm text-ink placeholder:text-muted transition-colors font-body"
+              placeholder="e.g. analyst"
               required
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-muted mb-1">Password</label>
+            <div className="flex justify-between items-center mb-1.5">
+              <label className="block font-mono text-[11px] uppercase tracking-wider text-muted">
+                Password
+              </label>
+            </div>
             <input
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="w-full bg-paper border border-border rounded-base py-3 px-4 text-ink focus:outline-none focus:border-accent transition-colors"
+              className="w-full bg-paper border border-rule focus:border-accent focus:outline-none rounded-base py-2 px-3 text-sm text-ink placeholder:text-muted transition-colors font-body"
+              placeholder="••••••••"
               required
             />
           </div>
           <button
             type="submit"
             disabled={isLoading}
-            className="w-full py-3 px-4 rounded-base bg-accent hover:bg-accent/90 text-accent-ink font-medium transition-colors disabled:opacity-50 mt-4 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus shadow-lg shadow-accent/20"
+            className="w-full py-2.5 px-4 rounded-base bg-accent hover:bg-accent-hover active:scale-[0.99] text-accent-ink text-xs font-mono uppercase tracking-wider font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed mt-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus cursor-pointer"
           >
-            {isLoading ? "Signing in..." : "Sign In"}
+            {isLoading ? "Authenticating..." : "Authorize Access →"}
           </button>
         </form>
 
-        <p className="mt-6 text-center text-sm text-muted">
-          Don&apos;t have an account?{" "}
-          <Link href="/register" className="text-accent hover:text-accent/80 transition-colors">
-            Register here
-          </Link>
-        </p>
+        <div className="mt-6 pt-4 border-t border-rule text-center">
+          <p className="text-xs text-muted">
+            Need an account?{" "}
+            <Link href="/register" className="text-accent hover:underline font-medium">
+              Create an identity
+            </Link>
+          </p>
+        </div>
       </div>
     </div>
   );
 }
+

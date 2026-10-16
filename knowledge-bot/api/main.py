@@ -86,6 +86,18 @@ async def upload_document(file: UploadFile = File(...), current_user: User = Dep
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/tasks/{task_id}")
+def get_task_status(task_id: str, current_user: User = Depends(get_current_user)):
+    from src.worker import celery_app
+    res = celery_app.AsyncResult(task_id)
+    return {
+        "task_id": task_id,
+        "status": res.status,
+        "ready": res.ready(),
+        "successful": res.successful() if res.ready() else False,
+        "result": res.result if res.successful() else (str(res.result) if res.failed() else None),
+    }
+
 @app.delete("/documents/{filename}")
 def delete_document(filename: str, current_user: User = Depends(get_current_user)):
     if not retriever:
