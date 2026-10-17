@@ -1,45 +1,21 @@
 """
-vector_store.py — ChromaDB interface for storing and searching embeddings.
+vector_store.py — ChromaDB interface for storing and searching embeddings (Hardened Multi-Tenant Edition).
 
 WHAT THIS FILE DOES:
     Provides a clean class (VectorStore) that wraps ChromaDB.
     Handles all operations: adding chunks, searching by query,
-    listing sources, deleting documents, and collection stats.
-
-WHY A CLASS INSTEAD OF FUNCTIONS:
-    The ChromaDB client and collection are stateful objects — they
-    need to be initialised once and reused across calls. A class
-    holds that state cleanly. This is the Repository pattern:
-    hide all database complexity behind a simple interface.
-
-CRITICAL RULE — SAME EMBEDDING MODEL EVERYWHERE:
-    The model used here MUST match the model used in retrieval.
-    We centralise it in config.py so there is zero chance of mismatch.
-    If you ever change EMBEDDING_MODEL in config.py, you MUST delete
-    your vectorstore and re-embed all documents from scratch.
-
-DATA FLOW — INGESTION:
-    List[Document] (chunks from chunker.py)
-        → extract texts, ids, metadatas
-        → OpenAI embedding API → List[List[float]]  (1536 dims each)
-        → ChromaDB collection.add(ids, embeddings, documents, metadatas)
-        → persisted to disk at data/vectorstore/
-
-DATA FLOW — RETRIEVAL:
-    query_text (str)
-        → OpenAI embedding API → List[float]  (1536 dims)
-        → ChromaDB collection.query(query_embeddings, n_results=k)
-        → returns top-k chunks as List[Document] with metadata
+    listing sources, deleting documents, and collection stats with
+    strict tenant isolation (Postgres FK, ChromaDB tenant_id filter,
+    per-tenant BM25 in-memory indices, and prefixed chunk_ids).
 """
 
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Tuple
+import re
 
 import chromadb
 from chromadb.config import Settings
 from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
-import re
 
 try:
     from rank_bm25 import BM25Okapi
@@ -64,18 +40,7 @@ logger = get_logger(__name__)
 
 class VectorStore:
     """
-    Wraps ChromaDB to provide a clean interface for the RAG pipeline.
-
-    Usage:
-        store = VectorStore()
-        store.add_documents(chunks)          # after ingestion
-        results = store.search("revenue?")   # during retrieval
-        store.delete_source("report.pdf")    # document management
-
-    WHY THIS DESIGN:
-        Single responsibility — this class knows everything about
-        ChromaDB and nothing about LLMs or the UI. If we swap
-        ChromaDB for Pinecone, only this file changes.
+    Wraps ChromaDB to provide tenant-isolated search and indexing.
     """
 
     def __init__(self) -> None:
@@ -123,102 +88,158 @@ class VectorStore:
             )
 
         logger.info(
-            "VectorStore ready — collection: '%s', model: '%s', "
-            "existing chunks: %d",
+            "VectorStore ready — collection: '%s', model: '%s', existing chunks: %d",
             CHROMA_COLLECTION_NAME,
             EMBEDDING_MODEL,
             self._collection.count(),
         )
 
-        self._bm25 = None
-        self._bm25_docs = []
-        self._build_bm25()
+        # Per-tenant BM25 index mapping: tenant_id -> (BM25Okapi, List[Document])
+        self._bm25_indices: Dict[int, Tuple[BM25Okapi, List[Document]]] = {}
+        self._backfill_legacy_chunks(1)
+        self._build_all_bm25()
 
-    def _build_bm25(self):
-        """Rebuilds the BM25 index from all documents in ChromaDB."""
+    def _backfill_legacy_chunks(self, default_tenant_id: int = 1):
+        """
+        Backfill any legacy chunks stored before multi-tenancy was enabled.
+        Ensures metadata has tenant_id=1 and is_global=1.
+        """
+        try:
+            if self._collection.count() == 0:
+                return
+
+            all_data = self._collection.get(include=["metadatas"])
+            ids_to_update = []
+            updated_metadatas = []
+
+            for chunk_id, meta in zip(all_data.get("ids", []), all_data.get("metadatas", [])):
+                if meta is None:
+                    meta = {}
+                if "tenant_id" not in meta or meta.get("tenant_id") is None:
+                    meta["tenant_id"] = default_tenant_id
+                    if "is_global" not in meta:
+                        meta["is_global"] = 1
+                    ids_to_update.append(chunk_id)
+                    updated_metadatas.append(meta)
+
+            if ids_to_update:
+                self._collection.update(
+                    ids=ids_to_update,
+                    metadatas=updated_metadatas
+                )
+                logger.info("Backfilled %d legacy chunks with tenant_id=%d", len(ids_to_update), default_tenant_id)
+        except Exception as e:
+            logger.warning("Legacy ChromaDB backfill notice: %s", e)
+
+        # Migrate root upload files into tenant_1 folder
+        try:
+            from src.config import UPLOAD_DIR, get_tenant_upload_dir
+            import shutil
+            t1_dir = get_tenant_upload_dir(default_tenant_id)
+            if UPLOAD_DIR.exists():
+                for item in UPLOAD_DIR.iterdir():
+                    if item.is_file():
+                        target = t1_dir / item.name
+                        if not target.exists():
+                            shutil.copy2(str(item), str(target))
+                            logger.info("Migrated legacy upload file '%s' into tenant_%d folder", item.name, default_tenant_id)
+        except Exception as e:
+            logger.warning("Legacy filesystem migration notice: %s", e)
+
+    def _build_bm25_for_tenant(self, tenant_id: int):
+        """Build or rebuild BM25 index strictly for a specific tenant."""
         if not BM25Okapi:
             return
-            
-        all_data = self._collection.get(include=["documents", "metadatas"])
-        if not all_data["documents"]:
-            self._bm25 = None
-            self._bm25_docs = []
+
+        all_data = self._collection.get(
+            where={"tenant_id": tenant_id},
+            include=["documents", "metadatas"]
+        )
+
+        docs = []
+        if all_data and all_data.get("documents"):
+            for doc, meta in zip(all_data["documents"], all_data["metadatas"]):
+                docs.append(Document(page_content=doc, metadata=meta or {}))
+
+        if not docs:
+            self._bm25_indices.pop(tenant_id, None)
             return
-            
-        self._bm25_docs = [
-            Document(page_content=doc, metadata=meta) 
-            for doc, meta in zip(all_data["documents"], all_data["metadatas"])
-        ]
-        
+
         tokenized_corpus = [
-            re.sub(r'[^\w\s]', '', doc.page_content.lower()).split() 
-            for doc in self._bm25_docs
+            re.sub(r'[^\w\s]', '', doc.page_content.lower()).split()
+            for doc in docs
         ]
-        self._bm25 = BM25Okapi(tokenized_corpus)
-        logger.info("BM25 index built with %d chunks", len(self._bm25_docs))
+        self._bm25_indices[tenant_id] = (BM25Okapi(tokenized_corpus), docs)
+        logger.info("BM25 index built for tenant %d with %d chunks", tenant_id, len(docs))
+
+    def _build_all_bm25(self):
+        """Scan ChromaDB on startup and build per-tenant BM25 indices."""
+        if not BM25Okapi:
+            return
+        if self._collection.count() == 0:
+            return
+
+        all_data = self._collection.get(include=["metadatas"])
+        tenant_ids = set()
+        for meta in all_data.get("metadatas", []):
+            if meta and "tenant_id" in meta:
+                try:
+                    tenant_ids.add(int(meta["tenant_id"]))
+                except (ValueError, TypeError):
+                    tenant_ids.add(1)
+            else:
+                tenant_ids.add(1)
+
+        for tid in tenant_ids:
+            self._build_bm25_for_tenant(tid)
 
     # ──────────────────────────────────────────────────────────────────
     # INGESTION
     # ──────────────────────────────────────────────────────────────────
 
-    def add_documents(self, chunks: List[Document], user_id: Optional[int] = None, is_global: bool = False) -> int:
+    def add_documents(
+        self,
+        chunks: List[Document],
+        user_id: Optional[int] = None,
+        is_global: bool = False,
+        tenant_id: Optional[int] = None,
+    ) -> int:
         """
-        Embed a list of chunks and store them in ChromaDB.
-
-        Handles duplicates gracefully — if a chunk_id already exists
-        in the collection, we skip it (idempotent behaviour).
-        This means re-uploading the same document does not create
-        duplicate entries in the vector store.
-
-        Args:
-            chunks: Output of chunker.chunk_documents().
-
-        Returns:
-            Number of NEW chunks actually added (duplicates skipped).
+        Embed a list of chunks and store them in ChromaDB with tenant isolation.
+        Prefixes chunk_id with `t{tenant_id}_` to avoid cross-tenant deduplication collisions.
         """
         if not chunks:
             logger.warning("add_documents() called with empty chunk list")
             return 0
 
-        # ── Check for existing IDs to avoid duplicates ─────────────
-        incoming_ids = [c.metadata["chunk_id"] for c in chunks]
+        tid = tenant_id if tenant_id is not None else 1
 
-        # Query which IDs already exist in the collection
+        # Prefix chunk IDs with tenant_id if not already done
+        for c in chunks:
+            raw_id = c.metadata.get("chunk_id", "")
+            prefix = f"t{tid}_"
+            if not raw_id.startswith(prefix):
+                c.metadata["chunk_id"] = f"{prefix}{raw_id}"
+
+            c.metadata["tenant_id"] = tid
+            c.metadata["user_id"] = user_id if user_id is not None else -1
+            c.metadata["is_global"] = 1 if is_global else 0
+
+        incoming_ids = [c.metadata["chunk_id"] for c in chunks]
         existing = self._collection.get(ids=incoming_ids, include=[])
         existing_ids = set(existing["ids"])
 
-        # Filter to only new chunks
-        new_chunks = [
-            c for c in chunks
-            if c.metadata["chunk_id"] not in existing_ids
-        ]
+        new_chunks = [c for c in chunks if c.metadata["chunk_id"] not in existing_ids]
 
         if not new_chunks:
-            logger.info(
-                "All %d chunks already indexed — skipping", len(chunks)
-            )
+            logger.info("All %d chunks already indexed for tenant %d — skipping", len(chunks), tid)
             return 0
 
-        if existing_ids:
-            logger.info(
-                "Skipping %d already-indexed chunks, adding %d new ones",
-                len(existing_ids), len(new_chunks),
-            )
+        texts = [c.page_content for c in new_chunks]
+        ids = [c.metadata["chunk_id"] for c in new_chunks]
+        metadatas = [c.metadata for c in new_chunks]
 
-        # ── Prepare data for ChromaDB ───────────────────────────────
-        texts     = [c.page_content       for c in new_chunks]
-        ids       = [c.metadata["chunk_id"] for c in new_chunks]
-        
-        # Inject user_id and is_global into metadata
-        for c in new_chunks:
-            if user_id is not None:
-                c.metadata["user_id"] = user_id
-            c.metadata["is_global"] = 1 if is_global else 0
-            
-        metadatas = [c.metadata            for c in new_chunks]
-
-        # ── Generate embeddings ──────────────────────────────────────
-        logger.info("Generating embeddings for %d chunks...", len(new_chunks))
+        logger.info("Generating embeddings for %d chunks (tenant %d)...", len(new_chunks), tid)
         if self._mistral_client:
             response = self._mistral_client.embeddings.create(
                 model=EMBEDDING_MODEL,
@@ -229,11 +250,7 @@ class VectorStore:
             embeddings_list = self._local_embedder.encode(texts).tolist()
         else:
             embeddings_list = self._embeddings.embed_documents(texts)
-        logger.info("Embeddings generated successfully")
 
-        # ── Store in ChromaDB ───────────────────────────────────────
-        # ChromaDB stores the text, embedding, and metadata together.
-        # The metadata is what we surface as citations in the UI.
         self._collection.add(
             ids=ids,
             embeddings=embeddings_list,
@@ -242,14 +259,14 @@ class VectorStore:
         )
 
         logger.info(
-            "Added %d chunks to ChromaDB (collection total: %d)",
+            "Added %d chunks to ChromaDB for tenant %d (collection total: %d)",
             len(new_chunks),
+            tid,
             self._collection.count(),
         )
-        
-        # Rebuild BM25 index after adding new documents
-        self._build_bm25()
-        
+
+        # Rebuild BM25 specifically for this tenant
+        self._build_bm25_for_tenant(tid)
         return len(new_chunks)
 
     # ──────────────────────────────────────────────────────────────────
@@ -262,25 +279,10 @@ class VectorStore:
         k: Optional[int] = None,
         source_filter: Optional[str] = None,
         user_id: Optional[int] = None,
+        tenant_id: Optional[int] = None,
     ) -> List[Document]:
         """
-        Find the k most semantically similar chunks to a query.
-
-        Steps:
-          1. Embed the query text using the same model as ingestion
-          2. ChromaDB performs cosine similarity search over all vectors
-          3. Return the top-k results as LangChain Documents
-
-        Args:
-            query: The user's natural language question.
-            k: Number of chunks to return. Defaults to RETRIEVAL_TOP_K.
-            source_filter: If provided, only search within this filename.
-                           Example: "annual_report.pdf"
-
-        Returns:
-            List of Documents ordered by relevance (most relevant first).
-            Each Document has page_content (the chunk text) and metadata
-            (source, page, chunk_id) for citation generation.
+        Cosine similarity search with mandatory tenant isolation.
         """
         if not query.strip():
             logger.warning("search() called with empty query")
@@ -288,8 +290,6 @@ class VectorStore:
 
         k = k or RETRIEVAL_TOP_K
 
-        # ── Embed the query ─────────────────────────────────────────
-        # CRITICAL: must use the SAME model as add_documents().
         if self._mistral_client:
             response = self._mistral_client.embeddings.create(
                 model=EMBEDDING_MODEL,
@@ -301,18 +301,24 @@ class VectorStore:
         else:
             query_embedding = self._embeddings.embed_query(query)
 
-        # ── Build optional metadata filter ──────────────────────────
-        # ChromaDB supports filtering by metadata fields.
-        if user_id is not None:
-            user_filter = {"$or": [{"user_id": user_id}, {"is_global": 1}]}
-            if source_filter:
-                where = {"$and": [{"source": source_filter}, user_filter]}
-            else:
-                where = user_filter
-        else:
-            where = {"source": source_filter} if source_filter else None
+        # ── Mandatory Tenant-Isolated Filter ────────────────────────
+        where_conditions = []
+        if tenant_id is not None:
+            where_conditions.append({"tenant_id": tenant_id})
 
-        # ── Query ChromaDB ──────────────────────────────────────────
+        if user_id is not None:
+            where_conditions.append({"$or": [{"user_id": user_id}, {"is_global": 1}]})
+
+        if source_filter:
+            where_conditions.append({"source": source_filter})
+
+        if len(where_conditions) == 1:
+            where = where_conditions[0]
+        elif len(where_conditions) > 1:
+            where = {"$and": where_conditions}
+        else:
+            where = None
+
         results = self._collection.query(
             query_embeddings=[query_embedding],
             n_results=min(k, self._collection.count() or 1),
@@ -320,33 +326,17 @@ class VectorStore:
             include=["documents", "metadatas", "distances"],
         )
 
-        # ── Convert ChromaDB results → LangChain Documents ─────────
-        # results["documents"][0] = list of chunk texts
-        # results["metadatas"][0] = list of metadata dicts
-        # results["distances"][0] = list of cosine distances (0=identical)
-        # [0] because we sent one query — results are batched
         documents = []
-        texts_     = results["documents"][0]
-        metas      = results["metadatas"][0]
-        distances  = results["distances"][0]
+        if results and results.get("documents") and len(results["documents"]) > 0:
+            texts_ = results["documents"][0]
+            metas = results["metadatas"][0]
+            distances = results["distances"][0]
 
-        for text, meta, distance in zip(texts_, metas, distances):
-            # Convert cosine distance to similarity score (0 to 1)
-            # distance=0 means identical → similarity=1.0
-            # distance=2 means opposite  → similarity=0.0
-            similarity = round(1 - distance / 2, 4)
-            meta["similarity_score"] = similarity
+            for text, meta, distance in zip(texts_, metas, distances):
+                similarity = round(1 - distance / 2, 4)
+                meta["similarity_score"] = similarity
+                documents.append(Document(page_content=text, metadata=meta))
 
-            documents.append(
-                Document(page_content=text, metadata=meta)
-            )
-
-        logger.info(
-            "Search: '%s' → %d results (top score: %.4f)",
-            query[:60],
-            len(documents),
-            documents[0].metadata["similarity_score"] if documents else 0,
-        )
         return documents
 
     def search_bm25(
@@ -355,31 +345,33 @@ class VectorStore:
         k: Optional[int] = None,
         source_filter: Optional[str] = None,
         user_id: Optional[int] = None,
+        tenant_id: Optional[int] = None,
     ) -> List[Document]:
         """
-        Find the k most relevant chunks using BM25 keyword matching.
+        BM25 search executed strictly on the tenant's dedicated index.
         """
-        if not self._bm25 or not query.strip():
+        tid = tenant_id if tenant_id is not None else 1
+        bm25_entry = self._bm25_indices.get(tid)
+        if not bm25_entry or not query.strip():
             return []
-            
+
+        bm25, docs = bm25_entry
         k = k or RETRIEVAL_TOP_K
         tokenized_query = re.sub(r'[^\w\s]', '', query.lower()).split()
-        
-        scores = self._bm25.get_scores(tokenized_query)
-        
+        scores = bm25.get_scores(tokenized_query)
+
         scored_docs = []
-        for score, doc in zip(scores, self._bm25_docs):
+        for score, doc in zip(scores, docs):
             if score > 0:
                 is_global = doc.metadata.get("is_global") == 1
                 if user_id is not None and doc.metadata.get("user_id") != user_id and not is_global:
                     continue
                 if source_filter and doc.metadata.get("source") != source_filter:
                     continue
-                # Make a copy so we don't mutate the cached doc
                 scored_doc = Document(page_content=doc.page_content, metadata=doc.metadata.copy())
                 scored_doc.metadata["bm25_score"] = float(score)
                 scored_docs.append(scored_doc)
-                
+
         scored_docs.sort(key=lambda d: d.metadata["bm25_score"], reverse=True)
         return scored_docs[:k]
 
@@ -387,17 +379,8 @@ class VectorStore:
     # MANAGEMENT
     # ──────────────────────────────────────────────────────────────────
 
-    def list_sources(self, user_id: Optional[int] = None) -> List[str]:
-        """
-        Return a list of unique source filenames currently indexed.
-
-        Used by the UI to show the user which documents are in the
-        knowledge base and to power the source filter dropdown.
-
-        Returns:
-            Sorted list of unique filenames, e.g.:
-            ["annual_report.pdf", "glossary.txt", "products.csv"]
-        """
+    def list_sources(self, user_id: Optional[int] = None, tenant_id: Optional[int] = None) -> List[str]:
+        """Return unique filenames visible to user within their tenant."""
         if self._collection.count() == 0:
             return []
 
@@ -406,6 +389,8 @@ class VectorStore:
         for meta in all_items.get("metadatas", []):
             if not meta:
                 continue
+            if tenant_id is not None and meta.get("tenant_id") != tenant_id:
+                continue
             source = meta.get("source", "unknown")
             is_glob = meta.get("is_global") in [1, True, "1", "true"]
             owner_id = meta.get("user_id")
@@ -413,98 +398,110 @@ class VectorStore:
                 sources.add(source)
         return sorted(sources)
 
-    def list_sources_by_type(self, user_id: Optional[int] = None) -> dict:
-        """Return sources grouped by personal vs global."""
+    def list_sources_by_type(self, user_id: Optional[int] = None, tenant_id: Optional[int] = None) -> dict:
+        """Return sources grouped by personal vs company corpus for a tenant."""
         if self._collection.count() == 0:
             return {"personal": [], "global": []}
-            
+
         all_items = self._collection.get(include=["metadatas"])
         personal = set()
         global_docs = set()
         for meta in all_items.get("metadatas", []):
             if not meta:
                 continue
+            if tenant_id is not None and meta.get("tenant_id") != tenant_id:
+                continue
             source = meta.get("source", "unknown")
             is_glob = meta.get("is_global") in [1, True, "1", "true"]
             owner_id = meta.get("user_id")
-            
+
             if is_glob:
                 global_docs.add(source)
             elif user_id is not None and (owner_id == user_id or str(owner_id) == str(user_id)):
                 personal.add(source)
             elif user_id is None:
                 personal.add(source)
-                
+
         return {"personal": sorted(personal), "global": sorted(global_docs)}
 
-    def delete_source(self, source_filename: str, user_id: Optional[int] = None) -> int:
+    def delete_source(
+        self,
+        source_filename: str,
+        user_id: Optional[int] = None,
+        tenant_id: Optional[int] = None,
+    ) -> int:
         """
-        Remove all chunks belonging to a specific source document.
-
-        Called when the user wants to remove a document from the
-        knowledge base and re-upload a newer version.
-
-        Args:
-            source_filename: Exact filename, e.g. "annual_report.pdf"
-
-        Returns:
-            Number of chunks deleted.
+        Delete chunks belonging to a source document within a tenant.
         """
+        conditions = [{"source": source_filename}]
+        if tenant_id is not None:
+            conditions.append({"tenant_id": tenant_id})
         if user_id is not None:
-            where = {"$and": [{"source": source_filename}, {"user_id": user_id}]}
-        else:
-            where = {"source": source_filename}
-            
-        results = self._collection.get(
-            where=where,
-            include=["metadatas"],
-        )
+            conditions.append({"user_id": user_id})
 
-        if not results["ids"]:
-            logger.info("No chunks found for source: %s", source_filename)
+        where = {"$and": conditions} if len(conditions) > 1 else conditions[0]
+        results = self._collection.get(where=where, include=["metadatas"])
+
+        if not results or not results.get("ids"):
+            logger.info("No chunks found for deletion: '%s'", source_filename)
             return 0
 
         count = len(results["ids"])
         self._collection.delete(ids=results["ids"])
 
         logger.info(
-            "Deleted %d chunks for source '%s' (collection total: %d)",
+            "Deleted %d chunks for source '%s' (tenant=%s)",
             count,
             source_filename,
-            self._collection.count(),
+            tenant_id,
         )
-        
-        # Rebuild BM25 index after deleting documents
-        self._build_bm25()
-        
+
+        # Rebuild tenant BM25 index
+        if tenant_id is not None:
+            self._build_bm25_for_tenant(tenant_id)
+        else:
+            self._build_all_bm25()
+
         return count
 
-    def get_stats(self, user_id: Optional[int] = None) -> dict:
-        """
-        Return summary statistics about the vector store.
+    def delete_all_tenant_chunks(self, tenant_id: int) -> int:
+        """Purge all vector chunks for a decommissioned tenant."""
+        results = self._collection.get(where={"tenant_id": tenant_id}, include=[])
+        if not results or not results.get("ids"):
+            return 0
+        count = len(results["ids"])
+        self._collection.delete(ids=results["ids"])
+        self._bm25_indices.pop(tenant_id, None)
+        logger.info("Purged %d chunks for tenant %d", count, tenant_id)
+        return count
 
-        Used by the UI dashboard and for debugging.
-
-        Returns:
-            {
-                "total_chunks": 247,
-                "total_sources": 5,
-                "sources": ["report.pdf", "glossary.txt", ...]
-            }
-        """
-        sources = self.list_sources(user_id=user_id)
+    def get_stats(self, user_id: Optional[int] = None, tenant_id: Optional[int] = None) -> dict:
+        """Return summary statistics strictly scoped to a tenant."""
+        sources = self.list_sources(user_id=user_id, tenant_id=tenant_id)
+        where_conditions = []
+        if tenant_id is not None:
+            where_conditions.append({"tenant_id": tenant_id})
         if user_id is not None:
-            where = {"$or": [{"user_id": user_id}, {"is_global": 1}]}
+            where_conditions.append({"$or": [{"user_id": user_id}, {"is_global": 1}]})
+
+        if len(where_conditions) == 1:
+            where = where_conditions[0]
+        elif len(where_conditions) > 1:
+            where = {"$and": where_conditions}
         else:
             where = None
-        total_chunks = len(self._collection.get(where=where, include=[])["ids"]) if where else self._collection.count()
-        
+
+        if where:
+            res = self._collection.get(where=where, include=[])
+            total_chunks = len(res["ids"]) if res and "ids" in res else 0
+        else:
+            total_chunks = self._collection.count()
+
         return {
-            "total_chunks":  total_chunks,
+            "total_chunks": total_chunks,
             "total_sources": len(sources),
-            "sources":       sources,
+            "sources": sources,
         }
 
     def is_empty(self) -> bool:
-        """Return True if no documents have been indexed yet."""
         return self._collection.count() == 0

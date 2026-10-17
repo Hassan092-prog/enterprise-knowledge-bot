@@ -30,6 +30,8 @@ export default function Home() {
   const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
   const [userRole, setUserRole] = useState<string>("user");
   const [username, setUsername] = useState<string>("");
+  const [tenantName, setTenantName] = useState<string>("");
+  const [isPlatformAdmin, setIsPlatformAdmin] = useState<boolean>(false);
   const [pendingRequest, setPendingRequest] = useState<string | null>(null);
   const [isRequestingRole, setIsRequestingRole] = useState(false);
   const [activeDocTab, setActiveDocTab] = useState<"personal" | "global">("personal");
@@ -96,6 +98,8 @@ export default function Home() {
         const data = await res.json();
         setUserRole(data.role || "user");
         setUsername(data.username || "");
+        setTenantName(data.tenant_name || "");
+        setIsPlatformAdmin(Boolean(data.is_platform_admin));
       }
       
       const reqRes = await authFetch(`${API_URL}/auth/my_request`);
@@ -492,19 +496,41 @@ export default function Home() {
           </button>
         </div>
 
-        {/* User Identity / Access Control Bar */}
-        <div className="px-4 py-2.5 border-b border-rule bg-paper flex items-center justify-between text-xs">
-          <div className="flex items-center gap-2 overflow-hidden">
-            <span className="font-mono text-[10px] px-1.5 py-0.5 rounded border border-rule bg-paper-2 text-muted uppercase">
-              {userRole}
+        {/* Organization Tenant Header Badge */}
+        {tenantName && (
+          <div className="px-4 py-1.5 border-b border-rule bg-paper-3/40 flex items-center justify-between">
+            <div className="flex items-center gap-1.5 overflow-hidden">
+              <span className="text-[10px] text-muted">🏢</span>
+              <span className="font-mono text-[11px] font-bold text-ink truncate" title={tenantName}>
+                {tenantName}
+              </span>
+            </div>
+            <span className="font-mono text-[9px] px-1.5 py-0.5 rounded border border-rule bg-paper text-muted uppercase font-bold shrink-0">
+              {userRole === "superadmin" ? "👑 OWNER" : userRole.toUpperCase()}
             </span>
+          </div>
+        )}
+
+        {/* User Identity / Access Control Bar */}
+        <div className="px-4 py-2 border-b border-rule bg-paper flex items-center justify-between text-xs">
+          <div className="flex items-center gap-1.5 overflow-hidden">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
             <span className="truncate text-ink-secondary font-medium" title={username}>
               {username || "Analyst"}
             </span>
           </div>
 
-          <div className="flex items-center gap-1.5">
-            {userRole === "admin" && (
+          <div className="flex items-center gap-1.5 shrink-0">
+            {isPlatformAdmin && (
+              <button
+                onClick={() => router.push("/platform-admin")}
+                className="font-mono text-[10px] px-2 py-0.5 rounded border border-accent bg-accent-subtle text-accent font-bold transition-colors cursor-pointer"
+                title="Platform SuperAdmin Dashboard"
+              >
+                🌐 Global
+              </button>
+            )}
+            {(userRole === "admin" || userRole === "superadmin") && (
               <button
                 onClick={() => router.push("/admin")}
                 className="font-mono text-[11px] px-2 py-0.5 rounded border border-rule hover:border-accent text-ink transition-colors cursor-pointer"
@@ -528,6 +554,9 @@ export default function Home() {
             <button
               onClick={() => {
                 localStorage.removeItem("token");
+                localStorage.removeItem("role");
+                localStorage.removeItem("tenant_name");
+                localStorage.removeItem("is_platform_admin");
                 router.push("/login");
               }}
               className="text-muted hover:text-ruby p-1 transition-colors cursor-pointer"
@@ -604,7 +633,7 @@ export default function Home() {
                     : "border-transparent text-muted hover:text-ink"
                 }`}
               >
-                Global ({globalDocuments.length})
+                Company Corpus ({globalDocuments.length})
               </button>
             </div>
             <button
@@ -723,13 +752,13 @@ export default function Home() {
                 {isUploading ? "Processing Task..." : "+ Ingest Document"}
               </button>
             ) : (
-              (userRole === "admin" || userRole === "editor") ? (
+              (["superadmin", "admin", "editor"].includes(userRole) || isPlatformAdmin) ? (
                 <button
                   onClick={() => globalFileInputRef.current?.click()}
                   disabled={isUploading}
                   className="w-full py-2 px-3 rounded-base bg-paper-2 hover:bg-paper-3 border border-rule hover:border-accent text-ink text-xs font-mono uppercase tracking-wider font-medium transition-colors disabled:opacity-50 cursor-pointer flex items-center justify-center gap-2"
                 >
-                  {isUploading ? "Uploading Global..." : "+ Ingest Global Doc"}
+                  {isUploading ? "Uploading Global..." : "+ Ingest Company Doc"}
                 </button>
               ) : (
                 <div className="text-center font-mono text-[10px] text-muted py-1">
@@ -840,7 +869,7 @@ export default function Home() {
               className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
             >
               <div
-                className={`max-w-3xl rounded-card p-5 ${
+                className={`w-full max-w-4xl rounded-card p-4 sm:p-5 overflow-hidden ${
                   msg.role === "user"
                     ? "bg-paper-3 text-ink border border-rule-focus"
                     : "bg-paper-2 text-ink-secondary border border-rule shadow-sm"
@@ -858,11 +887,55 @@ export default function Home() {
                 )}
 
                 {/* Content Render */}
-                <div className={msg.role === "assistant" ? "markdown-body" : "text-sm text-ink font-body leading-relaxed whitespace-pre-wrap"}>
+                <div className={msg.role === "assistant" ? "markdown-body overflow-x-auto custom-scrollbar" : "text-sm text-ink font-body leading-relaxed whitespace-pre-wrap break-words"}>
                   {msg.role === "assistant" ? (
                     <ReactMarkdown 
                       remarkPlugins={[remarkGfm]}
                       components={{
+                        table({children, ...props}: any) {
+                          return (
+                            <div className="w-full my-3 overflow-x-auto rounded-base border border-rule bg-paper custom-scrollbar">
+                              <table {...props} className="w-full text-xs text-left border-collapse whitespace-nowrap min-w-full">
+                                {children}
+                              </table>
+                            </div>
+                          );
+                        },
+                        thead({children, ...props}: any) {
+                          return (
+                            <thead {...props} className="bg-paper-3 border-b border-rule font-mono text-[11px] uppercase tracking-wider text-muted font-semibold">
+                              {children}
+                            </thead>
+                          );
+                        },
+                        tbody({children, ...props}: any) {
+                          return (
+                            <tbody {...props} className="divide-y divide-rule font-body">
+                              {children}
+                            </tbody>
+                          );
+                        },
+                        tr({children, ...props}: any) {
+                          return (
+                            <tr {...props} className="hover:bg-paper-2/60 transition-colors">
+                              {children}
+                            </tr>
+                          );
+                        },
+                        th({children, ...props}: any) {
+                          return (
+                            <th {...props} className="px-3.5 py-2 font-semibold text-ink border-r border-rule last:border-r-0">
+                              {children}
+                            </th>
+                          );
+                        },
+                        td({children, ...props}: any) {
+                          return (
+                            <td {...props} className="px-3.5 py-2 text-ink-secondary border-r border-rule last:border-r-0 font-mono text-xs">
+                              {children}
+                            </td>
+                          );
+                        },
                         code({node, inline, className, children, ...props}: any) {
                           const match = /language-(\w+)/.exec(className || '');
                           if (!inline && match) {

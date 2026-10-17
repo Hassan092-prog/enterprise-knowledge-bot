@@ -32,6 +32,14 @@ export default function Login() {
 
       const data = await res.json();
       localStorage.setItem("token", data.access_token);
+      if (data.role) localStorage.setItem("role", data.role);
+      if (data.tenant_name) localStorage.setItem("tenant_name", data.tenant_name);
+      if (data.tenant_id) localStorage.setItem("tenant_id", String(data.tenant_id));
+      if (data.is_platform_admin) {
+        localStorage.setItem("is_platform_admin", "true");
+      } else {
+        localStorage.removeItem("is_platform_admin");
+      }
       router.push("/");
     } catch (err: unknown) {
       if (err instanceof TypeError && err.message.includes('Failed to fetch')) {

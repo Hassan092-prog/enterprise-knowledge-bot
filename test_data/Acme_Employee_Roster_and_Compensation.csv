@@ -1,0 +1,21 @@
+Employee_ID,Full_Name,Department,Role,Work_Location,Base_Salary_USD,Annual_Bonus_USD,Stock_Options,Tenure_Years,Clearance_Level,Status
+ACM-101,Alice Sterling,Corporate Executive,Chief Executive Officer,Seattle HQ,340000,120000,50000,8.5,Level 5 (Top Secret),Active
+ACM-102,Bob Martinez,Advanced Propulsion,Lead Propulsion Architect,Moab Testing Range,195000,45000,18000,6.2,Level 4 (Classified),Active
+ACM-103,Carol Danvers,Robotics Engineering,VP of Autonomous Systems,Seattle HQ,245000,65000,28000,7.1,Level 5 (Top Secret),Active
+ACM-104,David Banner,Metallurgy & Anvils,Principal Metallurgist,Austin R&D Hub,182000,38000,14000,9.4,Level 3 (Secret),Active
+ACM-105,Elena Vasquez,Advanced Propulsion,Rocketry Systems Engineer,Moab Testing Range,148000,26000,9500,3.8,Level 3 (Secret),Active
+ACM-106,Franklin Richards,Robotics Engineering,Senior Computer Vision Scientist,Seattle HQ,178000,34000,13500,4.6,Level 4 (Classified),Active
+ACM-107,Grace Hopper,Information Technology,Chief Information Security Officer,Seattle HQ,220000,52000,22000,5.9,Level 5 (Top Secret),Active
+ACM-108,Hank Pym,Advanced Materials,Quantum Materials Director,Austin R&D Hub,210000,48000,21000,8.0,Level 4 (Classified),Active
+ACM-109,Iris West,Field Safety & Recovery,Director of Rapid Extraction,Moab Testing Range,135000,24000,8000,4.2,Level 3 (Secret),Active
+ACM-110,Jonathan Kent,Field Safety & Recovery,Senior Remediation Specialist,Moab Testing Range,112000,18000,5500,6.5,Level 2 (Confidential),Active
+ACM-111,Kenji Sato,Robotics Engineering,Mechatronics Robotics Lead,Tokyo Innovation Lab,168000,31000,11000,5.1,Level 4 (Classified),Active
+ACM-112,Laura Kinney,Quality Assurance,Lead Catapult Stress Tester,Moab Testing Range,128000,21000,7200,3.4,Level 2 (Confidential),Active
+ACM-113,Miles Morales,Robotics Engineering,Junior Autonomous Software Eng,Seattle HQ,105000,14000,4500,1.8,Level 2 (Confidential),Active
+ACM-114,Natasha Romanoff,Corporate Executive,Chief Operating Officer,Seattle HQ,290000,95000,40000,6.8,Level 5 (Top Secret),Active
+ACM-115,Otto Octavius,Metallurgy & Anvils,Senior Mechanical Drafter,Austin R&D Hub,142000,25000,9000,5.4,Level 3 (Secret),Active
+ACM-116,Peter Parker,Advanced Materials,Dehydrated Polymer Chemist,Austin R&D Hub,118000,19000,6000,2.6,Level 2 (Confidential),Active
+ACM-117,Quinn Fabray,Finance & Treasury,Senior FP&A Controller,Seattle HQ,154000,28000,10500,4.9,Level 3 (Secret),Active
+ACM-118,Reed Richards,Advanced Materials,Chief Technology Officer,Seattle HQ,310000,105000,45000,9.0,Level 5 (Top Secret),Active
+ACM-119,Shuri Udaku,Robotics Engineering,Distinguished Research Fellow,Austin R&D Hub,230000,58000,26000,4.5,Level 5 (Top Secret),Active
+ACM-120,Tony Stark,Advanced Propulsion,Director of Experimental Ordnance,Moab Testing Range,285000,92000,38000,7.8,Level 5 (Top Secret),Active

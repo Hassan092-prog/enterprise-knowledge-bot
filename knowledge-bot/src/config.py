@@ -203,3 +203,37 @@ MAX_RETRIES: int = 3
 
 # Base delay in seconds for exponential backoff.
 RETRY_BASE_DELAY: float = 2.0
+
+
+# ---------------------------------------------------------------------------
+# Multi-Tenancy & Security Hardening
+# ---------------------------------------------------------------------------
+from pathlib import PurePosixPath
+
+def sanitize_filename(filename: str) -> str:
+    """
+    Sanitize filename against path traversal (e.g., ../../etc/passwd, ..\\..\\windows) and dangerous characters.
+    Returns only the pure basename.
+    """
+    normalized = str(filename).replace("\\", "/").replace("\x00", "").strip()
+    clean = PurePosixPath(normalized).name.strip()
+    if not clean or clean.startswith("."):
+        raise ValueError(f"Invalid filename: '{filename}'")
+    return clean
+
+def get_tenant_upload_dir(tenant_id: int) -> Path:
+    """Return isolated directory for a given tenant's files."""
+    t_dir = UPLOAD_DIR / f"tenant_{tenant_id}"
+    t_dir.mkdir(parents=True, exist_ok=True)
+    return t_dir
+
+# Activity log retention
+ACTIVITY_LOG_RETENTION_DAYS: int = int(os.getenv("ACTIVITY_LOG_RETENTION_DAYS", "90"))
+
+# Allowed CORS origins
+CORS_ORIGINS: list[str] = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", "http://192.168.1.92:3000,http://localhost:3000").split(",")
+    if origin.strip()
+]
+

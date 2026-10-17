@@ -1,0 +1,72 @@
+# Acme Corporation — Proprietary Product Technical Specifications & Field Safety Manual
+
+Document ID: ACME-ENG-SPEC-2026-v9
+Classification: ACME PROPRIETARY // RESTRICTED TENANT ACCESS
+Revision Date: October 2026
+Standard Operating Procedure Code: SOP-TITAN-88
+
+================================================================================
+SECTION 1: ACME TITAN-X HYPERSONIC ROCKET SKATES
+================================================================================
+1.1 Physical & Mechanical Specifications:
+* Model Number: RS-990-TX
+* Dry Weight: 4.8 kg per boot
+* Propulsion System: Twin dual-chamber solid-liquid hybrid hypergolic rocket thrusters
+* Maximum Static Thrust: 1,850 Newtons per unit
+* Maximum Velocity: 420 km/h (Mach 0.34 at sea level)
+* Fuel Type: High-density stabilized liquid hydrazine with nitro-methane oxidizer mix (Acme Fuel Formulation Formula-77)
+* Continuous Burn Duration: 48 seconds at 100% throttle
+
+1.2 Operational Safety Rules:
+* Operators must wear the Acme Nomex Thermal Blast Suit (Model BS-4) at all times during ignition.
+* Do not attempt turns exceeding 45 degrees while operating at velocities greater than 180 km/h.
+* In the event of steering servo failure, pull the Emergency Parachute Lanyard located on the left hip.
+* Warning: Rapid deceleration against solid rock faces or painted faux-tunnel surfaces will void the product warranty.
+
+================================================================================
+SECTION 2: ACME INSTANT-HYDRATE ULTRA-DENSE BOULDERS
+================================================================================
+2.1 Specifications:
+* Model Number: BLD-500-DH
+* Compact Packaged Form: 50 gram compressed dehydrated tablet (fits in standard front pocket)
+* Hydration Expansion Ratio: 1 : 500 by volume
+* Final Deployed Mass: 2,500 kg solid granite boulder
+* Hydration Activation Requirement: Exactly 3.5 liters of ambient temperature water (or liquid electrolyte)
+* Full Expansion Time: 1.8 seconds after liquid contact
+
+2.2 Storage & Containment Guidelines:
+* Store strictly in hermetically sealed desiccated silica chambers below 35% relative humidity.
+* Never handle dehydrated tablets with sweaty or wet hands.
+* Inadvertent activation inside enclosed vehicles or airborne transport will cause catastrophic structural rupture.
+
+================================================================================
+SECTION 3: ACME QUANTUM ANVIL MODEL 4000
+================================================================================
+3.1 Specifications:
+* Model Number: ANV-4000-Q
+* Static Weight: 4,000 kg (4 Metric Tons)
+* Material Composition: Forged tungsten-carbide alloy with depleted osmium core
+* Impact Rating: Certified for 100,000 consecutive impacts at terminal drop velocity (55 m/s)
+* Integrated Sub-System: Gravitational Inertia Dampener (Switch position: OFF = 4,000 kg; ON = 4.2 kg for portability)
+
+3.2 Deployment Instructions:
+* Ensure gravitational dampener switch is set to OFF immediately prior to release from overhead cliffs or aerial platforms.
+* Under no circumstances should field personnel stand beneath a suspended Quantum Anvil while checking ground coordinates.
+
+================================================================================
+SECTION 4: ACME PORTABLE DISINTEGRATION MATRIX-9
+================================================================================
+4.1 Specifications:
+* Model Number: DSM-09-PRO
+* Energy Source: Micro-fission zero-point magnetic containment cell
+* Beam Effective Range: 25 meters in clear atmospheric conditions
+* Targeted Matter Disruption: Completely breaks molecular covalent bonds of inorganic matter in under 500 milliseconds.
+
+4.2 Emergency Neutralization:
+* Emergency Override Code: "ACME-HALT-999"
+* If the containment field fluctuates, immediately depress the manual scram button on the rear manifold.
+
+================================================================================
+LEGAL & INDEMNIFICATION CLAUSE
+================================================================================
+Acme Corporation disclaims all liability for accidental self-inflicted collisions, boomerang projectile trajectories, premature explosive fuse detonations, or the suspension of Newtonian physics when interacting with native desert fauna.

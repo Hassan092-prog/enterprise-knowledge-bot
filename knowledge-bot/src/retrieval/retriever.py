@@ -142,25 +142,19 @@ class Retriever:
     # INGESTION ORCHESTRATION
     # ──────────────────────────────────────────────────────────────────
 
-    def ingest_file(self, file_path: str | Path, user_id: Optional[int] = None, is_global: bool = False) -> IngestResult:
+    def ingest_file(
+        self,
+        file_path: str | Path,
+        user_id: Optional[int] = None,
+        is_global: bool = False,
+        tenant_id: Optional[int] = None,
+    ) -> IngestResult:
         """
         Full ingestion pipeline: parse → chunk → embed → store.
-
-        This is the ONLY method the UI needs to call when a user
-        uploads a document. All complexity is hidden here.
-
-        Args:
-            file_path: Path to the uploaded document.
-
-        Returns:
-            IngestResult with counts and stats.
-
-        Raises:
-            FileNotFoundError: If the file does not exist.
-            ValueError: If the file type is not supported.
+        Now partitioned by tenant_id.
         """
         file_path = Path(file_path)
-        logger.info("Starting ingestion for: %s", file_path.name)
+        logger.info("Starting ingestion for: %s (tenant=%s)", file_path.name, tenant_id)
 
         # ── Step 1: Parse the document ──────────────────────────────
         documents = load_document(file_path)
@@ -192,18 +186,20 @@ class Retriever:
             
         stats  = get_chunk_stats(chunks)
 
-        # ── Step 3: Check if already indexed ───────────────────────
-        # list_sources() returns filenames currently in the vector store
-        already_existed = file_path.name in self._store.list_sources(user_id=user_id)
+        # ── Step 3: Check if already indexed within tenant ──────────
+        already_existed = file_path.name in self._store.list_sources(user_id=user_id, tenant_id=tenant_id)
 
         # ── Step 4: Store embeddings ────────────────────────────────
-        # add_documents() is idempotent — skips existing chunk_ids
-        chunks_added = self._store.add_documents(chunks, user_id=user_id, is_global=is_global)
+        chunks_added = self._store.add_documents(
+            chunks,
+            user_id=user_id,
+            is_global=is_global,
+            tenant_id=tenant_id,
+        )
 
         logger.info(
-            "Ingestion complete: '%s' → %d/%d chunks added "
-            "(already_existed=%s)",
-            file_path.name, chunks_added, len(chunks), already_existed,
+            "Ingestion complete: '%s' → %d/%d chunks added (tenant=%s, already_existed=%s)",
+            file_path.name, chunks_added, len(chunks), tenant_id, already_existed,
         )
 
         return IngestResult(
@@ -214,18 +210,17 @@ class Retriever:
             already_existed=already_existed,
         )
 
-    def delete_document(self, source_filename: str, user_id: int) -> int:
+    def delete_document(
+        self,
+        source_filename: str,
+        user_id: Optional[int] = None,
+        tenant_id: Optional[int] = None,
+    ) -> int:
         """
-        Remove all chunks for a document from the vector store.
-
-        Args:
-            source_filename: Exact filename, e.g. "report.pdf"
-
-        Returns:
-            Number of chunks deleted.
+        Remove all chunks for a document from the vector store scoped to tenant.
         """
-        deleted = self._store.delete_source(source_filename, user_id=user_id)
-        logger.info("Deleted document '%s' (%d chunks)", source_filename, deleted)
+        deleted = self._store.delete_source(source_filename, user_id=user_id, tenant_id=tenant_id)
+        logger.info("Deleted document '%s' (tenant=%s, %d chunks)", source_filename, tenant_id, deleted)
         return deleted
 
     # ──────────────────────────────────────────────────────────────────
@@ -235,29 +230,14 @@ class Retriever:
     def retrieve(
         self,
         query: str,
-        user_id: int,
+        user_id: Optional[int] = None,
         k: Optional[int] = None,
         source_filter: Optional[str] = None,
         use_mmr: bool = True,
+        tenant_id: Optional[int] = None,
     ) -> List[Document]:
         """
-        Retrieve the most relevant chunks for a query.
-
-        Pipeline:
-            1. Fetch k * CANDIDATE_MULTIPLIER candidates from ChromaDB
-            2. Re-rank by keyword overlap score
-            3. Apply MMR diversity filter (if use_mmr=True)
-            4. Return top-k final results
-
-        Args:
-            query:         Natural language question from the user.
-            k:             Number of chunks to return (default: RETRIEVAL_TOP_K).
-            source_filter: If set, only search within this document.
-            use_mmr:       Whether to apply MMR diversity filtering.
-
-        Returns:
-            List of Documents ordered by relevance, len <= k.
-            Empty list if the vector store has no documents.
+        Retrieve the most relevant chunks for a query within the user's tenant.
         """
         k = k or RETRIEVAL_TOP_K
 
@@ -273,11 +253,10 @@ class Retriever:
         queries = self._expand_query(query)
 
         # ── Step 2: Fetch candidates ────────────────────────────────
-        # Retrieve more than we need so re-ranking has room to work.
-        # If top-k=5, we fetch 20 candidates then re-rank to best 5.
+        tenant_stats = self._store.get_stats(user_id=user_id, tenant_id=tenant_id)
         n_candidates = min(
             k * _CANDIDATE_MULTIPLIER,
-            self._store.get_stats(user_id=user_id)["total_chunks"] if user_id else self._store.get_stats()["total_chunks"],
+            tenant_stats["total_chunks"] or 1,
         )
 
         rrf_k = 60
@@ -285,12 +264,13 @@ class Retriever:
         docs_map = {}
 
         for q in queries:
-            # Hybrid Search: Get candidates from both Vector and BM25
+            # Hybrid Search: Get candidates from both Vector and BM25 scoped to tenant
             vector_candidates = self._store.search(
                 query=q,
                 k=n_candidates,
                 source_filter=source_filter,
                 user_id=user_id,
+                tenant_id=tenant_id,
             )
             
             bm25_candidates = self._store.search_bm25(
@@ -298,6 +278,7 @@ class Retriever:
                 k=n_candidates,
                 source_filter=source_filter,
                 user_id=user_id,
+                tenant_id=tenant_id,
             )
             
             # Combine using Reciprocal Rank Fusion (RRF)
@@ -456,21 +437,17 @@ class Retriever:
 
         return selected
 
-    # ──────────────────────────────────────────────────────────────────
-    # CONVENIENCE METHODS
-    # ──────────────────────────────────────────────────────────────────
+    def get_knowledge_base_stats(self, user_id: Optional[int] = None, tenant_id: Optional[int] = None) -> dict:
+        """Return stats about the knowledge base for a specific user and tenant."""
+        return self._store.get_stats(user_id=user_id, tenant_id=tenant_id)
 
-    def get_knowledge_base_stats(self, user_id: int) -> dict:
-        """Return stats about the current knowledge base for a specific user."""
-        return self._store.get_stats(user_id=user_id)
+    def list_sources(self, user_id: Optional[int] = None, tenant_id: Optional[int] = None) -> List[str]:
+        """Return sorted list of indexed document filenames for a user and tenant."""
+        return self._store.list_sources(user_id=user_id, tenant_id=tenant_id)
 
-    def list_sources(self, user_id: int) -> List[str]:
-        """Return sorted list of indexed document filenames for a user."""
-        return self._store.list_sources(user_id=user_id)
-
-    def list_sources_by_type(self, user_id: int) -> dict:
-        """Return sources grouped by personal vs global."""
-        return self._store.list_sources_by_type(user_id=user_id)
+    def list_sources_by_type(self, user_id: Optional[int] = None, tenant_id: Optional[int] = None) -> dict:
+        """Return sources grouped by personal vs global for a user and tenant."""
+        return self._store.list_sources_by_type(user_id=user_id, tenant_id=tenant_id)
 
     def is_empty(self) -> bool:
         """Return True if no documents have been indexed yet."""
