@@ -163,7 +163,8 @@ def get_me(current_user: User = Depends(get_current_user)):
         "tenant_id": current_user.tenant_id,
         "tenant_name": current_user.tenant.name if current_user.tenant else None,
         "tenant_slug": current_user.tenant.slug if current_user.tenant else None,
-        "is_platform_admin": bool(current_user.is_platform_admin)
+        "is_platform_admin": bool(current_user.is_platform_admin),
+        "access_token": create_user_token(current_user)
     }
 
 @router.post("/request_role")

@@ -101,7 +101,11 @@ export default function AdminDashboard() {
       const meRes = await authFetch(`${API_URL}/auth/me`);
       if (meRes.ok) {
         const me = await meRes.json();
+        if (me.access_token) {
+          localStorage.setItem("token", me.access_token);
+        }
         setCurrentUserRole(me.role);
+        if (me.role) localStorage.setItem("role", me.role);
         setIsPlatformAdmin(Boolean(me.is_platform_admin));
         setCurrentUsername(me.username);
       }

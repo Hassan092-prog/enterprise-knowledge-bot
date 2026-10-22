@@ -44,15 +44,6 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Cross-check: If JWT includes role, verify it matches DB (detect demotion)
-    token_role = payload.get("role")
-    if token_role is not None and user.role != token_role:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Session role changed. Please log in again.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
     return user
 
 def get_current_editor_user(current_user: User = Depends(get_current_user)) -> User:

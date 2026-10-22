@@ -96,7 +96,11 @@ export default function Home() {
       const res = await authFetch(`${API_URL}/auth/me`);
       if (res.ok) {
         const data = await res.json();
+        if (data.access_token) {
+          localStorage.setItem("token", data.access_token);
+        }
         setUserRole(data.role || "user");
+        if (data.role) localStorage.setItem("role", data.role);
         setUsername(data.username || "");
         setTenantName(data.tenant_name || "");
         setIsPlatformAdmin(Boolean(data.is_platform_admin));

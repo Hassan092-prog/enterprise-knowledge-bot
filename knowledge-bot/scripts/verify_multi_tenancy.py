@@ -272,7 +272,17 @@ def run_diagnostics():
             assert member_token["role"] == "user", f"Expected user role, got {member_token['role']}"
             assert member_token["tenant_id"] == created_tenant_id, "Member assigned wrong tenant"
 
-            # 3. Clean up test records: unlink superadmin FK before deleting users/tenant
+            # 3. Test seamless session persistence across role promotion
+            from api.dependencies import get_current_user
+            member_user = db.query(User).filter(User.username == test_member_username).first()
+            member_user.role = "admin"
+            db.commit()
+
+            # Verify token with role="user" seamlessly authenticates and yields fresh DB role="admin"
+            validated_user = get_current_user(token=member_token["access_token"], db=db)
+            assert validated_user.role == "admin", "Session failed to reflect updated role dynamically"
+
+            # 4. Clean up test records: unlink superadmin FK before deleting users/tenant
             db.query(ActivityLog).filter(ActivityLog.tenant_id == created_tenant_id).delete()
             new_tenant.superadmin_user_id = None
             db.flush()
