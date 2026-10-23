@@ -191,6 +191,57 @@ def change_user_role(
 
     return {"status": "success", "message": f"User {target_user.username} role changed to {role_req.role}"}
 
+@router.delete("/users/{user_id}")
+def remove_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+):
+    target_user = db.query(User).filter(
+        User.id == user_id,
+        User.tenant_id == current_user.tenant_id
+    ).first()
+
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found in your organization")
+
+    if target_user.id == current_user.id:
+        raise HTTPException(status_code=400, detail="Cannot remove your own account")
+
+    if target_user.role == "superadmin":
+        raise HTTPException(status_code=403, detail="Cannot remove the organization SuperAdmin")
+
+    if current_user.role != "superadmin" and target_user.role in ["admin", "superadmin"]:
+        raise HTTPException(status_code=403, detail="Admins cannot remove fellow Admins")
+
+    username = target_user.username
+
+    # Clean up user's private chat sessions and messages
+    sessions = db.query(ChatSession).filter(ChatSession.user_id == target_user.id).all()
+    for s in sessions:
+        db.query(ChatMessage).filter(ChatMessage.session_id == s.id).delete()
+        db.delete(s)
+
+    # Clean up pending access requests and transfers
+    db.query(AccessRequest).filter(AccessRequest.user_id == target_user.id).delete()
+    db.query(PendingTransfer).filter(
+        (PendingTransfer.to_user_id == target_user.id) | (PendingTransfer.from_user_id == target_user.id)
+    ).delete()
+
+    db.delete(target_user)
+    db.commit()
+
+    log_activity(
+        tenant_id=current_user.tenant_id,
+        user_id=current_user.id,
+        action="USER_REMOVED",
+        category="GOVERNANCE",
+        description=f"Removed member '{username}' from the organization",
+        details={"removed_user": username}
+    )
+
+    return {"status": "success", "message": f"User {username} successfully removed"}
+
 
 # ──────────────────────────────────────────────────────────────────
 # ACCESS REQUESTS (ROLE PROMOTION)
@@ -443,6 +494,66 @@ def accept_superadmin_transfer(
     )
 
     return {"status": "success", "message": "SuperAdmin ownership transferred successfully"}
+
+@router.post("/cancel_transfer/{transfer_id}")
+def cancel_superadmin_transfer(
+    transfer_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_superadmin_user),
+):
+    transfer = db.query(PendingTransfer).filter(
+        PendingTransfer.id == transfer_id,
+        PendingTransfer.tenant_id == current_user.tenant_id,
+        PendingTransfer.from_user_id == current_user.id,
+        PendingTransfer.status == "pending"
+    ).first()
+
+    if not transfer:
+        raise HTTPException(status_code=404, detail="Pending transfer not found or already processed")
+
+    transfer.status = "cancelled"
+    db.commit()
+
+    log_activity(
+        tenant_id=current_user.tenant_id,
+        user_id=current_user.id,
+        action="SUPERADMIN_TRANSFER_CANCELLED",
+        category="GOVERNANCE",
+        description=f"Cancelled SuperAdmin ownership transfer to '{transfer.to_user.username if transfer.to_user else 'user'}'",
+        details={"transfer_id": transfer.id}
+    )
+
+    return {"status": "success", "message": "Ownership transfer cancelled"}
+
+@router.post("/reject_transfer/{transfer_id}")
+def reject_superadmin_transfer(
+    transfer_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    transfer = db.query(PendingTransfer).filter(
+        PendingTransfer.id == transfer_id,
+        PendingTransfer.tenant_id == current_user.tenant_id,
+        PendingTransfer.to_user_id == current_user.id,
+        PendingTransfer.status == "pending"
+    ).first()
+
+    if not transfer:
+        raise HTTPException(status_code=404, detail="Pending transfer not found or already processed")
+
+    transfer.status = "rejected"
+    db.commit()
+
+    log_activity(
+        tenant_id=current_user.tenant_id,
+        user_id=current_user.id,
+        action="SUPERADMIN_TRANSFER_REJECTED",
+        category="GOVERNANCE",
+        description=f"Declined SuperAdmin ownership transfer",
+        details={"transfer_id": transfer.id}
+    )
+
+    return {"status": "success", "message": "Ownership transfer declined"}
 
 
 # ──────────────────────────────────────────────────────────────────

@@ -33,12 +33,12 @@ def route_query(query: str, available_documents: List[str]) -> Tuple[bool, Optio
     Determines if the query should be routed to the tabular agent (Pandas)
     and if so, which file it targets.
     """
-    match = re.search(r'!([\w\.,_-]+)', query)
+    match = re.search(r'[@!]([\w\.,_-]+)', query)
     if match:
         tagged_file = match.group(1)
         for doc in available_documents:
             if tagged_file.lower() in doc.lower():
-                logger.info(f"Explicit !filename routing detected: {tagged_file} -> {doc}")
+                logger.info(f"Explicit mention routing detected: {tagged_file} -> {doc}")
                 is_tabular = doc.lower().endswith('.csv')
                 return is_tabular, doc
                 

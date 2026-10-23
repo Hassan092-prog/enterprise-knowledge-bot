@@ -261,6 +261,25 @@ export default function AdminDashboard() {
     }
   };
 
+  const handleRemoveUser = async (userId: number, targetUsername: string) => {
+    if (!confirm(`Are you sure you want to permanently remove member '${targetUsername}' from ${stats?.tenant_name || "the organization"}?`)) return;
+    try {
+      const res = await authFetch(`${API_URL}/admin/users/${userId}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        setSuccessMsg(`Member '${targetUsername}' removed from organization.`);
+        await fetchStatsAndData();
+      } else {
+        const err = await res.json();
+        alert(err.detail || "Failed to remove member");
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Failed to connect to backend");
+    }
+  };
+
   const handleRegenerateJoinCode = async () => {
     if (!confirm("Regenerate join code? Any previous join codes will cease to work.")) return;
     try {
@@ -351,6 +370,36 @@ export default function AdminDashboard() {
       } else {
         const err = await res.json();
         alert(err.detail || "Failed to accept transfer");
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleCancelTransfer = async (transferId: number) => {
+    try {
+      const res = await authFetch(`${API_URL}/admin/cancel_transfer/${transferId}`, { method: "POST" });
+      if (res.ok) {
+        setSuccessMsg("Ownership transfer offer cancelled.");
+        await fetchStatsAndData();
+      } else {
+        const err = await res.json();
+        alert(err.detail || "Failed to cancel transfer");
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleRejectTransfer = async (transferId: number) => {
+    try {
+      const res = await authFetch(`${API_URL}/admin/reject_transfer/${transferId}`, { method: "POST" });
+      if (res.ok) {
+        setSuccessMsg("Ownership transfer declined.");
+        await fetchStatsAndData();
+      } else {
+        const err = await res.json();
+        alert(err.detail || "Failed to decline transfer");
       }
     } catch (err) {
       console.error(err);
@@ -460,6 +509,37 @@ export default function AdminDashboard() {
             </p>
           </div>
         </div>
+
+        {/* INCOMING OWNERSHIP TRANSFER HANDSHAKE BANNER */}
+        {pendingTransfers.filter((t) => t.is_recipient).map((t) => (
+          <div key={t.id} className="p-4 rounded-card bg-amber-500/10 border border-amber-500/40 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                <span className="font-mono text-xs font-bold uppercase tracking-wider text-amber-500">
+                  SuperAdmin Ownership Transfer Offer
+                </span>
+              </div>
+              <p className="text-xs text-ink-secondary mt-1">
+                <strong>{t.from_username}</strong> has offered to permanently delegate SuperAdmin ownership of <strong>{stats?.tenant_name}</strong> to your account.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => handleAcceptTransfer(t.id)}
+                className="px-4 py-2 bg-emerald-subtle hover:bg-emerald/20 text-emerald border border-emerald/40 text-xs font-mono uppercase tracking-wider font-semibold rounded-base cursor-pointer"
+              >
+                Accept Ownership Transfer →
+              </button>
+              <button
+                onClick={() => handleRejectTransfer(t.id)}
+                className="px-3 py-2 bg-ruby-subtle hover:bg-ruby/20 text-ruby border border-ruby/40 text-xs font-mono uppercase tracking-wider rounded-base cursor-pointer"
+              >
+                Decline
+              </button>
+            </div>
+          </div>
+        ))}
 
         {/* TABS NAVIGATION */}
         <div className="flex border-b border-rule space-x-2">
@@ -577,12 +657,14 @@ export default function AdminDashboard() {
                       <th className="p-3 font-semibold">Member</th>
                       <th className="p-3 font-semibold">Registered</th>
                       <th className="p-3 font-semibold">Assigned Role</th>
+                      <th className="p-3 font-semibold text-right">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="text-xs divide-y divide-rule font-body">
                     {users.map((u) => {
                       const isSelf = u.username === currentUsername;
                       const isSuperadmin = u.role === "superadmin";
+                      const canRemove = !isSelf && !isSuperadmin && (currentUserRole === "superadmin" || (currentUserRole === "admin" && u.role !== "admin"));
 
                       return (
                         <tr key={u.id} className="hover:bg-paper-2 transition-colors">
@@ -620,6 +702,19 @@ export default function AdminDashboard() {
                                 <option value="editor">EDITOR</option>
                                 {currentUserRole === "superadmin" && <option value="admin">ADMIN</option>}
                               </select>
+                            )}
+                          </td>
+                          <td className="p-3 text-right">
+                            {canRemove ? (
+                              <button
+                                onClick={() => handleRemoveUser(u.id, u.username)}
+                                className="px-2.5 py-1 text-[11px] font-mono uppercase tracking-wider text-ruby hover:bg-ruby-subtle border border-ruby/30 hover:border-ruby/60 rounded-base transition-colors cursor-pointer"
+                                title={`Remove ${u.username} from organization`}
+                              >
+                                Remove
+                              </button>
+                            ) : (
+                              <span className="text-muted font-mono text-[11px]">—</span>
                             )}
                           </td>
                         </tr>
@@ -852,17 +947,23 @@ export default function AdminDashboard() {
                 </div>
 
                 {/* Pending outgoing transfer */}
-                {pendingTransfers.some((t) => !t.is_recipient) && (
-                  <div className="mt-4 p-3 bg-paper border border-rule rounded-base text-xs font-mono text-muted flex justify-between items-center">
+                {pendingTransfers.filter((t) => !t.is_recipient).map((t) => (
+                  <div key={t.id} className="mt-4 p-3 bg-paper border border-rule rounded-base text-xs font-mono text-muted flex justify-between items-center">
                     <span>
                       Active transfer pending acceptance for:{" "}
-                      <strong className="text-ink">
-                        {pendingTransfers.find((t) => !t.is_recipient)?.to_username}
-                      </strong>
+                      <strong className="text-ink">{t.to_username}</strong>
                     </span>
-                    <span className="text-[10px] text-amber-500 font-bold uppercase">Pending</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-amber-500 font-bold uppercase">Pending</span>
+                      <button
+                        onClick={() => handleCancelTransfer(t.id)}
+                        className="text-[10px] text-ruby hover:underline uppercase font-mono cursor-pointer"
+                      >
+                        Cancel Offer
+                      </button>
+                    </div>
                   </div>
-                )}
+                ))}
               </div>
             )}
           </div>

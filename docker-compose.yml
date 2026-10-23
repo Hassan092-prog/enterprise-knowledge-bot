@@ -39,6 +39,9 @@ services:
       - "8000:8000"
     volumes:
       - ./knowledge-bot/data:/app/data
+      - ./knowledge-bot/src:/app/src
+      - ./knowledge-bot/api:/app/api
+      - ./knowledge-bot/scripts:/app/scripts
     env_file:
       - ./knowledge-bot/.env
     environment:
@@ -60,6 +63,7 @@ services:
       - chromadb
     volumes:
       - ./knowledge-bot/data:/app/data
+      - ./knowledge-bot/src:/app/src
     env_file:
       - ./knowledge-bot/.env
     environment:

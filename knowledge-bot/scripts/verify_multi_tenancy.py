@@ -294,8 +294,112 @@ def run_diagnostics():
     except Exception as e:
         print_check("Tenant onboarding registration test failed", False, str(e))
 
+    # ──────────────────────────────────────────────────────────────────
+    # CHECK 8: Suspended Tenant Enforcement & Tabular Boundary Check
+    # ──────────────────────────────────────────────────────────────────
+    print("\n--- 8. Testing Suspended Tenant Enforcement & Tabular Boundaries ---")
+    try:
+        from fastapi import HTTPException
+        from api.dependencies import get_current_user
+        from src.retrieval.tabular_agent import run_tabular_query
+
+        with SessionLocal() as db:
+            # Create a temporary suspended tenant
+            susp_tenant = Tenant(
+                name="Suspended Diagnostic Tenant",
+                slug="suspended-diag-test",
+                status="suspended",
+                join_code="SUSP-001"
+            )
+            db.add(susp_tenant)
+            db.flush()
+
+            susp_user = User(
+                username="susp_user_test",
+                hashed_password="hashed_pw_test",
+                role="user",
+                tenant_id=susp_tenant.id
+            )
+            db.add(susp_user)
+            db.commit()
+
+            susp_token = create_user_token(susp_user)
+
+            # 1. Verify get_current_user raises 403 on suspended tenant
+            blocked = False
+            try:
+                get_current_user(token=susp_token, db=db)
+            except HTTPException as http_e:
+                if http_e.status_code == 403 and "suspended" in http_e.detail.lower():
+                    blocked = True
+            assert blocked, "Suspended tenant user was not blocked with 403!"
+
+            # 2. Verify Tabular Agent blocks non-default tenant from reading default tenant's CSV
+            tabular_res = run_tabular_query(
+                query="Show salaries",
+                filename="Employee_ID,Employee_Name,Departmen.csv",
+                tenant_id=susp_tenant.id  # tenant_id > 1
+            )
+            assert "not found in your organization" in tabular_res.lower(), f"Unexpected tabular response: {tabular_res}"
+
+            # Teardown
+            db.delete(susp_user)
+            db.delete(susp_tenant)
+            db.commit()
+
+        print_check("Suspended tenant lockout and cross-tenant tabular boundary verified", True)
+    except Exception as e:
+        print_check("Suspended tenant / tabular boundary check failed", False, str(e))
+
+    # ──────────────────────────────────────────────────────────────────
+    # CHECK 9: Mention Routing & Member Offboarding Boundaries
+    # ──────────────────────────────────────────────────────────────────
+    print("\n--- 9. Testing Mention Routing & Member Offboarding ---")
+    try:
+        from src.retrieval.router import route_query
+        from api.admin import remove_user
+
+        # 1. Verify router handles both @ and ! prefixes
+        docs = ["Acme_Employee_Roster_and_Compensation.csv", "sample.txt"]
+        is_tab1, file1 = route_query("Can you summarize @sample.txt", docs)
+        assert file1 == "sample.txt" and not is_tab1, f"Failed @ mention: {file1}"
+
+        is_tab2, file2 = route_query("Calculate base salaries in !Acme_Employee", docs)
+        assert file2 == "Acme_Employee_Roster_and_Compensation.csv" and is_tab2, f"Failed ! mention: {file2}"
+
+        # 2. Verify member offboarding and self-deletion defense
+        with SessionLocal() as db:
+            admin_u = User(username="test_audit_admin", hashed_password="pw", role="superadmin", tenant_id=1)
+            member_u = User(username="test_audit_member", hashed_password="pw", role="user", tenant_id=1)
+            db.add(admin_u)
+            db.add(member_u)
+            db.commit()
+            db.refresh(admin_u)
+            db.refresh(member_u)
+
+            # Prevent self-removal
+            self_blocked = False
+            try:
+                remove_user(user_id=admin_u.id, db=db, current_user=admin_u)
+            except HTTPException as e:
+                if e.status_code == 400:
+                    self_blocked = True
+            assert self_blocked, "Failed to block self-removal"
+
+            # Remove member successfully
+            res = remove_user(user_id=member_u.id, db=db, current_user=admin_u)
+            assert res["status"] == "success", "Failed to remove member"
+
+            # Clean up admin
+            db.delete(admin_u)
+            db.commit()
+
+        print_check("Dual @/! mention routing and member offboarding boundaries verified", True)
+    except Exception as e:
+        print_check("Check 9 failed", False, str(e))
+
     print("\n" + "=" * 70)
-    print("ALL 7 DIAGNOSTIC CHECKS COMPLETED")
+    print("ALL 9 DIAGNOSTIC CHECKS COMPLETED")
     print("=" * 70)
 
 if __name__ == "__main__":

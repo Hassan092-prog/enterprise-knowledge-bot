@@ -286,7 +286,7 @@ def query_bot(request: QueryRequest, db: Session = Depends(get_db), current_user
         is_generic = query_lower in generic_words or query_lower.startswith("summarize ") or query_lower.startswith("summarise ")
         if is_generic:
             def generate_warning():
-                warning_msg = "Please specify which document you would like me to summarize by tagging it with `!` (e.g., 'summarize !sample.txt')."
+                warning_msg = "Please specify which document you would like me to summarize by tagging it with `@` or `!` (e.g., 'summarize @sample.txt')."
                 yield warning_msg
                 from src.database import SessionLocal
                 with SessionLocal() as s_db:

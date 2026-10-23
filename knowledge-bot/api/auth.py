@@ -63,6 +63,8 @@ def register(user_data: UserCreate, db: Session = Depends(get_db)):
                 db.flush()
                 assigned_role = "superadmin"
             else:
+                if tenant.status == "suspended":
+                    raise HTTPException(status_code=403, detail="Cannot register into a suspended organization")
                 # Existing company requires valid join code
                 if not user_data.join_code or user_data.join_code.strip() != (tenant.join_code or "").strip():
                     raise HTTPException(status_code=403, detail="Invalid or missing join code for this organization")
@@ -131,6 +133,13 @@ def login(user_data: UserCreate, db: Session = Depends(get_db)):
             user.tenant_id = default_tenant.id
             db.commit()
             db.refresh(user)
+
+    # Block login if organization is suspended (unless platform admin)
+    if user.tenant and user.tenant.status == "suspended" and not user.is_platform_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your organization has been suspended. Please contact platform administrator.",
+        )
 
     tenant_name = user.tenant.name if user.tenant else None
 

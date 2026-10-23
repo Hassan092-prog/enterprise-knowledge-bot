@@ -44,6 +44,13 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    # Cross-check: If tenant is suspended, deny access (unless platform superadmin)
+    if user.tenant and user.tenant.status == "suspended" and not user.is_platform_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your organization has been suspended. Please contact platform administrator.",
+        )
+
     return user
 
 def get_current_editor_user(current_user: User = Depends(get_current_user)) -> User:

@@ -26,8 +26,8 @@ def run_tabular_query(query: str, filename: str, tenant_id: Optional[int] = None
     if tenant_id is not None:
         tenant_dir = get_tenant_upload_dir(tenant_id)
         file_path = tenant_dir / clean_name
-        # Fallback to root upload dir if file was uploaded prior to multi-tenancy
-        if not file_path.exists():
+        # Fallback to root upload dir ONLY for default tenant (tenant 1) if file was uploaded prior to multi-tenancy
+        if tenant_id == 1 and not file_path.exists():
             fallback_path = UPLOAD_DIR / clean_name
             if fallback_path.exists():
                 file_path = fallback_path
