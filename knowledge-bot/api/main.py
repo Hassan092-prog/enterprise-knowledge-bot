@@ -6,11 +6,12 @@ import os
 import time
 from pathlib import Path
 from sqlalchemy.orm import Session
-
+import re
+import json
 from src.retrieval.retriever import Retriever
 from src.retrieval.router import route_query
 from src.retrieval.tabular_agent import run_tabular_query
-from src.generation.llm_chain import stream_answer
+from src.generation.llm_chain import stream_answer, condense_query, extract_citation_metadata
 from src.config import (
     UPLOAD_DIR,
     MAX_FILE_SIZE_MB,
@@ -37,7 +38,7 @@ app.include_router(platform_router, prefix="/platform")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS if CORS_ORIGINS else ["*"],
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+)(:\d+)?$",
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|.*\.nurexia\.co)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -226,7 +227,21 @@ def get_messages(session_id: int, db: Session = Depends(get_db), current_user: U
         raise HTTPException(status_code=404, detail="Session not found")
 
     messages = db.query(ChatMessage).filter(ChatMessage.session_id == session_id).order_by(ChatMessage.timestamp.asc()).all()
-    return [{"role": m.role, "content": m.content, "timestamp": m.timestamp} for m in messages]
+    results = []
+    for m in messages:
+        sources_list = []
+        if getattr(m, "sources_json", None):
+            try:
+                sources_list = json.loads(m.sources_json)
+            except Exception:
+                sources_list = []
+        results.append({
+            "role": m.role,
+            "content": m.content,
+            "timestamp": m.timestamp,
+            "sources": sources_list,
+        })
+    return results
 
 @app.delete("/sessions/{session_id}")
 def delete_session(session_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -270,15 +285,38 @@ def query_bot(request: QueryRequest, db: Session = Depends(get_db), current_user
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    # 1. Fetch recent conversation turns for multi-turn conversational memory (prior to current query)
+    prior_messages = db.query(ChatMessage).filter(
+        ChatMessage.session_id == request.session_id
+    ).order_by(ChatMessage.timestamp.desc()).limit(6).all()
+    prior_messages.reverse()
+
+    chat_history = [
+        {"role": m.role, "content": m.content}
+        for m in prior_messages
+    ]
+
     user_msg = ChatMessage(session_id=request.session_id, role="user", content=request.query)
     db.add(user_msg)
     db.commit()
 
+    # 2. Contextual Query Condensation: rewrite follow-ups into standalone search questions
+    effective_query = request.query
+    if chat_history:
+        effective_query = condense_query(request.query, chat_history)
+
     start_time = time.time()
 
-    # Route Query scoped to tenant
+    # 3. Route Query scoped to tenant
     sources = retriever.list_sources(user_id=current_user.id, tenant_id=current_user.tenant_id)
-    is_tabular, target_file = route_query(request.query, sources)
+
+    # Check if the user explicitly provided an @doc or !doc tag in their prompt
+    has_explicit_tag = bool(re.search(r'[@!]([\w\.,_-]+)', request.query))
+    if has_explicit_tag:
+        is_tabular, target_file = route_query(request.query, sources)
+    else:
+        # For general queries and conversational follow-ups, route using effective_query (full context)
+        is_tabular, target_file = route_query(effective_query, sources)
 
     if not target_file:
         query_lower = request.query.strip().lower()
@@ -305,6 +343,18 @@ def query_bot(request: QueryRequest, db: Session = Depends(get_db), current_user
                 response = f"\n\n[Error executing tabular query: {str(e)}]"
                 yield response
 
+            # Tabular source citation metadata
+            citations = [{
+                "source": target_file,
+                "chunk_id": f"tabular_{target_file}",
+                "page": "Tabular Dataset",
+                "content": f"In-memory SQLite database table derived from {target_file}.",
+                "is_global": True,
+                "relevance_rank": 1,
+            }]
+            sources_payload = json.dumps(citations)
+            yield f"\n\n__SOURCES_METADATA_START__{sources_payload}__SOURCES_METADATA_END__"
+
             latency_ms = int((time.time() - start_time) * 1000)
             log_activity(
                 tenant_id=current_user.tenant_id,
@@ -321,31 +371,42 @@ def query_bot(request: QueryRequest, db: Session = Depends(get_db), current_user
             )
 
             with SessionLocal() as s_db:
-                bot_msg = ChatMessage(session_id=request.session_id, role="assistant", content=response)
+                bot_msg = ChatMessage(
+                    session_id=request.session_id,
+                    role="assistant",
+                    content=response,
+                    sources_json=sources_payload
+                )
                 s_db.add(bot_msg)
                 s_db.commit()
 
         return StreamingResponse(generate_tabular(), media_type="text/plain")
 
-    # Fallback to standard semantic RAG search scoped to tenant
+    # Fallback to standard semantic RAG search scoped to tenant using effective_query
     chunks = retriever.retrieve(
-        request.query,
+        effective_query,
         user_id=current_user.id,
         source_filter=target_file,
         tenant_id=current_user.tenant_id
     )
 
+    citations = extract_citation_metadata(chunks)
+    sources_payload = json.dumps(citations)
+
     def generate():
         from src.database import SessionLocal
         full_response = ""
         try:
-            for chunk in stream_answer(request.query, chunks):
+            for chunk in stream_answer(effective_query, chunks, chat_history=chat_history):
                 full_response += chunk
                 yield chunk
         except Exception as e:
             error_msg = f"\n\n[Error generating response: {str(e)}]"
             full_response += error_msg
             yield error_msg
+
+        # Append source citation metadata packet to stream
+        yield f"\n\n__SOURCES_METADATA_START__{sources_payload}__SOURCES_METADATA_END__"
 
         latency_ms = int((time.time() - start_time) * 1000)
         log_activity(
@@ -356,6 +417,7 @@ def query_bot(request: QueryRequest, db: Session = Depends(get_db), current_user
             description=f"RAG query executed ({len(chunks)} chunks retrieved, {latency_ms}ms)",
             details={
                 "query_preview": request.query[:100],
+                "effective_query": effective_query[:100] if effective_query != request.query else None,
                 "target_file": target_file,
                 "route": "semantic",
                 "chunks_count": len(chunks),
@@ -364,7 +426,12 @@ def query_bot(request: QueryRequest, db: Session = Depends(get_db), current_user
         )
 
         with SessionLocal() as s_db:
-            bot_msg = ChatMessage(session_id=request.session_id, role="assistant", content=full_response)
+            bot_msg = ChatMessage(
+                session_id=request.session_id,
+                role="assistant",
+                content=full_response,
+                sources_json=sources_payload
+            )
             s_db.add(bot_msg)
             s_db.commit()
 

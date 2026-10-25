@@ -125,7 +125,8 @@ CHUNK_OVERLAP: int = 200
 # How many chunks to retrieve per query (top-k retrieval)
 # Too few → might miss relevant info
 # Too many → LLM context gets noisy, costs more
-RETRIEVAL_TOP_K: int = 5
+# 8 chunks provides robust recall across multi-section enterprise reports
+RETRIEVAL_TOP_K: int = 8
 
 # ChromaDB collection name (like a table name in a traditional database)
 CHROMA_COLLECTION_NAME: str = "knowledge_base"
@@ -233,7 +234,7 @@ ACTIVITY_LOG_RETENTION_DAYS: int = int(os.getenv("ACTIVITY_LOG_RETENTION_DAYS", 
 # Allowed CORS origins
 CORS_ORIGINS: list[str] = [
     origin.strip()
-    for origin in os.getenv("CORS_ORIGINS", "http://192.168.1.92:3000,http://localhost:3000").split(",")
+    for origin in os.getenv("CORS_ORIGINS", "http://192.168.1.92:3000,http://localhost:3000,https://knowledge.alphalabs.nurexia.co,http://knowledge.alphalabs.nurexia.co").split(",")
     if origin.strip()
 ]
 

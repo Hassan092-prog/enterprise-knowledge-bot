@@ -398,8 +398,60 @@ def run_diagnostics():
     except Exception as e:
         print_check("Check 9 failed", False, str(e))
 
+    # ──────────────────────────────────────────────────────────────────
+    # CHECK 10: Conversational Memory, Query Condensation & Citation Metadata
+    # ──────────────────────────────────────────────────────────────────
+    print("\n--- 10. Testing Conversational Memory & Citation Metadata ---")
+    try:
+        from src.generation.llm_chain import condense_query, extract_citation_metadata
+        from langchain_core.documents import Document
+
+        # 1. Test standalone query without history returns unchanged
+        q1 = "What was Acme Corporation's Q3 revenue?"
+        assert condense_query(q1, []) == q1, "Empty history modified standalone query"
+
+        # 2. Test query condensation with follow-up context
+        mock_history = [
+            {"role": "user", "content": "Tell me about Acme Corporation's Project Titan."},
+            {"role": "assistant", "content": "Project Titan is Acme's flagship autonomous robotics system generating $19.4M revenue in Q3."}
+        ]
+        condensed = condense_query("How much did it grow YoY?", mock_history)
+        assert len(condensed) > 5, "Condensed query was empty"
+        print(f"      └── Query Condensation (Division): 'How much did it grow YoY?' -> '{condensed}'")
+
+        # 2b. Test enterprise follow-up query after department turn
+        mock_history_rd = [
+            {"role": "user", "content": "How much did they spend on R&D?"},
+            {"role": "assistant", "content": "Acme spent $9,800,000 USD on Research & Development (R&D) in Q3."}
+        ]
+        condensed_fy = condense_query("What is their full-year revenue projection?", mock_history_rd)
+        assert len(condensed_fy) > 5, "Condensed query was empty"
+        print(f"      └── Query Condensation (Enterprise Metric): 'What is their full-year revenue projection?' -> '{condensed_fy}'")
+
+        # 3. Test citation metadata extraction for Source Inspector Drawer
+        test_chunks = [
+            Document(
+                page_content="Consolidated Q3 Revenue reached $48,500,000 USD (+18.2% YoY).",
+                metadata={"source": "Acme_Q3_Review.txt", "chunk_id": "chunk_001", "page": 1, "is_global": 1}
+            ),
+            Document(
+                page_content="Gross margin expanded to 64.8% reflecting manufacturing optimization.",
+                metadata={"source": "Acme_Q3_Review.txt", "chunk_id": "chunk_002", "page": 1, "is_global": 1}
+            )
+        ]
+        citations = extract_citation_metadata(test_chunks)
+        assert len(citations) == 2, f"Expected 2 citations, got {len(citations)}"
+        assert citations[0]["source"] == "Acme_Q3_Review.txt"
+        assert citations[0]["chunk_id"] == "chunk_001"
+        assert citations[0]["relevance_rank"] == 1
+        assert "48,500,000" in citations[0]["content"]
+
+        print_check("Conversational query condensation and citation metadata serialization verified", True)
+    except Exception as e:
+        print_check("Check 10 failed", False, str(e))
+
     print("\n" + "=" * 70)
-    print("ALL 9 DIAGNOSTIC CHECKS COMPLETED")
+    print("ALL 10 DIAGNOSTIC CHECKS COMPLETED")
     print("=" * 70)
 
 if __name__ == "__main__":

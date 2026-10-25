@@ -55,6 +55,7 @@ class ChatMessage(Base):
     session_id = Column(Integer, ForeignKey("chat_sessions.id", ondelete="CASCADE"))
     role = Column(String)  # 'user' or 'assistant'
     content = Column(Text)
+    sources_json = Column(Text, nullable=True)  # JSON-encoded array of retrieved source citations
     timestamp = Column(DateTime, default=datetime.utcnow)
 
     session = relationship("ChatSession", back_populates="messages")

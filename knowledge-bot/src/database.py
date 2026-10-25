@@ -88,6 +88,15 @@ def run_db_migrations():
                 if "tenant_id" not in req_cols:
                     conn.execute(text("ALTER TABLE access_requests ADD COLUMN tenant_id INTEGER"))
                     logger.info("Added 'tenant_id' column to access_requests table.")
+                conn.commit()
+
+            # 3b. chat_messages table schema evolution (Citation metadata)
+            if "chat_messages" in existing_tables:
+                msg_cols = {c["name"] for c in inspector.get_columns("chat_messages")}
+                if "sources_json" not in msg_cols:
+                    conn.execute(text("ALTER TABLE chat_messages ADD COLUMN sources_json TEXT"))
+                    logger.info("Added 'sources_json' column to chat_messages table.")
+                conn.commit()
             # 4. Ensure fk_tenant_superadmin_user_id has ON DELETE SET NULL in PostgreSQL
             if engine.dialect.name == "postgresql" and "tenants" in existing_tables:
                 try:

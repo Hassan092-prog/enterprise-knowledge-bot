@@ -65,6 +65,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 import re
+import math
 
 from langchain_core.documents import Document
 from sentence_transformers import CrossEncoder
@@ -77,6 +78,13 @@ from src.retrieval.vector_store import VectorStore
 from src.config import RETRIEVAL_TOP_K
 
 logger = get_logger(__name__)
+
+def _sigmoid(x: float) -> float:
+    """Normalize raw CrossEncoder logits into (0, 1) probability range for MMR."""
+    try:
+        return 1.0 / (1.0 + math.exp(-max(min(float(x), 20.0), -20.0)))
+    except Exception:
+        return 0.5
 
 # How many candidates to fetch before re-ranking
 # We fetch 4x more than we need, then re-rank and filter down
@@ -351,7 +359,7 @@ class Retriever:
         self,
         ranked: List[Document],
         k: int,
-        diversity_weight: float = 0.3,
+        diversity_weight: float = 0.1,
     ) -> List[Document]:
         """
         Maximal Marginal Relevance — select k diverse, relevant chunks.
@@ -360,16 +368,15 @@ class Retriever:
             1. Always select the highest-ranked chunk first.
             2. For each remaining slot:
                a. Score every remaining candidate as:
-                  mmr_score = (1 - λ) * rerank_score
+                  mmr_score = (1 - λ) * sigmoid(rerank_score)
                             - λ * max_overlap_with_selected
                b. Select the candidate with the highest mmr_score.
             3. Repeat until k chunks are selected.
 
             λ (diversity_weight) controls the trade-off:
               λ = 0.0 → pure relevance (no diversity, same as top-k)
+              λ = 0.1 → relevance dominates; penalizes only near-duplicate redundancy (default)
               λ = 0.5 → equal weight on relevance and diversity
-              λ = 1.0 → pure diversity (ignores relevance scores)
-              λ = 0.3 → slight diversity preference (our default)
 
         TEXT OVERLAP METRIC:
             We measure chunk similarity as word-level Jaccard similarity:
@@ -410,7 +417,8 @@ class Retriever:
             selected_words = [word_set(s) for s in selected]
 
             for i, (doc, doc_words) in enumerate(zip(remaining, word_sets)):
-                relevance = doc.metadata.get("rerank_score", 0.0)
+                raw_score = doc.metadata.get("rerank_score", 0.0)
+                relevance = _sigmoid(raw_score)
 
                 # Max overlap with any already-selected chunk
                 max_overlap = 0.0
@@ -472,7 +480,12 @@ class Retriever:
             chain = prompt | llm | StrOutputParser()
             
             result = chain.invoke({"query": query})
-            variations = [line.strip().lstrip("-*1234567890. ") for line in result.split("\n") if line.strip()]
+            refusal_patterns = ["sorry", "can't help", "cannot help", "as an ai", "i am unable"]
+            variations = [
+                line.strip().lstrip("-*1234567890. ")
+                for line in result.split("\n")
+                if line.strip() and not any(p in line.lower() for p in refusal_patterns)
+            ]
             
             # Add original query and ensure uniqueness
             all_queries = list(dict.fromkeys([query] + variations))

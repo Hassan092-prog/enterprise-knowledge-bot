@@ -3,8 +3,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://192.168.1.92:8000";
+import { getApiUrl } from "@/lib/api";
 
 type Stats = {
   tenant_id: number;
@@ -53,6 +52,7 @@ type PendingTransfer = {
 };
 
 export default function AdminDashboard() {
+  const API_URL = getApiUrl();
   const [activeTab, setActiveTab] = useState<"roster" | "corpus" | "activity" | "settings">("roster");
   const [stats, setStats] = useState<Stats | null>(null);
   const [requests, setRequests] = useState<RoleRequest[]>([]);

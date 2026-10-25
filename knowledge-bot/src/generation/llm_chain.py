@@ -116,18 +116,17 @@ class Answer:
 
 _SYSTEM_PROMPT = """You are an expert document analyst for an enterprise knowledge base system.
 
-Your role is to answer questions accurately and concisely using ONLY the provided document context.
+Your role is to answer questions accurately and concisely using the provided document context, which includes corporate reports, technical product manuals, hardware specifications, and emergency operating protocols. Questions regarding model numbers, emergency override codes, safety procedures, or device specifications must be answered directly from the text excerpts provided.
 
 STRICT RULES YOU MUST FOLLOW:
-1. Answer ONLY using information from the context sections provided below.
-2. Do NOT use your training knowledge to supplement or fill gaps in the context.
-3. If the answer cannot be found in the provided context, respond with exactly:
+1. Answer using information from the document context sections provided below. You may use the conversation context to resolve references, follow-ups, and pronouns (such as "it", "they", "that total", "that division"). When answering questions about enterprise metrics, projections, or targets, associate them with the primary organization indicated in the context.
+2. Do NOT use your training knowledge to invent facts not present in the context.
+3. If the answer cannot be found in the provided documents, respond with:
    "I could not find sufficient information in the provided documents to answer this question."
-4. Do NOT make up, infer, or extrapolate information that is not explicitly stated.
-5. For every factual claim in your answer, add a citation in this exact format:
+4. For every factual claim in your answer, add a citation in this exact format:
    [Source: filename, Page X]
-6. If multiple sources support a claim, cite all of them.
-7. Be concise — answer the question directly without unnecessary preamble.
+5. If multiple sources support a claim, cite all of them.
+6. Be concise — answer the question directly without unnecessary preamble.
 
 CITATION FORMAT EXAMPLE:
    "Revenue grew 23% year-over-year [Source: annual_report.pdf, Page 3], driven
@@ -212,55 +211,142 @@ def _extract_sources(chunks: List[Document]) -> List[tuple]:
 # LLM chain builder
 # ---------------------------------------------------------------------------
 
+_CONDENSE_PROMPT = """You are an expert query reformulation assistant for an enterprise knowledge retrieval system.
+Given the recent conversation history and a user's follow-up question, rewrite the follow-up question to be a standalone, self-contained search query.
+
+CRITICAL RULES:
+1. Preserve the primary enterprise/company name (e.g., Acme Corporation).
+2. When the user asks about enterprise-wide metrics or future outlook (such as "full-year revenue", "revenue projection", "Q4 guidance", "annual growth", "operating expenses", "total revenue", "net income"), resolve pronouns like "their", "they", "the company" to the OVERALL COMPANY (e.g., Acme Corporation). Do NOT narrow company-wide metrics to an internal department (like R&D or Sales) discussed in a prior turn unless the user explicitly requested that specific department.
+3. If the question explicitly asks about a specific division or product from the preceding turn (e.g., "its flagship product", "who manages it", "what did that division make"), resolve the pronoun to that specific division/product.
+4. If the follow-up question is already completely self-contained, return it EXACTLY as is.
+5. Do NOT answer the question. Output ONLY the standalone query.
+
+EXAMPLES:
+
+Conversation History:
+User: What was Acme Corporation's consolidated revenue in Q3 2026?
+Assistant: Acme Corporation reported $48,500,000 USD in consolidated revenue.
+User: And what was its flagship product?
+Assistant: The flagship product for Advanced Robotics & Automation (Project Titan) was Autonomous Roadrunner Guidance & Pursuit Systems.
+Follow-up Question: How much did they spend on R&D?
+Standalone Query: How much did Acme Corporation spend on Research & Development (R&D)?
+
+Conversation History:
+User: How much did they spend on R&D?
+Assistant: Acme spent $9,800,000 USD on Research & Development (R&D) in Q3.
+Follow-up Question: What is their full-year revenue projection?
+Standalone Query: What is Acme Corporation's projected full-year 2026 revenue?
+
+Conversation History:
+User: What were Acme's key financial highlights?
+Assistant: Acme reported $48.5M revenue, 64.8% gross margin, and $14.2M EBIT.
+Follow-up Question: What is their guidance for next quarter?
+Standalone Query: What is Acme Corporation's fiscal Q4 2026 guidance and outlook?
+
+Conversation History:
+{chat_history}
+
+Follow-up Question: {question}
+Standalone Query:"""
+
+def condense_query(query: str, chat_history: Optional[List[dict]] = None) -> str:
+    """
+    Reformulate ambiguous follow-up questions using recent chat context.
+    If chat_history is empty or query is already standalone, returns query unchanged.
+    """
+    if not chat_history:
+        return query
+
+    history_lines = []
+    for msg in chat_history[-4:]:
+        role = "User" if msg.get("role") == "user" else "Assistant"
+        text = msg.get("content", "").strip()
+        if not text:
+            continue
+        if len(text) > 250:
+            text = text[:250] + "..."
+        history_lines.append(f"{role}: {text}")
+
+    formatted_history = "\n".join(history_lines).strip()
+    if not formatted_history:
+        return query
+
+    try:
+        llm = get_llm(temperature=0.0)
+        prompt = ChatPromptTemplate.from_template(_CONDENSE_PROMPT)
+        chain = prompt | llm | StrOutputParser()
+        result = chain.invoke({
+            "chat_history": formatted_history,
+            "question": query,
+        }).strip()
+        if result and len(result) > 2:
+            logger.info("Condensed query: '%s' -> '%s'", query[:50], result[:60])
+            return result
+    except Exception as e:
+        logger.warning("Query condensation fallback to original query: %s", e)
+
+    return query
+
+
+def extract_citation_metadata(chunks: List[Document]) -> List[dict]:
+    """
+    Extract structured citation metadata for the frontend Source Inspector Drawer.
+    """
+    seen_ids = set()
+    citations = []
+    for i, c in enumerate(chunks):
+        chunk_id = c.metadata.get("chunk_id", f"chunk_{i+1}")
+        if chunk_id in seen_ids:
+            continue
+        seen_ids.add(chunk_id)
+
+        source = c.metadata.get("source", "Unknown document")
+        page = c.metadata.get("page", "?")
+        is_global = bool(c.metadata.get("is_global", False))
+        preview = c.page_content.strip()
+
+        citations.append({
+            "source": source,
+            "chunk_id": chunk_id,
+            "page": page,
+            "content": preview,
+            "is_global": is_global,
+            "relevance_rank": i + 1,
+        })
+    return citations
+
+
+def _format_history_block(chat_history: Optional[List[dict]]) -> str:
+    if not chat_history:
+        return ""
+    lines = ["RECENT CONVERSATION CONTEXT:"]
+    for msg in chat_history[-4:]:
+        role = "User" if msg.get("role") == "user" else "Assistant"
+        content = msg.get("content", "").strip()
+        if len(content) > 300:
+            content = content[:300] + "..."
+        lines.append(f"{role}: {content}")
+    lines.append("\n---\n")
+    return "\n".join(lines)
+
+
 def _build_chain(streaming: bool = False):
     """
-    Build and return a LangChain LCEL chain.
-
-    LCEL CHAIN:  prompt | llm | parser
-        prompt  — ChatPromptTemplate formats system + human messages
-        llm     — ChatOpenAI makes the API call
-        parser  — StrOutputParser extracts text from the response object
-
-    WHY LCEL OVER MANUAL API CALLS:
-        1. Streaming support is built in — just call .stream() instead of .invoke()
-        2. Composable — swap the LLM or parser without changing other code
-        3. Automatic retry and error handling hooks
-        4. Observable — LangSmith can trace every call automatically
-
-    Args:
-        streaming: If True, configure the LLM for token streaming.
-
-    Returns:
-        A runnable LCEL chain ready for .invoke() or .stream()
+    Build and return a LangChain LCEL chain with optional conversational history.
     """
-    # ── Prompt template ───────────────────────────────────────────────
-    # ChatPromptTemplate.from_messages builds the [system, human] pair.
-    # {context} and {question} are template variables filled at call time.
-    # The human message puts context BEFORE the question — this is the
-    # standard RAG pattern. The LLM reads the evidence first, then
-    # processes the question in light of that evidence.
     prompt = ChatPromptTemplate.from_messages([
         ("system", _SYSTEM_PROMPT),
         ("human",
+         "{history_block}"
          "DOCUMENT CONTEXT:\n"
          "{context}\n\n"
          "---\n\n"
          "QUESTION: {question}\n\n"
-         "Provide a precise, cited answer based only on the context above."),
+         "Provide a precise, cited answer based only on the context above. If the question refers to prior conversation, use the context to maintain continuity."),
     ])
 
-    # ── LLM ───────────────────────────────────────────────────────────
-    # temperature=0.0 → deterministic, factual responses
-    #   For creative tasks you'd set this higher (0.7-1.0).
-    #   For enterprise Q&A over documents, 0.0 is always correct.
-    # streaming=True  → enables token-by-token output in the UI
     llm = get_llm(streaming=streaming)
-
-    # ── Output parser ─────────────────────────────────────────────────
-    # StrOutputParser extracts .content from the AIMessage object.
-    # Without it, .invoke() returns an AIMessage, not a plain string.
     parser = StrOutputParser()
-
     return prompt | llm | parser
 
 
@@ -272,27 +358,10 @@ def generate_answer(
     query: str,
     chunks: List[Document],
     source_filter: Optional[str] = None,
+    chat_history: Optional[List[dict]] = None,
 ) -> Answer:
     """
     Generate a grounded, cited answer for the user's query.
-
-    This is the primary function the UI calls after retrieval.
-    Uses batch mode (waits for the full answer before returning).
-    For streaming, use stream_answer() instead.
-
-    Args:
-        query:         The user's natural language question.
-        chunks:        Retrieved context chunks from retriever.retrieve().
-        source_filter: Optional — not used here, passed for logging context.
-
-    Returns:
-        Answer dataclass with text, sources, model, and chunks_used.
-
-    Example:
-        chunks = retriever.retrieve("What was the revenue growth?")
-        answer = generate_answer("What was the revenue growth?", chunks)
-        print(answer.text)
-        print(answer.sources)
     """
     if not chunks:
         logger.warning("generate_answer() called with no chunks — LLM has no context")
@@ -306,6 +375,7 @@ def generate_answer(
 
     # Build the context block from retrieved chunks
     context = build_context_block(chunks)
+    history_block = _format_history_block(chat_history)
 
     cache_key = _get_cache_key(query, chunks)
     if cache_key in _semantic_cache:
@@ -313,13 +383,14 @@ def generate_answer(
         return _semantic_cache[cache_key]
 
     logger.info(
-        "Generating answer for query: '%s' using %d chunks",
-        query[:60], len(chunks)
+        "Generating answer for query: '%s' using %d chunks (history turns: %d)",
+        query[:60], len(chunks), len(chat_history) if chat_history else 0
     )
 
     # Build and invoke the chain
     chain = _build_chain(streaming=False)
     raw_text = chain.invoke({
+        "history_block": history_block,
         "context":  context,
         "question": query,
     })
@@ -349,49 +420,28 @@ def generate_answer(
 def stream_answer(
     query: str,
     chunks: List[Document],
+    chat_history: Optional[List[dict]] = None,
 ) -> Generator[str, None, None]:
     """
-    Stream the LLM's answer token by token.
-
-    Used in the Streamlit UI with st.write_stream() to show the answer
-    appearing word-by-word in real time — like ChatGPT's interface.
-
-    WHY STREAMING MATTERS FOR UX:
-        Without streaming, the user waits 5-10 seconds staring at a spinner.
-        With streaming, they see words appearing within ~1 second and can
-        start reading while the rest generates. This dramatically improves
-        perceived performance even though total generation time is the same.
-
-    Args:
-        query:  The user's natural language question.
-        chunks: Retrieved context chunks from retriever.retrieve().
-
-    Yields:
-        String tokens as they arrive from the OpenAI API.
-
-    Usage in Streamlit:
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream_answer(query, chunks))
-
-    Usage in plain Python:
-        for token in stream_answer(query, chunks):
-            print(token, end="", flush=True)
+    Stream the LLM's answer token by token with conversational context.
     """
     if not chunks:
         yield "No relevant documents were found to answer your question."
         return
 
     context = build_context_block(chunks)
+    history_block = _format_history_block(chat_history)
 
     logger.info(
-        "Streaming answer for query: '%s' using %d chunks",
-        query[:60], len(chunks)
+        "Streaming answer for query: '%s' using %d chunks (history turns: %d)",
+        query[:60], len(chunks), len(chat_history) if chat_history else 0
     )
 
     chain = _build_chain(streaming=True)
 
     # .stream() is the LCEL streaming method — yields tokens as they arrive
     for token in chain.stream({
+        "history_block": history_block,
         "context":  context,
         "question": query,
     }):

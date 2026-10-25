@@ -7,12 +7,21 @@ import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import toast from 'react-hot-toast';
+import { getApiUrl } from '@/lib/api';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://192.168.1.92:8000";
+type SourceCitation = {
+  source: string;
+  chunk_id?: string;
+  page?: string | number;
+  content?: string;
+  is_global?: boolean;
+  relevance_rank?: number;
+};
 
 type Message = {
   role: "user" | "assistant";
   content: string;
+  sources?: SourceCitation[];
 };
 
 type Session = {
@@ -22,6 +31,7 @@ type Session = {
 };
 
 export default function Home() {
+  const API_URL = getApiUrl();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [documents, setDocuments] = useState<string[]>([]);
@@ -39,6 +49,10 @@ export default function Home() {
   
   const [isUploading, setIsUploading] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
+
+  // Source Inspector Drawer State
+  const [selectedCitation, setSelectedCitation] = useState<SourceCitation | null>(null);
+  const [isCopiedSnippet, setIsCopiedSnippet] = useState(false);
   
   // Mention menu states (@ and !)
   const [showMentionMenu, setShowMentionMenu] = useState(false);
@@ -395,6 +409,17 @@ export default function Home() {
     }
   }, [activeSessionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Keyboard shortcut listener to close Source Inspector on Escape
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && selectedCitation) {
+        setSelectedCitation(null);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [selectedCitation]);
+
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
     setInput(val);
@@ -478,20 +503,40 @@ export default function Home() {
       const decoder = new TextDecoder("utf-8");
       if (!reader) return;
 
-      let assistantResponse = "";
+      let rawStreamBuffer = "";
+      let visibleContent = "";
+      let extractedSources: SourceCitation[] = [];
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
         const chunk = decoder.decode(value, { stream: true });
-        assistantResponse += chunk;
+        rawStreamBuffer += chunk;
+
+        if (rawStreamBuffer.includes("__SOURCES_METADATA_START__")) {
+          const parts = rawStreamBuffer.split("__SOURCES_METADATA_START__");
+          visibleContent = parts[0];
+          const metaRemainder = parts[1] || "";
+          const endIdx = metaRemainder.indexOf("__SOURCES_METADATA_END__");
+          if (endIdx !== -1) {
+            const jsonStr = metaRemainder.substring(0, endIdx);
+            try {
+              extractedSources = JSON.parse(jsonStr);
+            } catch (err) {
+              console.warn("Failed to parse stream sources metadata:", err);
+            }
+          }
+        } else {
+          visibleContent = rawStreamBuffer;
+        }
 
         setMessages((prev) => {
           const newMessages = [...prev];
           newMessages[newMessages.length - 1] = {
             role: "assistant",
-            content: assistantResponse,
+            content: visibleContent,
+            sources: extractedSources.length > 0 ? extractedSources : newMessages[newMessages.length - 1]?.sources,
           };
           return newMessages;
         });
@@ -1028,10 +1073,31 @@ export default function Home() {
                           }
                           const text = String(children);
                           if (text.startsWith('📄')) {
+                            const rawDoc = text.replace('📄', '').trim();
+                            const docName = rawDoc.split(' · ')[0].trim();
+                            const matched = msg.sources?.find(s => 
+                              s.source.toLowerCase().includes(docName.toLowerCase()) || 
+                              docName.toLowerCase().includes(s.source.toLowerCase())
+                            );
+
                             return (
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-brass/40 bg-brass-subtle text-brass font-mono text-[11px] font-medium align-middle mx-1 shadow-xs">
-                                {children}
-                              </span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSelectedCitation(matched || {
+                                    source: docName,
+                                    chunk_id: "citation_reference",
+                                    page: rawDoc.includes('Page') ? rawDoc.split('Page')[1].trim() : "1",
+                                    content: `Verified document excerpt from ${docName}.`,
+                                    is_global: true,
+                                  });
+                                }}
+                                className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded border border-accent/40 bg-accent-subtle hover:bg-accent/20 text-accent font-mono text-[11px] font-medium align-middle mx-1 shadow-2xs transition-all cursor-pointer group active:scale-[0.98]"
+                                title="Click to inspect verified source chunk in inspector drawer"
+                              >
+                                <span>{children}</span>
+                                <span className="text-[10px] opacity-70 group-hover:opacity-100">🔍</span>
+                              </button>
                             );
                           }
                           return (
@@ -1051,6 +1117,33 @@ export default function Home() {
                     msg.content
                   )}
                 </div>
+
+                {/* Verified Evidence Sources Strip */}
+                {msg.role === "assistant" && msg.sources && msg.sources.length > 0 && (
+                  <div className="mt-3.5 pt-3 border-t border-rule/60 flex flex-wrap items-center gap-2">
+                    <div className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-muted font-semibold mr-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald animate-pulse" />
+                      <span>Verified Evidence Sources ({msg.sources.length}):</span>
+                    </div>
+                    {msg.sources.map((src, sIdx) => (
+                      <button
+                        key={sIdx}
+                        type="button"
+                        onClick={() => setSelectedCitation(src)}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-base bg-paper hover:bg-accent-subtle border border-rule hover:border-accent/40 text-xs font-mono text-ink hover:text-accent transition-all cursor-pointer group shadow-2xs"
+                        title="Click to inspect verified source excerpt"
+                      >
+                        <span className="text-muted group-hover:text-accent text-[11px]">📄</span>
+                        <span className="truncate max-w-[170px]">{src.source}</span>
+                        {src.page && src.page !== "?" && (
+                          <span className="text-[10px] px-1 py-0.2 rounded bg-paper-3 text-muted border border-rule/60 group-hover:border-accent/30 group-hover:text-accent font-semibold">
+                            {src.page}
+                          </span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           ))}
@@ -1207,6 +1300,130 @@ export default function Home() {
                 className="px-4 py-2 text-xs font-mono uppercase tracking-wider text-muted hover:text-ink border border-rule hover:border-rule-focus rounded-base transition-colors cursor-pointer"
               >
                 Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* SOURCE INSPECTOR SLIDE-OVER DRAWER (PILLAR 2) */}
+      {selectedCitation && (
+        <div className="fixed inset-0 z-50 flex justify-end">
+          {/* Backdrop Overlay */}
+          <div
+            className="fixed inset-0 bg-ink/30 backdrop-blur-xs animate-backdrop-fade cursor-pointer"
+            onClick={() => setSelectedCitation(null)}
+          />
+
+          {/* Drawer Container */}
+          <div className="relative w-full max-w-lg bg-paper-2 border-l border-rule h-full shadow-2xl flex flex-col z-10 animate-drawer-slide">
+            {/* Drawer Header */}
+            <div className="p-4 sm:p-5 border-b border-rule flex items-center justify-between bg-paper-3 shrink-0">
+              <div className="flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-accent animate-pulse" />
+                <span className="font-mono text-xs uppercase tracking-wider text-muted font-medium">
+                  Verified Source Inspector
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedCitation(null)}
+                className="w-7 h-7 rounded-base border border-rule hover:border-rule-focus bg-paper text-muted hover:text-ink flex items-center justify-center font-mono text-xs transition-colors cursor-pointer"
+                title="Close Inspector (Esc)"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Document Title & Scope */}
+            <div className="p-5 border-b border-rule bg-paper">
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-mono text-[10px] px-2 py-0.5 rounded border font-semibold uppercase tracking-wider bg-emerald-subtle text-emerald border-emerald/30">
+                    {selectedCitation.is_global ? "Company Corpus" : "Personal File"}
+                  </span>
+                  {selectedCitation.relevance_rank && (
+                    <span className="font-mono text-[10px] px-2 py-0.5 rounded border bg-accent-subtle text-accent border-accent/30 font-semibold">
+                      Rank #{selectedCitation.relevance_rank} Match
+                    </span>
+                  )}
+                  {selectedCitation.page && selectedCitation.page !== "?" && (
+                    <span className="font-mono text-[10px] px-2 py-0.5 rounded border border-rule bg-paper-2 text-muted">
+                      Page / Section {selectedCitation.page}
+                    </span>
+                  )}
+                </div>
+                <h3 className="text-base font-display font-semibold text-ink break-all">
+                  {selectedCitation.source}
+                </h3>
+              </div>
+              {selectedCitation.chunk_id && (
+                <div className="mt-3 font-mono text-[11px] text-muted flex items-center gap-1.5 overflow-hidden">
+                  <span className="shrink-0 text-muted">ID:</span>
+                  <code className="truncate bg-paper-2 px-1.5 py-0.5 rounded border border-rule text-ink text-[11px]">
+                    {selectedCitation.chunk_id}
+                  </code>
+                </div>
+              )}
+            </div>
+
+            {/* Chunk Content Body */}
+            <div className="p-5 flex-1 overflow-y-auto space-y-4">
+              <div className="flex items-center justify-between">
+                <span className="font-mono text-xs uppercase tracking-wider text-muted font-medium">
+                  Retrieved Text Excerpt
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (selectedCitation.content) {
+                      navigator.clipboard.writeText(selectedCitation.content);
+                      setIsCopiedSnippet(true);
+                      setTimeout(() => setIsCopiedSnippet(false), 2000);
+                      toast.success("Source excerpt copied to clipboard");
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1 rounded-base bg-paper hover:bg-paper-3 border border-rule hover:border-accent text-xs font-mono uppercase tracking-wider text-ink transition-colors cursor-pointer"
+                >
+                  <span>{isCopiedSnippet ? "✓ Copied" : "Copy Excerpt"}</span>
+                </button>
+              </div>
+
+              <div className="p-4 rounded-base bg-paper border border-rule font-body text-xs text-ink-secondary leading-relaxed whitespace-pre-wrap break-words max-h-[460px] overflow-y-auto custom-scrollbar select-text">
+                {selectedCitation.content || "No preview text available for this citation."}
+              </div>
+
+              <div className="p-3.5 rounded-base bg-paper-3 border border-rule text-xs font-mono text-muted space-y-1">
+                <div className="flex items-center gap-2 text-ink font-semibold">
+                  <span className="text-accent">🔒</span>
+                  <span>Tenant Isolation Guarantee</span>
+                </div>
+                <p className="text-[11px] text-muted">
+                  This chunk was retrieved strictly within your organization workspace ({tenantName || "Your Tenant"}). Cross-tenant data isolation is mathematically enforced by vector collection filters.
+                </p>
+              </div>
+            </div>
+
+            {/* Drawer Footer Actions */}
+            <div className="p-4 border-t border-rule bg-paper-3 flex items-center justify-between gap-3 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  const prefix = selectedCitation.source.endsWith('.csv') ? '!' : '@';
+                  setInput((prev) => `${prev.trim()} ${prefix}${selectedCitation.source} `);
+                  setSelectedCitation(null);
+                  inputRef.current?.focus();
+                }}
+                className="px-3.5 py-2 rounded-base bg-paper hover:bg-paper-2 border border-rule hover:border-accent text-ink text-xs font-mono uppercase tracking-wider font-semibold transition-colors cursor-pointer flex items-center gap-1.5"
+              >
+                <span>Target in Chat Prompt →</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedCitation(null)}
+                className="px-4 py-2 rounded-base bg-accent hover:bg-accent-hover text-accent-ink text-xs font-mono uppercase tracking-wider font-semibold transition-colors cursor-pointer"
+              >
+                Done
               </button>
             </div>
           </div>

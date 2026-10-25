@@ -11,19 +11,18 @@ from src.logger import get_logger
 logger = get_logger(__name__)
 
 # Very simple router to detect if a query targets a specific CSV document
-ROUTER_PROMPT = """
-You are a routing assistant. The user has uploaded the following documents:
+ROUTER_PROMPT = """You are a precision query routing assistant.
+The user has uploaded these structured CSV datasets:
 {documents}
 
-The user asks: "{query}"
+The user's query is: "{query}"
 
-If the user's question requires aggregating, calculating, counting rows, or analyzing tabular/structured data from any of the provided documents, output a JSON object with:
-- "is_tabular": true
-- "target_file": "pick the closest matching exact filename from the list above, even if the user misspelled it or added .csv"
+Determine whether this question specifically targets one of the CSV datasets above for numerical calculations, counting rows, or structured tabular analysis (e.g., employee salaries, headcounts, or roster metrics).
 
-Otherwise, output:
-- "is_tabular": false
-- "target_file": null
+Rules:
+1. ONLY set "is_tabular": true if the query is specifically about data residing in one of the CSV files listed above.
+2. If the question asks about company financial reports, reviews, text documents, executive summaries, technical manuals, or general knowledge, set "is_tabular": false and "target_file": null.
+3. If unsure, ALWAYS default to "is_tabular": false and "target_file": null.
 
 {format_instructions}
 """
@@ -74,28 +73,21 @@ def route_query(query: str, available_documents: List[str]) -> Tuple[bool, Optio
         is_tabular = data.get("is_tabular", False)
         target = data.get("target_file")
         
-        # Verify the target actually exists in the available docs
-        if is_tabular:
+        # Verify the target actually exists in the available CSV docs
+        if is_tabular and target:
+            target_clean = str(target).strip().lower()
             # 1. Exact match
-            if target and target in csv_docs:
-                return True, target
-                
-            # 2. Substring match
-            if target:
-                for doc in csv_docs:
-                    target_clean = target.lower().replace(".csv", "")
-                    if target_clean in doc.lower() or doc.lower() in target_clean:
-                        return True, doc
-                        
-            # 3. Fallback: just return the first file that looks like a CSV (not a .txt)
             for doc in csv_docs:
-                if not doc.lower().endswith(".txt"):
+                if target_clean == doc.lower() or target_clean == doc.lower().replace(".csv", ""):
                     return True, doc
                     
-            # 4. Desperation fallback
-            if csv_docs:
-                return True, csv_docs[0]
-                
+            # 2. Substring match
+            for doc in csv_docs:
+                clean_name = doc.lower().replace(".csv", "")
+                if target_clean in doc.lower() or clean_name in target_clean:
+                    return True, doc
+                    
+        # If not confidently matched to a specific CSV, route to standard semantic search
         return False, None
     except Exception as e:
         logger.error(f"Routing failed: {e}")

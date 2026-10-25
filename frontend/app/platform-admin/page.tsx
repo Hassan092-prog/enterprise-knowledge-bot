@@ -3,8 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://192.168.1.92:8000";
+import { getApiUrl } from "@/lib/api";
 
 type GlobalStats = {
   total_tenants: number;
@@ -62,6 +61,7 @@ type GlobalActivity = {
 };
 
 export default function PlatformAdminDashboard() {
+  const API_URL = getApiUrl();
   const [stats, setStats] = useState<GlobalStats | null>(null);
   const [tenants, setTenants] = useState<TenantRecord[]>([]);
   const [activities, setActivities] = useState<GlobalActivity[]>([]);
