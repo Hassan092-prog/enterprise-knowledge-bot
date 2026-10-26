@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { getApiUrl } from "@/lib/api";
+import CyberSpinner from "@/components/CyberSpinner";
 
 export default function Register() {
   const API_URL = getApiUrl();
@@ -147,9 +148,13 @@ export default function Register() {
           <button
             type="submit"
             disabled={isLoading}
-            className="w-full py-2.5 px-4 rounded-base bg-accent hover:bg-accent-hover active:scale-[0.99] text-accent-ink text-xs font-mono uppercase tracking-wider font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed mt-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus cursor-pointer"
+            className="w-full py-2.5 px-4 rounded-base bg-accent hover:bg-accent-hover active:scale-[0.99] text-accent-ink text-xs font-mono uppercase tracking-wider font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed mt-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus cursor-pointer flex items-center justify-center gap-2"
           >
-            {isLoading ? "Provisioning..." : "Provision Workspace & Account →"}
+            {isLoading ? (
+              <CyberSpinner size="sm" variant="ink" label="Provisioning Workspace..." />
+            ) : (
+              "Provision Workspace & Account →"
+            )}
           </button>
         </form>
 

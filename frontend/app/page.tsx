@@ -8,6 +8,10 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import toast from 'react-hot-toast';
 import { getApiUrl } from '@/lib/api';
+import InteractiveChart from '@/components/InteractiveChart';
+import CyberSpinner from '@/components/CyberSpinner';
+import InferenceTelemetryLoader from '@/components/InferenceTelemetryLoader';
+import TerminalSkeleton from '@/components/TerminalSkeleton';
 
 type SourceCitation = {
   source: string;
@@ -49,6 +53,8 @@ export default function Home() {
   
   const [isUploading, setIsUploading] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
+  const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+  const [isRefreshingRepo, setIsRefreshingRepo] = useState(false);
 
   // Source Inspector Drawer State
   const [selectedCitation, setSelectedCitation] = useState<SourceCitation | null>(null);
@@ -163,6 +169,7 @@ export default function Home() {
   };
 
   const fetchMessages = async (sessionId: number) => {
+    setIsLoadingMessages(true);
     try {
       const res = await authFetch(`${API_URL}/sessions/${sessionId}/messages`);
       if (res.ok) {
@@ -171,6 +178,17 @@ export default function Home() {
       }
     } catch (error) {
       console.error("Failed to fetch messages:", error);
+    } finally {
+      setIsLoadingMessages(false);
+    }
+  };
+
+  const handleRefreshRepo = async () => {
+    setIsRefreshingRepo(true);
+    try {
+      await Promise.all([fetchDocuments(), fetchSessions()]);
+    } finally {
+      setTimeout(() => setIsRefreshingRepo(false), 400);
     }
   };
 
@@ -727,14 +745,12 @@ export default function Home() {
               </button>
             </div>
             <button
-              onClick={() => {
-                fetchDocuments();
-                fetchSessions();
-              }}
-              className="text-muted hover:text-ink p-1 font-mono text-[11px] transition-colors"
+              onClick={handleRefreshRepo}
+              disabled={isRefreshingRepo}
+              className="text-muted hover:text-ink p-1 font-mono text-[11px] transition-colors cursor-pointer disabled:opacity-50"
               title="Refresh repository"
             >
-              ↻
+              {isRefreshingRepo ? <CyberSpinner size="xs" variant="muted" /> : "↻"}
             </button>
           </div>
 
@@ -839,7 +855,11 @@ export default function Home() {
                 disabled={isUploading}
                 className="w-full py-2 px-3 rounded-base bg-paper-2 hover:bg-paper-3 border border-rule hover:border-accent text-ink text-xs font-mono uppercase tracking-wider font-medium transition-colors disabled:opacity-50 cursor-pointer flex items-center justify-center gap-2"
               >
-                {isUploading ? "Processing Task..." : "+ Ingest Document"}
+                {isUploading ? (
+                  <CyberSpinner size="xs" variant="accent" label="Indexing Vectors..." />
+                ) : (
+                  "+ Ingest Document"
+                )}
               </button>
             ) : (
               (["superadmin", "admin", "editor"].includes(userRole) || isPlatformAdmin) ? (
@@ -848,7 +868,11 @@ export default function Home() {
                   disabled={isUploading}
                   className="w-full py-2 px-3 rounded-base bg-paper-2 hover:bg-paper-3 border border-rule hover:border-accent text-ink text-xs font-mono uppercase tracking-wider font-medium transition-colors disabled:opacity-50 cursor-pointer flex items-center justify-center gap-2"
                 >
-                  {isUploading ? "Uploading Global..." : "+ Ingest Company Doc"}
+                  {isUploading ? (
+                    <CyberSpinner size="xs" variant="accent" label="Indexing Global..." />
+                  ) : (
+                    "+ Ingest Company Doc"
+                  )}
                 </button>
               ) : (
                 <div className="text-center font-mono text-[10px] text-muted py-1">
@@ -911,8 +935,19 @@ export default function Home() {
         {/* MESSAGE STREAM AREA */}
         <div className="flex-1 overflow-y-auto px-4 md:px-8 py-6 space-y-6 custom-scrollbar">
           
+          {/* Investigation History Loading Skeleton */}
+          {isLoadingMessages && (
+            <div className="max-w-4xl mx-auto py-4 space-y-4">
+              <div className="flex items-center gap-2 px-1 font-mono text-xs text-muted">
+                <CyberSpinner size="xs" variant="accent" />
+                <span>DECRYPTING INVESTIGATION #{activeSessionId} TRANSCRIPT...</span>
+              </div>
+              <TerminalSkeleton variant="chat" />
+            </div>
+          )}
+
           {/* Workstation Readiness Dossier (When no messages exist yet) */}
-          {messages.length === 0 && (
+          {!isLoadingMessages && messages.length === 0 && (
             <div className="max-w-3xl mx-auto my-6 p-6 bg-paper-2 rounded-card border border-rule shadow-sm">
               <div className="flex items-center gap-2 mb-2 pb-2 border-b border-rule">
                 <span className="w-2 h-2 rounded-full bg-accent" />
@@ -977,7 +1012,7 @@ export default function Home() {
           )}
 
           {/* Actual Messages */}
-          {messages.map((msg, i) => (
+          {!isLoadingMessages && messages.map((msg, i) => (
             <div
               key={i}
               className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
@@ -1003,116 +1038,123 @@ export default function Home() {
                 {/* Content Render */}
                 <div className={msg.role === "assistant" ? "markdown-body overflow-x-auto custom-scrollbar" : "text-sm text-ink font-body leading-relaxed whitespace-pre-wrap break-words"}>
                   {msg.role === "assistant" ? (
-                    <ReactMarkdown 
-                      remarkPlugins={[remarkGfm]}
-                      components={{
-                        table({children, ...props}: any) {
-                          return (
-                            <div className="w-full my-3 overflow-x-auto rounded-base border border-rule bg-paper custom-scrollbar">
-                              <table {...props} className="w-full text-xs text-left border-collapse whitespace-nowrap min-w-full">
-                                {children}
-                              </table>
-                            </div>
-                          );
-                        },
-                        thead({children, ...props}: any) {
-                          return (
-                            <thead {...props} className="bg-paper-3 border-b border-rule font-mono text-[11px] uppercase tracking-wider text-muted font-semibold">
-                              {children}
-                            </thead>
-                          );
-                        },
-                        tbody({children, ...props}: any) {
-                          return (
-                            <tbody {...props} className="divide-y divide-rule font-body">
-                              {children}
-                            </tbody>
-                          );
-                        },
-                        tr({children, ...props}: any) {
-                          return (
-                            <tr {...props} className="hover:bg-paper-2/60 transition-colors">
-                              {children}
-                            </tr>
-                          );
-                        },
-                        th({children, ...props}: any) {
-                          return (
-                            <th {...props} className="px-3.5 py-2 font-semibold text-ink border-r border-rule last:border-r-0">
-                              {children}
-                            </th>
-                          );
-                        },
-                        td({children, ...props}: any) {
-                          return (
-                            <td {...props} className="px-3.5 py-2 text-ink-secondary border-r border-rule last:border-r-0 font-mono text-xs">
-                              {children}
-                            </td>
-                          );
-                        },
-                        code({node, inline, className, children, ...props}: any) {
-                          const match = /language-(\w+)/.exec(className || '');
-                          if (!inline && match) {
+                    (!msg.content || msg.content.trim() === "") ? (
+                      <InferenceTelemetryLoader queryContext={messages[i - 1]?.content} />
+                    ) : (
+                      <ReactMarkdown 
+                        remarkPlugins={[remarkGfm]}
+                        components={{
+                          table({children, ...props}: any) {
                             return (
-                              <div className="my-3 rounded-base overflow-hidden border border-rule">
-                                <div className="px-3 py-1 bg-paper-3 border-b border-rule text-[10px] font-mono uppercase text-muted flex justify-between items-center">
-                                  <span>{match[1]}</span>
-                                  <span>Engine Output</span>
-                                </div>
-                                <SyntaxHighlighter
-                                  {...props}
-                                  style={vscDarkPlus}
-                                  language={match[1]}
-                                  PreTag="div"
-                                  customStyle={{ margin: 0, background: 'var(--color-paper)' }}
-                                >
-                                  {String(children).replace(/\n$/, '')}
-                                </SyntaxHighlighter>
+                              <div className="w-full my-3 overflow-x-auto rounded-base border border-rule bg-paper custom-scrollbar">
+                                <table {...props} className="w-full text-xs text-left border-collapse whitespace-nowrap min-w-full">
+                                  {children}
+                                </table>
                               </div>
                             );
-                          }
-                          const text = String(children);
-                          if (text.startsWith('📄')) {
-                            const rawDoc = text.replace('📄', '').trim();
-                            const docName = rawDoc.split(' · ')[0].trim();
-                            const matched = msg.sources?.find(s => 
-                              s.source.toLowerCase().includes(docName.toLowerCase()) || 
-                              docName.toLowerCase().includes(s.source.toLowerCase())
-                            );
-
+                          },
+                          thead({children, ...props}: any) {
                             return (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setSelectedCitation(matched || {
-                                    source: docName,
-                                    chunk_id: "citation_reference",
-                                    page: rawDoc.includes('Page') ? rawDoc.split('Page')[1].trim() : "1",
-                                    content: `Verified document excerpt from ${docName}.`,
-                                    is_global: true,
-                                  });
-                                }}
-                                className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded border border-accent/40 bg-accent-subtle hover:bg-accent/20 text-accent font-mono text-[11px] font-medium align-middle mx-1 shadow-2xs transition-all cursor-pointer group active:scale-[0.98]"
-                                title="Click to inspect verified source chunk in inspector drawer"
-                              >
-                                <span>{children}</span>
-                                <span className="text-[10px] opacity-70 group-hover:opacity-100">🔍</span>
-                              </button>
+                              <thead {...props} className="bg-paper-3 border-b border-rule font-mono text-[11px] uppercase tracking-wider text-muted font-semibold">
+                                {children}
+                              </thead>
+                            );
+                          },
+                          tbody({children, ...props}: any) {
+                            return (
+                              <tbody {...props} className="divide-y divide-rule font-body">
+                                {children}
+                              </tbody>
+                            );
+                          },
+                          tr({children, ...props}: any) {
+                            return (
+                              <tr {...props} className="hover:bg-paper-2/60 transition-colors">
+                                {children}
+                              </tr>
+                            );
+                          },
+                          th({children, ...props}: any) {
+                            return (
+                              <th {...props} className="px-3.5 py-2 font-semibold text-ink border-r border-rule last:border-r-0">
+                                {children}
+                              </th>
+                            );
+                          },
+                          td({children, ...props}: any) {
+                            return (
+                              <td {...props} className="px-3.5 py-2 text-ink-secondary border-r border-rule last:border-r-0 font-mono text-xs">
+                                {children}
+                              </td>
+                            );
+                          },
+                          code({node, inline, className, children, ...props}: any) {
+                            const match = /language-(\w+)/.exec(className || '');
+                            if (!inline && match) {
+                              if (match[1] === 'chart') {
+                                return <InteractiveChart content={String(children).replace(/\n$/, '')} />;
+                              }
+                              return (
+                                <div className="my-3 rounded-base overflow-hidden border border-rule">
+                                  <div className="px-3 py-1 bg-paper-3 border-b border-rule text-[10px] font-mono uppercase text-muted flex justify-between items-center">
+                                    <span>{match[1]}</span>
+                                    <span>Engine Output</span>
+                                  </div>
+                                  <SyntaxHighlighter
+                                    {...props}
+                                    style={vscDarkPlus}
+                                    language={match[1]}
+                                    PreTag="div"
+                                    customStyle={{ margin: 0, background: 'var(--color-paper)' }}
+                                  >
+                                    {String(children).replace(/\n$/, '')}
+                                  </SyntaxHighlighter>
+                                </div>
+                              );
+                            }
+                            const text = String(children);
+                            if (text.startsWith('📄')) {
+                              const rawDoc = text.replace('📄', '').trim();
+                              const docName = rawDoc.split(' · ')[0].trim();
+                              const matched = msg.sources?.find(s => 
+                                s.source.toLowerCase().includes(docName.toLowerCase()) || 
+                                docName.toLowerCase().includes(s.source.toLowerCase())
+                              );
+
+                              return (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedCitation(matched || {
+                                      source: docName,
+                                      chunk_id: "citation_reference",
+                                      page: rawDoc.includes('Page') ? rawDoc.split('Page')[1].trim() : "1",
+                                      content: `Verified document excerpt from ${docName}.`,
+                                      is_global: true,
+                                    });
+                                  }}
+                                  className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded border border-accent/40 bg-accent-subtle hover:bg-accent/20 text-accent font-mono text-[11px] font-medium align-middle mx-1 shadow-2xs transition-all cursor-pointer group active:scale-[0.98]"
+                                  title="Click to inspect verified source chunk in inspector drawer"
+                                >
+                                  <span>{children}</span>
+                                  <span className="text-[10px] opacity-70 group-hover:opacity-100">🔍</span>
+                                </button>
+                              );
+                            }
+                            return (
+                              <code {...props} className="font-mono text-xs px-1.5 py-0.5 rounded bg-paper-3 border border-rule text-ink">
+                                {children}
+                              </code>
                             );
                           }
-                          return (
-                            <code {...props} className="font-mono text-xs px-1.5 py-0.5 rounded bg-paper-3 border border-rule text-ink">
-                              {children}
-                            </code>
-                          );
-                        }
-                      }}
-                    >
-                      {msg.content.replace(
-                        /[\[\u3010\(]Source:\s*([^,\]\u3011\)]+)(?:,\s*(?:Page\s*)?([^\]\u3011\)]+))?[\]\u3011\)]/gi,
-                        (_, file, page) => (page ? `\`📄 ${file.trim()} · Page ${page.trim()}\`` : `\`📄 ${file.trim()}\``)
-                      )}
-                    </ReactMarkdown>
+                        }}
+                      >
+                        {msg.content.replace(
+                          /[\[\u3010\(]Source:\s*([^,\]\u3011\)]+)(?:,\s*(?:Page\s*)?([^\]\u3011\)]+))?[\]\u3011\)]/gi,
+                          (_, file, page) => (page ? `\`📄 ${file.trim()} · Page ${page.trim()}\`` : `\`📄 ${file.trim()}\``)
+                        )}
+                      </ReactMarkdown>
+                    )
                   ) : (
                     msg.content
                   )}
@@ -1147,18 +1189,6 @@ export default function Home() {
               </div>
             </div>
           ))}
-
-          {/* Tactile Processing Telemetry readout (Zero bouncing dots) */}
-          {isTyping && (
-            <div className="flex justify-start">
-              <div className="bg-paper-2 border border-rule rounded-card px-4 py-3 flex items-center gap-3">
-                <span className="w-2 h-2 rounded-full bg-accent animate-ping" />
-                <span className="font-mono text-xs text-muted">
-                  [PROCESSING] Executing hybrid retrieval & inference pipeline...
-                </span>
-              </div>
-            </div>
-          )}
 
           <div ref={messagesEndRef} />
         </div>
@@ -1241,9 +1271,13 @@ export default function Home() {
               <button
                 onClick={() => handleSend()}
                 disabled={!input.trim() || isTyping}
-                className="px-4 py-2 mr-2 rounded-base bg-accent hover:bg-accent-hover active:scale-[0.99] text-accent-ink text-xs font-mono uppercase tracking-wider font-semibold disabled:bg-paper-3 disabled:border-rule disabled:text-muted transition-all cursor-pointer disabled:cursor-not-allowed focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
+                className="px-4 py-2 mr-2 rounded-base bg-accent hover:bg-accent-hover active:scale-[0.99] text-accent-ink text-xs font-mono uppercase tracking-wider font-semibold disabled:bg-paper-3 disabled:border-rule disabled:text-muted transition-all cursor-pointer disabled:cursor-not-allowed focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus flex items-center gap-1.5"
               >
-                ↵ Submit
+                {isTyping ? (
+                  <CyberSpinner size="xs" variant="ink" label="Executing..." />
+                ) : (
+                  "↵ Submit"
+                )}
               </button>
             </div>
 

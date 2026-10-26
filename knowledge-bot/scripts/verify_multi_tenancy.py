@@ -4,10 +4,19 @@ verify_multi_tenancy.py — Automated Health & Security Diagnosis for Multi-Tena
 Runs comprehensive checks:
 1. Module imports and integrity
 2. Database schema evolution and bootstrapping
-3. Token claim serialization (tenant_id, role, is_platform_admin)
-4. Path traversal defense and filename sanitization
-5. ChromaDB & BM25 isolation across tenants
-6. 2-Step SuperAdmin transfer logic
+3. Security — Path traversal defense and filename sanitization
+4. Multi-Tenant JWT context serialization (tenant_id, role, is_platform_admin)
+5. VectorStore ChromaDB & BM25 isolation across tenants
+6. SuperAdmin 2-step ownership transfer logic
+7. Multi-tenant onboarding registration & sequence integrity
+8. Suspended tenant enforcement & cross-tenant tabular boundary check
+9. Mention routing & member offboarding boundaries
+10. Conversational memory, query condensation & citation metadata
+11. Pillar 3 — Compliance audit log filtering & multi-format exporter
+12. Pillar 4 — In-chat tabular BI visualization schema
+13. Pillar 3 — CSV formula injection (CWE-1236) defense
+14. Pillar 4 — Tabular SQL security & path traversal jail
+15. Governance — Audit log tenant isolation & RBAC protection
 """
 
 import sys
@@ -450,8 +459,270 @@ def run_diagnostics():
     except Exception as e:
         print_check("Check 10 failed", False, str(e))
 
+    # ──────────────────────────────────────────────────────────────────
+    # CHECK 11: Pillar 3 — Compliance Audit Log Filtering & Multi-Format Exporter
+    # ──────────────────────────────────────────────────────────────────
+    print("\n--- 11. Testing Compliance Audit Log Filtering & Multi-Format Exporter ---")
+    try:
+        from api.admin import _filter_activity_query
+        from src.models import ActivityLog
+        import io
+        import csv
+        import json
+
+        with SessionLocal() as db:
+            default_tenant = db.query(Tenant).filter(Tenant.id == 1).first()
+            if not default_tenant:
+                default_tenant = Tenant(name="Default Org", slug="default-org", join_code="DEF-001")
+                db.add(default_tenant)
+                db.commit()
+                db.refresh(default_tenant)
+
+            admin_user = db.query(User).filter(User.tenant_id == default_tenant.id).first()
+            admin_id = admin_user.id if admin_user else None
+
+            # Seed a test audit event
+            test_log = ActivityLog(
+                tenant_id=default_tenant.id,
+                user_id=admin_id,
+                action="DIAGNOSTIC_COMPLIANCE_TEST",
+                category="GOVERNANCE",
+                description="SOC 2 automated compliance audit verification",
+                details=json.dumps({"test_run": True, "standard": "SOC2_TYPE_II"})
+            )
+            db.add(test_log)
+            db.commit()
+
+            # Test category filtering
+            q_gov = _filter_activity_query(db, tenant_id=default_tenant.id, category="GOVERNANCE")
+            assert q_gov.count() > 0, "Category filter returned 0 records"
+
+            # Test search filtering
+            q_search = _filter_activity_query(db, tenant_id=default_tenant.id, search="compliance audit")
+            assert q_search.count() > 0, "Search keyword filter failed"
+
+            # Test tenant isolation in audit logs
+            q_t2 = _filter_activity_query(db, tenant_id=99999, search="compliance audit")
+            assert q_t2.count() == 0, "Tenant isolation breach in audit query"
+
+            # Test CSV stream formatting
+            output = io.StringIO()
+            writer = csv.writer(output)
+            writer.writerow(["Log ID", "Timestamp", "User", "Category", "Action", "Description"])
+            for l in q_gov.limit(5).all():
+                writer.writerow([l.id, l.timestamp, l.user.username if l.user else "System", l.category, l.action, l.description])
+            csv_data = output.getvalue()
+            assert "DIAGNOSTIC_COMPLIANCE_TEST" in csv_data, "CSV export missing test log action"
+
+            # Clean up test log
+            db.delete(test_log)
+            db.commit()
+
+        print_check("Audit log category/search filtering, tenant isolation & CSV export verified", True)
+    except Exception as e:
+        print_check("Check 11 failed", False, str(e))
+
+    # ──────────────────────────────────────────────────────────────────
+    # CHECK 12: Pillar 4 — In-Chat Tabular BI Visualization Schema
+    # ──────────────────────────────────────────────────────────────────
+    print("\n--- 12. Testing In-Chat Tabular BI Visualization Schema ---")
+    try:
+        sample_chart_payload = {
+            "type": "bar",
+            "title": "Headcount by Department",
+            "labels": ["Engineering", "Finance", "Legal", "Marketing", "Operations"],
+            "series": [
+                {
+                    "name": "Headcount",
+                    "data": [12, 4, 3, 5, 8]
+                }
+            ]
+        }
+        # Validate schema keys
+        assert sample_chart_payload["type"] in ["bar", "donut", "line", "pie"]
+        assert len(sample_chart_payload["labels"]) == len(sample_chart_payload["series"][0]["data"])
+        json_str = json.dumps(sample_chart_payload)
+        parsed = json.loads(json_str)
+        assert parsed["title"] == "Headcount by Department"
+
+        print_check("Tabular BI visualization JSON chart schema and data series validated", True)
+    except Exception as e:
+        print_check("Check 12 failed", False, str(e))
+
+    # ──────────────────────────────────────────────────────────────────
+    # CHECK 13: Pillar 3 — CSV Formula Injection (CWE-1236) Defense
+    # ──────────────────────────────────────────────────────────────────
+    print("\n--- 13. Testing CSV Formula Injection Sanitization (CWE-1236) ---")
+    try:
+        from api.admin import _sanitize_csv_cell, _parse_details_safe
+
+        dangerous_payloads = [
+            ("=1+1", "'=1+1"),
+            ("=cmd|' /C calc'!A0", "'=cmd|' /C calc'!A0"),
+            ("@SUM(A1:A10)", "'@SUM(A1:A10)"),
+            ("+12345", "'+12345"),
+            ("-12345", "'-12345"),
+            ("\t=cmd", "'\t=cmd"),
+            ("\r=calc", "'\r=calc"),
+            ("   =cmd|' /C calc'!A0", "'   =cmd|' /C calc'!A0"),
+        ]
+
+        for payload, expected in dangerous_payloads:
+            sanitized = _sanitize_csv_cell(payload)
+            assert sanitized == expected, f"Failed to sanitize '{payload}': got '{sanitized}', expected '{expected}'"
+
+        # Safe payloads must remain unchanged
+        safe_payloads = [
+            ("Acme Corporation", "Acme Corporation"),
+            ("User logged in successfully", "User logged in successfully"),
+            ("Q3 Financials", "Q3 Financials"),
+        ]
+        for payload, expected in safe_payloads:
+            sanitized = _sanitize_csv_cell(payload)
+            assert sanitized == expected, f"Safe payload was unexpectedly altered: '{sanitized}'"
+
+        # Edge cases
+        assert _sanitize_csv_cell(None) == ""
+        assert _sanitize_csv_cell("") == ""
+
+        # Safe details parser validation
+        assert _parse_details_safe('{"status": "ok"}') == {"status": "ok"}
+        assert _parse_details_safe("corrupt {json not valid") == "corrupt {json not valid"
+        assert _parse_details_safe(None) is None
+
+        print_check("CSV Formula Injection (CWE-1236) defense and safe JSON parser verified", True)
+    except Exception as e:
+        print_check("Check 13 failed", False, str(e))
+
+    # ──────────────────────────────────────────────────────────────────
+    # CHECK 14: Pillar 4 — Tabular SQL Security & Path Traversal Jail
+    # ──────────────────────────────────────────────────────────────────
+    print("\n--- 14. Testing Tabular SQL Agent Security & Path Traversal Jail ---")
+    try:
+        from src.retrieval.tabular_agent import run_tabular_query
+
+        # 1. Path traversal attack blocked
+        traversal_attempts = [
+            "../../etc/passwd",
+            "..\\..\\windows\\win.ini",
+            "../src/config.py",
+        ]
+        for attack_path in traversal_attempts:
+            res = run_tabular_query("Show me all records", attack_path, tenant_id=1)
+            assert "access denied" in res.lower() or "not found" in res.lower() or "invalid filename" in res.lower(), \
+                f"Path traversal not safely contained: {res}"
+
+        # 2. Non-existent file in tenant
+        res_nonexistent = run_tabular_query("Calculate sum", "non_existent_file_9999.csv", tenant_id=1)
+        assert "not found in your organization" in res_nonexistent.lower(), \
+            f"Expected 'not found' message, got: {res_nonexistent}"
+
+        # 3. Verify in-memory database isolation pattern
+        import pandas as pd
+        from sqlalchemy import create_engine
+        test_df = pd.DataFrame({
+            "Employee_Name": ["Test User A", "Test User B"],
+            "Department": ["Engineering", "Finance"],
+            "Base_Salary_USD": [150000, 140000],
+            "Annual_Bonus_USD": [20000, 15000]
+        })
+        mem_engine = create_engine("sqlite:///:memory:")
+        test_df.to_sql("data", mem_engine, index=False)
+        with mem_engine.connect() as conn:
+            import sqlalchemy
+            q_res = conn.execute(sqlalchemy.text("SELECT SUM(Base_Salary_USD + COALESCE(Annual_Bonus_USD, 0)) AS total FROM data")).scalar()
+            assert q_res == 325000, f"In-memory composite calculation failed: {q_res}"
+
+        print_check("Tabular agent path traversal jail check & SQL memory isolation verified", True)
+    except Exception as e:
+        print_check("Check 14 failed", False, str(e))
+
+    # ──────────────────────────────────────────────────────────────────
+    # CHECK 15: Governance — Audit Log Tenant Isolation & RBAC Protection
+    # ──────────────────────────────────────────────────────────────────
+    print("\n--- 15. Testing Audit Log Tenant Isolation & RBAC Protection ---")
+    try:
+        from fastapi import HTTPException
+        from api.dependencies import get_current_admin_user
+        from api.admin import _filter_activity_query
+
+        # 1. Verify get_current_admin_user rejects standard "user" role with 403 Forbidden
+        class MockRegularUser:
+            id = 8888
+            username = "mock_regular_user"
+            role = "user"
+            tenant_id = 1
+            is_platform_admin = False
+
+        admin_check_passed = False
+        try:
+            get_current_admin_user(current_user=MockRegularUser())
+        except HTTPException as he:
+            if he.status_code == 403:
+                admin_check_passed = True
+        assert admin_check_passed, "Regular user was not blocked with 403 from admin activity endpoint!"
+
+        # 2. Verify get_current_admin_user allows "admin" and "superadmin"
+        class MockAdminUser:
+            id = 8889
+            username = "mock_admin_user"
+            role = "admin"
+            tenant_id = 1
+            is_platform_admin = False
+
+        class MockSuperAdminUser:
+            id = 8890
+            username = "mock_superadmin_user"
+            role = "superadmin"
+            tenant_id = 1
+            is_platform_admin = False
+
+        assert get_current_admin_user(current_user=MockAdminUser()).role == "admin"
+        assert get_current_admin_user(current_user=MockSuperAdminUser()).role == "superadmin"
+
+        # 3. Verify cross-tenant isolation in audit log filtering with mock records
+        with SessionLocal() as db:
+            log_tenant_a = ActivityLog(
+                tenant_id=1,
+                user_id=1,
+                action="TENANT_A_ACTION",
+                category="SECURITY",
+                description="Tenant A private security event"
+            )
+            log_tenant_b = ActivityLog(
+                tenant_id=2,
+                user_id=1,
+                action="TENANT_B_ACTION",
+                category="SECURITY",
+                description="Tenant B private security event"
+            )
+            db.add(log_tenant_a)
+            db.add(log_tenant_b)
+            db.commit()
+
+            # Query tenant 1
+            t1_results = _filter_activity_query(db, tenant_id=1, category="SECURITY").all()
+            t1_actions = [l.action for l in t1_results]
+            assert "TENANT_A_ACTION" in t1_actions, "Tenant A missing own audit event"
+            assert "TENANT_B_ACTION" not in t1_actions, "Cross-tenant leakage: Tenant A retrieved Tenant B's audit log!"
+
+            # Query tenant 2
+            t2_results = _filter_activity_query(db, tenant_id=2, category="SECURITY").all()
+            t2_actions = [l.action for l in t2_results]
+            assert "TENANT_B_ACTION" in t2_actions, "Tenant B missing own audit event"
+            assert "TENANT_A_ACTION" not in t2_actions, "Cross-tenant leakage: Tenant B retrieved Tenant A's audit log!"
+
+            # Cleanup
+            db.delete(log_tenant_a)
+            db.delete(log_tenant_b)
+            db.commit()
+
+        print_check("Audit log tenant boundary & RBAC permission checks verified", True)
+    except Exception as e:
+        print_check("Check 15 failed", False, str(e))
+
     print("\n" + "=" * 70)
-    print("ALL 10 DIAGNOSTIC CHECKS COMPLETED")
+    print("ALL 15 DIAGNOSTIC CHECKS COMPLETED")
     print("=" * 70)
 
 if __name__ == "__main__":

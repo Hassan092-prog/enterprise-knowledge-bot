@@ -4,6 +4,8 @@ import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { getApiUrl } from "@/lib/api";
+import CyberSpinner from "@/components/CyberSpinner";
+import TerminalSkeleton from "@/components/TerminalSkeleton";
 
 type GlobalStats = {
   total_tenants: number;
@@ -218,9 +220,11 @@ export default function PlatformAdminDashboard() {
           <div className="flex items-center gap-2 flex-wrap">
             <button
               onClick={() => loadData()}
-              className="px-3.5 py-1.5 bg-paper hover:bg-paper-3 rounded-base border border-rule text-xs font-mono uppercase tracking-wider text-ink transition-colors cursor-pointer"
+              disabled={isLoading}
+              className="px-3.5 py-1.5 bg-paper hover:bg-paper-3 rounded-base border border-rule text-xs font-mono uppercase tracking-wider text-ink transition-colors cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
             >
-              ↻ Refresh All
+              {isLoading ? <CyberSpinner size="xs" variant="ink" /> : "↻"}
+              <span>Refresh All</span>
             </button>
             <Link
               href="/admin"
@@ -310,7 +314,16 @@ export default function PlatformAdminDashboard() {
             </span>
           </div>
 
-          <div className="overflow-x-auto border border-rule rounded-base bg-paper">
+          {isLoading && tenants.length === 0 ? (
+            <div className="border border-rule rounded-base bg-paper overflow-hidden">
+              <div className="px-3.5 py-2 border-b border-rule flex items-center gap-2 text-xs font-mono text-muted">
+                <CyberSpinner size="xs" variant="accent" />
+                <span className="tracking-wide">RETRIEVING MULTI-TENANT ISOLATION REGISTRY...</span>
+              </div>
+              <TerminalSkeleton variant="table" count={5} />
+            </div>
+          ) : (
+            <div className="overflow-x-auto border border-rule rounded-base bg-paper">
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="border-b border-rule bg-paper-3 text-[11px] font-mono uppercase tracking-wider text-ink">
@@ -376,6 +389,7 @@ export default function PlatformAdminDashboard() {
               </tbody>
             </table>
           </div>
+          )}
         </div>
 
         {/* INSPECTED TENANT MODAL / PANEL */}

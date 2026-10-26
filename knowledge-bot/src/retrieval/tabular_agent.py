@@ -78,12 +78,33 @@ def run_tabular_query(query: str, filename: str, tenant_id: Optional[int] = None
 
         columns_list = ", ".join(df.columns.tolist())
         prefix = (
-            "You are an expert SQL assistant querying an in-memory SQLite database.\n"
+            "You are an expert SQL analyst querying an in-memory SQLite database table named 'data'.\n"
             f"The table is named 'data'. Always query from table 'data'.\n"
             f"Available columns in table 'data': {columns_list}.\n"
-            "Do NOT try to query tables matching the raw filename. Always use table 'data'.\n"
-            "If the user asks about an attribute or metric that does not exist in these columns, "
-            "explicitly state that this metric is not in the dataset and list the available columns."
+            "COMPUTED METRICS & DERIVATIONS:\n"
+            "- If the user asks for a derived or composite metric (such as 'total compensation', 'total payroll', 'total remuneration') that can be calculated by combining or summing available numeric columns (e.g. Base_Salary_USD + COALESCE(Annual_Bonus_USD, 0)), ALWAYS proactively compute it in SQLite, state the computed numerical total clearly, and mention the formula or columns combined.\n"
+            "- Do NOT stop to ask permission if the metric can be calculated with SQL. Always execute the query and deliver the computed answer directly.\n"
+            "- If the user asks about an attribute or metric that does NOT exist and CANNOT be computed from these columns, explicitly state that this metric is not in the dataset and list the available columns.\n\n"
+            "DATA VISUALIZATION RULES:\n"
+            "1. When the question involves a comparison, distribution, ranking, or breakdown across 2 or more categories "
+            "(e.g., salary by department, headcount comparison, counts by role, spending by team):\n"
+            "   - First provide your clear textual summary or markdown table.\n"
+            "   - Then at the very end of your final response, append a chart specification in a fenced code block with language 'chart':\n"
+            "```chart\n"
+            "{{\n"
+            '  "type": "bar",\n'
+            '  "title": "Descriptive Chart Title",\n'
+            '  "labels": ["Category A", "Category B", "Category C"],\n'
+            '  "series": [\n'
+            '    {{\n'
+            '      "name": "Metric Name",\n'
+            '      "data": [120, 250, 180]\n'
+            '    }}\n'
+            '  ]\n'
+            "}}\n"
+            "```\n"
+            "2. If the user only asks for a single scalar value (e.g. 'Who is the highest paid person?', 'What is the overall average salary?'), "
+            "do NOT include a chart block; answer directly."
         )
 
         agent_type = "tool-calling" if LLM_PROVIDER != "mistral" else "zero-shot-react-description"

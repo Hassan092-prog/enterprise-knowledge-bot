@@ -4,6 +4,8 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { getApiUrl } from "@/lib/api";
+import CyberSpinner from "@/components/CyberSpinner";
+import TerminalSkeleton from "@/components/TerminalSkeleton";
 
 type Stats = {
   tenant_id: number;
@@ -59,6 +61,15 @@ export default function AdminDashboard() {
   const [users, setUsers] = useState<UserData[]>([]);
   const [activities, setActivities] = useState<ActivityItem[]>([]);
   const [activityCategory, setActivityCategory] = useState<string>("");
+  const [activitySearch, setActivitySearch] = useState<string>("");
+  const [activityUserId, setActivityUserId] = useState<string>("");
+  const [activityTimeRange, setActivityTimeRange] = useState<"all" | "today" | "7d" | "30d">("all");
+  const [activityOffset, setActivityOffset] = useState<number>(0);
+  const [activityTotal, setActivityTotal] = useState<number>(0);
+  const [isExporting, setIsExporting] = useState<boolean>(false);
+  const [isLoadingActivity, setIsLoadingActivity] = useState<boolean>(false);
+  const [isLoadingStats, setIsLoadingStats] = useState<boolean>(true);
+  const [selectedLogDetails, setSelectedLogDetails] = useState<ActivityItem | null>(null);
   const [joinCode, setJoinCode] = useState<string>("");
   const [isKeyCopied, setIsKeyCopied] = useState<boolean>(false);
   const [pendingTransfers, setPendingTransfers] = useState<PendingTransfer[]>([]);
@@ -95,6 +106,7 @@ export default function AdminDashboard() {
   }, [router]);
 
   const fetchStatsAndData = useCallback(async () => {
+    setIsLoadingStats(true);
     try {
       setError(null);
       // Fetch me
@@ -150,22 +162,109 @@ export default function AdminDashboard() {
       } else {
         setError("Failed to load administration data");
       }
+    } finally {
+      setIsLoadingStats(false);
     }
-  }, [authFetch]);
+  }, [API_URL, authFetch]);
 
-  const fetchActivity = useCallback(async (categoryFilter = "") => {
+  const fetchActivity = useCallback(async (
+    categoryFilter = activityCategory,
+    userFilter = activityUserId,
+    searchFilter = activitySearch,
+    timeRange = activityTimeRange,
+    offset = activityOffset
+  ) => {
+    setIsLoadingActivity(true);
     try {
-      const url = categoryFilter
-        ? `${API_URL}/admin/activity?category=${categoryFilter}&limit=100`
-        : `${API_URL}/admin/activity?limit=100`;
-      const res = await authFetch(url);
+      const params = new URLSearchParams();
+      if (categoryFilter && categoryFilter !== "ALL") params.append("category", categoryFilter);
+      if (userFilter) params.append("user_id", userFilter);
+      if (searchFilter.trim()) params.append("search", searchFilter.trim());
+
+      const now = new Date();
+      if (timeRange === "today") {
+        const startOfDay = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0));
+        params.append("start_date", startOfDay.toISOString());
+      } else if (timeRange === "7d") {
+        const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        params.append("start_date", sevenDaysAgo.toISOString());
+      } else if (timeRange === "30d") {
+        const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+        params.append("start_date", thirtyDaysAgo.toISOString());
+      }
+
+      params.append("limit", "50");
+      params.append("offset", String(offset));
+
+      const res = await authFetch(`${API_URL}/admin/activity?${params.toString()}`);
       if (res.ok) {
-        setActivities(await res.json());
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          setActivities(data);
+          setActivityTotal(data.length);
+        } else {
+          setActivities(data.logs || []);
+          setActivityTotal(data.total || 0);
+        }
       }
     } catch (err) {
       console.error("Activity load error:", err);
+    } finally {
+      setIsLoadingActivity(false);
     }
-  }, [authFetch]);
+  }, [API_URL, authFetch, activityCategory, activityUserId, activitySearch, activityTimeRange, activityOffset]);
+
+  const handleExportActivity = async (format: "csv" | "json") => {
+    setIsExporting(true);
+    try {
+      const params = new URLSearchParams();
+      params.append("format", format);
+      if (activityCategory && activityCategory !== "ALL") params.append("category", activityCategory);
+      if (activityUserId) params.append("user_id", activityUserId);
+      if (activitySearch.trim()) params.append("search", activitySearch.trim());
+
+      const now = new Date();
+      if (activityTimeRange === "today") {
+        const startOfDay = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0));
+        params.append("start_date", startOfDay.toISOString());
+      } else if (activityTimeRange === "7d") {
+        const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        params.append("start_date", sevenDaysAgo.toISOString());
+      } else if (activityTimeRange === "30d") {
+        const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+        params.append("start_date", thirtyDaysAgo.toISOString());
+      }
+
+      const res = await authFetch(`${API_URL}/admin/activity/export?${params.toString()}`);
+      if (!res.ok) {
+        alert("Failed to export audit log");
+        return;
+      }
+
+      const blob = await res.blob();
+      const contentDisposition = res.headers.get("content-disposition");
+      let filename = `audit_log_${format}_${Date.now()}.${format}`;
+      if (contentDisposition) {
+        const match = contentDisposition.match(/filename="?([^"]+)"?/);
+        if (match && match[1]) filename = match[1];
+      }
+
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = downloadUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(downloadUrl);
+      setSuccessMsg(`Audit log exported as ${filename}`);
+    } catch (err) {
+      console.error("Export error:", err);
+      alert("Error exporting audit log.");
+    } finally {
+      setIsExporting(false);
+    }
+  };
 
   useEffect(() => {
     fetchStatsAndData();
@@ -173,9 +272,9 @@ export default function AdminDashboard() {
 
   useEffect(() => {
     if (activeTab === "activity") {
-      fetchActivity(activityCategory);
+      fetchActivity(activityCategory, activityUserId, activitySearch, activityTimeRange, activityOffset);
     }
-  }, [activeTab, activityCategory, fetchActivity]);
+  }, [activeTab, activityCategory, activityUserId, activitySearch, activityTimeRange, activityOffset, fetchActivity]);
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -483,32 +582,36 @@ export default function AdminDashboard() {
         )}
 
         {/* Metrics Row */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <div className="bg-paper-2 p-5 rounded-card border border-rule">
-            <span className="font-mono text-[11px] uppercase tracking-wider text-muted block mb-1">
-              Organization Members
-            </span>
-            <p className="text-2xl sm:text-3xl font-display font-semibold text-ink">
-              {stats?.users || 0}
-            </p>
+        {isLoadingStats && !stats ? (
+          <TerminalSkeleton variant="stats" />
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="bg-paper-2 p-5 rounded-card border border-rule">
+              <span className="font-mono text-[11px] uppercase tracking-wider text-muted block mb-1">
+                Organization Members
+              </span>
+              <p className="text-2xl sm:text-3xl font-display font-semibold text-ink">
+                {stats?.users || 0}
+              </p>
+            </div>
+            <div className="bg-paper-2 p-5 rounded-card border border-rule">
+              <span className="font-mono text-[11px] uppercase tracking-wider text-muted block mb-1">
+                Active Member Sessions
+              </span>
+              <p className="text-2xl sm:text-3xl font-display font-semibold text-ink">
+                {stats?.sessions || 0}
+              </p>
+            </div>
+            <div className="bg-paper-2 p-5 rounded-card border border-rule">
+              <span className="font-mono text-[11px] uppercase tracking-wider text-muted block mb-1">
+                Company Corpus Chunks
+              </span>
+              <p className="text-2xl sm:text-3xl font-display font-semibold text-ink">
+                {stats?.total_chunks || 0}
+              </p>
+            </div>
           </div>
-          <div className="bg-paper-2 p-5 rounded-card border border-rule">
-            <span className="font-mono text-[11px] uppercase tracking-wider text-muted block mb-1">
-              Active Member Sessions
-            </span>
-            <p className="text-2xl sm:text-3xl font-display font-semibold text-ink">
-              {stats?.sessions || 0}
-            </p>
-          </div>
-          <div className="bg-paper-2 p-5 rounded-card border border-rule">
-            <span className="font-mono text-[11px] uppercase tracking-wider text-muted block mb-1">
-              Company Corpus Chunks
-            </span>
-            <p className="text-2xl sm:text-3xl font-display font-semibold text-ink">
-              {stats?.total_chunks || 0}
-            </p>
-          </div>
-        </div>
+        )}
 
         {/* INCOMING OWNERSHIP TRANSFER HANDSHAKE BANNER */}
         {pendingTransfers.filter((t) => t.is_recipient).map((t) => (
@@ -792,40 +895,143 @@ export default function AdminDashboard() {
         {/* TAB 3: ACTIVITY & AUDIT LOG */}
         {activeTab === "activity" && (
           <div className="bg-paper-2 p-5 sm:p-6 rounded-card border border-rule space-y-4">
-            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 pb-3 border-b border-rule">
+            {/* AUDIT CONSOLE HEADER */}
+            <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 pb-4 border-b border-rule">
               <div>
-                <h2 className="text-base font-display font-semibold text-ink">
-                  Tenant Activity & Audit Stream
-                </h2>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-base font-display font-semibold text-ink">
+                    Enterprise Compliance & Audit Stream
+                  </h2>
+                  <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+                    SOC 2 READY
+                  </span>
+                </div>
                 <p className="text-xs text-muted mt-0.5">
-                  Real-time telemetry of query executions, corpus ingestion, and governance events.
+                  Tamper-evident logs of query executions, corpus changes, access delegations, and auth events.
                 </p>
               </div>
+
+              {/* EXPORT TOOLBAR */}
               <div className="flex items-center gap-2">
-                <span className="text-xs font-mono text-muted uppercase">Category:</span>
-                <select
-                  value={activityCategory}
-                  onChange={(e) => setActivityCategory(e.target.value)}
-                  className="bg-paper border border-rule text-ink text-xs font-mono rounded-base px-2 py-1 focus:outline-none focus:border-accent"
-                >
-                  <option value="">ALL</option>
-                  <option value="QUERY">QUERY</option>
-                  <option value="KNOWLEDGE">KNOWLEDGE</option>
-                  <option value="GOVERNANCE">GOVERNANCE</option>
-                  <option value="AUTH">AUTH</option>
-                </select>
                 <button
-                  onClick={() => fetchActivity(activityCategory)}
-                  className="px-2 py-1 bg-paper border border-rule hover:bg-paper-3 text-xs font-mono text-ink rounded-base"
+                  onClick={() => handleExportActivity("csv")}
+                  disabled={isExporting}
+                  className="px-3 py-1.5 bg-paper hover:bg-paper-3 border border-rule hover:border-accent text-xs font-mono uppercase tracking-wider text-ink rounded-base flex items-center gap-1.5 transition-colors disabled:opacity-50 cursor-pointer"
+                  title="Export filtered audit logs as CSV for spreadsheet analysis"
                 >
-                  ↻ Refresh
+                  {isExporting ? <CyberSpinner size="xs" variant="accent" /> : <span>📥</span>}
+                  <span>Export CSV</span>
+                </button>
+                <button
+                  onClick={() => handleExportActivity("json")}
+                  disabled={isExporting}
+                  className="px-3 py-1.5 bg-paper hover:bg-paper-3 border border-rule hover:border-accent text-xs font-mono uppercase tracking-wider text-ink rounded-base flex items-center gap-1.5 transition-colors disabled:opacity-50 cursor-pointer"
+                  title="Export filtered audit logs as JSON for SIEM/Datadog integration"
+                >
+                  {isExporting ? <CyberSpinner size="xs" variant="accent" /> : <span>📥</span>}
+                  <span>Export JSON</span>
+                </button>
+                <button
+                  onClick={() => fetchActivity()}
+                  disabled={isLoadingActivity}
+                  className="px-2.5 py-1.5 bg-paper hover:bg-paper-3 border border-rule text-xs font-mono text-ink rounded-base cursor-pointer disabled:opacity-50"
+                  title="Refresh activity logs"
+                >
+                  {isLoadingActivity ? <CyberSpinner size="xs" variant="ink" /> : "↻"}
                 </button>
               </div>
             </div>
 
-            {activities.length === 0 ? (
-              <div className="text-center py-8 border border-dashed border-rule rounded-base bg-paper text-muted text-xs font-mono">
-                [NO_ACTIVITY_RECORDED]
+            {/* FILTER TOOLBAR */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-3 bg-paper rounded-base border border-rule">
+              {/* Category Filter */}
+              <div>
+                <label className="text-[10px] font-mono text-muted uppercase block mb-1">Event Category</label>
+                <select
+                  value={activityCategory}
+                  onChange={(e) => {
+                    setActivityCategory(e.target.value);
+                    setActivityOffset(0);
+                  }}
+                  className="w-full bg-paper-2 border border-rule text-ink text-xs font-mono rounded-base px-2.5 py-1.5 focus:outline-none focus:border-accent"
+                >
+                  <option value="">ALL CATEGORIES</option>
+                  <option value="QUERY">QUERY (Inference Telemetry)</option>
+                  <option value="KNOWLEDGE">KNOWLEDGE (Ingestion/Purge)</option>
+                  <option value="GOVERNANCE">GOVERNANCE (Roles/Transfers)</option>
+                  <option value="AUTH">AUTH (Login/Registration)</option>
+                </select>
+              </div>
+
+              {/* Time Range Filter */}
+              <div>
+                <label className="text-[10px] font-mono text-muted uppercase block mb-1">Time Range</label>
+                <select
+                  value={activityTimeRange}
+                  onChange={(e) => {
+                    setActivityTimeRange(e.target.value as any);
+                    setActivityOffset(0);
+                  }}
+                  className="w-full bg-paper-2 border border-rule text-ink text-xs font-mono rounded-base px-2.5 py-1.5 focus:outline-none focus:border-accent"
+                >
+                  <option value="all">All Time (Recorded)</option>
+                  <option value="today">Today (UTC)</option>
+                  <option value="7d">Last 7 Days</option>
+                  <option value="30d">Last 30 Days</option>
+                </select>
+              </div>
+
+              {/* User Filter */}
+              <div>
+                <label className="text-[10px] font-mono text-muted uppercase block mb-1">Target Member</label>
+                <select
+                  value={activityUserId}
+                  onChange={(e) => {
+                    setActivityUserId(e.target.value);
+                    setActivityOffset(0);
+                  }}
+                  className="w-full bg-paper-2 border border-rule text-ink text-xs font-mono rounded-base px-2.5 py-1.5 focus:outline-none focus:border-accent"
+                >
+                  <option value="">ALL MEMBERS</option>
+                  {users.map((u) => (
+                    <option key={u.id} value={String(u.id)}>
+                      {u.username} ({u.role})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Keyword Search */}
+              <div>
+                <label className="text-[10px] font-mono text-muted uppercase block mb-1">Keyword Search</label>
+                <input
+                  type="text"
+                  placeholder="Filter by description or action..."
+                  value={activitySearch}
+                  onChange={(e) => {
+                    setActivitySearch(e.target.value);
+                    setActivityOffset(0);
+                  }}
+                  className="w-full bg-paper-2 border border-rule text-ink text-xs font-mono rounded-base px-2.5 py-1.5 focus:outline-none focus:border-accent"
+                />
+              </div>
+            </div>
+
+            {/* AUDIT TABLE */}
+            {isLoadingActivity ? (
+              <div className="border border-rule rounded-base bg-paper overflow-hidden">
+                <div className="px-3.5 py-2 border-b border-rule flex items-center justify-between bg-paper-3 text-[11px] font-mono text-muted">
+                  <div className="flex items-center gap-2">
+                    <CyberSpinner size="xs" variant="accent" />
+                    <span className="tracking-wide">STREAMING AUDIT TELEMETRY STREAM...</span>
+                  </div>
+                  <span>FILTER APPLIED</span>
+                </div>
+                <TerminalSkeleton variant="table" count={6} />
+              </div>
+            ) : activities.length === 0 ? (
+              <div className="text-center py-10 border border-dashed border-rule rounded-base bg-paper text-muted text-xs font-mono">
+                [NO_MATCHING_AUDIT_LOGS_FOUND]
               </div>
             ) : (
               <div className="overflow-x-auto border border-rule rounded-base bg-paper">
@@ -835,14 +1041,16 @@ export default function AdminDashboard() {
                       <th className="p-2.5">Time (UTC)</th>
                       <th className="p-2.5">User</th>
                       <th className="p-2.5">Category</th>
-                      <th className="p-2.5">Event</th>
+                      <th className="p-2.5">Action</th>
+                      <th className="p-2.5">Description</th>
+                      <th className="p-2.5 text-right">Inspection</th>
                     </tr>
                   </thead>
                   <tbody className="text-xs divide-y divide-rule font-mono">
                     {activities.map((a) => (
-                      <tr key={a.id} className="hover:bg-paper-2 transition-colors">
-                        <td className="p-2.5 text-muted whitespace-nowrap">
-                          {new Date(a.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                      <tr key={a.id} className="hover:bg-paper-2/70 transition-colors">
+                        <td className="p-2.5 text-muted whitespace-nowrap text-[11px]">
+                          {a.timestamp ? new Date(a.timestamp).toISOString().replace("T", " ").substring(0, 19) : "—"}
                         </td>
                         <td className="p-2.5 font-semibold text-ink whitespace-nowrap">
                           {a.username}
@@ -857,13 +1065,127 @@ export default function AdminDashboard() {
                             {a.category}
                           </span>
                         </td>
-                        <td className="p-2.5 text-ink font-body">
+                        <td className="p-2.5 text-ink-secondary text-[11px] font-semibold">
+                          {a.action}
+                        </td>
+                        <td className="p-2.5 text-ink font-body max-w-md truncate">
                           {a.description}
+                        </td>
+                        <td className="p-2.5 text-right">
+                          {a.details ? (
+                            <button
+                              onClick={() => setSelectedLogDetails(a)}
+                              className="px-2 py-0.5 bg-paper-3 hover:bg-paper border border-rule text-[10px] font-mono rounded text-accent hover:border-accent cursor-pointer"
+                            >
+                              Inspect 🔍
+                            </button>
+                          ) : (
+                            <span className="text-muted text-[10px]">—</span>
+                          )}
                         </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
+              </div>
+            )}
+
+            {/* PAGINATION TOOLBAR */}
+            <div className="flex flex-col sm:flex-row justify-between items-center gap-3 pt-2 text-xs font-mono text-muted">
+              <div>
+                Showing <strong className="text-ink">{activities.length}</strong> of <strong className="text-ink">{activityTotal}</strong> total audit records
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setActivityOffset(Math.max(0, activityOffset - 50))}
+                  disabled={activityOffset === 0}
+                  className="px-3 py-1 bg-paper border border-rule rounded text-ink disabled:opacity-40 cursor-pointer"
+                >
+                  ← Previous
+                </button>
+                <span>
+                  Page {Math.floor(activityOffset / 50) + 1} of {Math.max(1, Math.ceil(activityTotal / 50))}
+                </span>
+                <button
+                  onClick={() => setActivityOffset(activityOffset + 50)}
+                  disabled={activityOffset + 50 >= activityTotal}
+                  className="px-3 py-1 bg-paper border border-rule rounded text-ink disabled:opacity-40 cursor-pointer"
+                >
+                  Next →
+                </button>
+              </div>
+            </div>
+
+            {/* EVENT DETAILS MODAL */}
+            {selectedLogDetails && (
+              <div
+                onClick={(e) => { if (e.target === e.currentTarget) setSelectedLogDetails(null); }}
+                className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-black/75 backdrop-blur-sm animate-backdrop-fade"
+              >
+                <div className="bg-paper-2 border border-rule-focus rounded-card w-[94vw] max-w-2xl sm:w-[620px] p-5 sm:p-6 shadow-2xl space-y-4 my-auto relative overflow-hidden">
+                  <div className="flex justify-between items-start pb-3 border-b border-rule gap-3">
+                    <div>
+                      <span className="text-[10px] font-mono uppercase text-muted tracking-wider block">
+                        Audit Event #{selectedLogDetails.id}
+                      </span>
+                      <h3 className="text-base font-display font-semibold text-ink">
+                        {selectedLogDetails.action}
+                      </h3>
+                    </div>
+                    <button
+                      onClick={() => setSelectedLogDetails(null)}
+                      className="p-1 rounded text-muted hover:text-ink text-base cursor-pointer hover:bg-paper-3 transition-colors"
+                    >
+                      ✕
+                    </button>
+                  </div>
+
+                  <div className="space-y-3 text-xs font-mono">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 p-3 rounded-base bg-paper border border-rule">
+                      <div>
+                        <span className="text-muted block text-[10px] uppercase">User</span>
+                        <strong className="text-ink">{selectedLogDetails.username}</strong>
+                      </div>
+                      <div>
+                        <span className="text-muted block text-[10px] uppercase">Category</span>
+                        <strong className="text-accent">{selectedLogDetails.category}</strong>
+                      </div>
+                      <div>
+                        <span className="text-muted block text-[10px] uppercase">Timestamp (UTC)</span>
+                        <span className="text-ink text-[11px] break-all">{selectedLogDetails.timestamp}</span>
+                      </div>
+                    </div>
+
+                    <div>
+                      <span className="text-muted block text-[10px] uppercase mb-1">Description</span>
+                      <div className="p-2.5 rounded-base bg-paper border border-rule text-ink font-body leading-relaxed">
+                        {selectedLogDetails.description}
+                      </div>
+                    </div>
+
+                    <div>
+                      <span className="text-muted block text-[10px] uppercase mb-1">Payload Metadata (JSON)</span>
+                      <pre className="p-3 rounded-base bg-paper border border-rule text-emerald-400 font-mono text-[11px] overflow-x-auto max-h-56 custom-scrollbar whitespace-pre-wrap break-all">
+                        {(() => {
+                          try {
+                            return JSON.stringify(JSON.parse(selectedLogDetails.details || "{}"), null, 2);
+                          } catch {
+                            return selectedLogDetails.details || "No metadata";
+                          }
+                        })()}
+                      </pre>
+                    </div>
+                  </div>
+
+                  <div className="flex justify-end pt-3 border-t border-rule">
+                    <button
+                      onClick={() => setSelectedLogDetails(null)}
+                      className="px-4 py-2 bg-paper border border-rule hover:bg-paper-3 text-ink text-xs font-mono uppercase tracking-wider rounded-base cursor-pointer font-medium transition-colors"
+                    >
+                      Close Window
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
           </div>

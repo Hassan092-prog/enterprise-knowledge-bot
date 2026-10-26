@@ -1,6 +1,11 @@
 from datetime import datetime, timedelta
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
+from fastapi.responses import StreamingResponse
+import csv
+import io
+import json
+import re
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from pathlib import Path
@@ -560,26 +565,184 @@ def reject_superadmin_transfer(
 # ACTIVITY AUDIT LOG (TENANT-SCOPED)
 # ──────────────────────────────────────────────────────────────────
 
+def _filter_activity_query(
+    db: Session,
+    tenant_id: int,
+    category: Optional[str] = None,
+    user_id: Optional[int] = None,
+    search: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
+    query = db.query(ActivityLog).filter(ActivityLog.tenant_id == tenant_id)
+    if category and category.upper() != "ALL":
+        query = query.filter(ActivityLog.category == category.upper())
+    if user_id:
+        query = query.filter(ActivityLog.user_id == user_id)
+    if search and search.strip():
+        search_pattern = f"%{search.strip()}%"
+        query = query.filter(
+            (ActivityLog.description.ilike(search_pattern)) |
+            (ActivityLog.action.ilike(search_pattern))
+        )
+    if start_date:
+        try:
+            start_dt = datetime.fromisoformat(start_date.replace("Z", "+00:00"))
+            query = query.filter(ActivityLog.timestamp >= start_dt)
+        except Exception:
+            pass
+    if end_date:
+        try:
+            end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+            query = query.filter(ActivityLog.timestamp <= end_dt)
+        except Exception:
+            pass
+    return query
+
 @router.get("/activity")
 def get_tenant_activity(
     category: Optional[str] = None,
-    limit: int = Query(50, ge=1, le=200),
+    user_id: Optional[int] = None,
+    search: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_admin_user),
 ):
-    query = db.query(ActivityLog).filter(ActivityLog.tenant_id == current_user.tenant_id)
-    if category:
-        query = query.filter(ActivityLog.category == category.upper())
+    base_query = _filter_activity_query(
+        db=db,
+        tenant_id=current_user.tenant_id,
+        category=category,
+        user_id=user_id,
+        search=search,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    total_count = base_query.count()
+    logs = base_query.order_by(ActivityLog.timestamp.desc()).offset(offset).limit(limit).all()
 
-    logs = query.order_by(ActivityLog.timestamp.desc()).limit(limit).all()
+    return {
+        "total": total_count,
+        "offset": offset,
+        "limit": limit,
+        "logs": [{
+            "id": log.id,
+            "user_id": log.user_id,
+            "username": log.user.username if log.user else "System",
+            "action": log.action,
+            "category": log.category,
+            "description": log.description,
+            "details": log.details,
+            "timestamp": log.timestamp.isoformat() if log.timestamp else None
+        } for log in logs]
+    }
 
-    return [{
-        "id": log.id,
-        "user_id": log.user_id,
-        "username": log.user.username if log.user else "System",
-        "action": log.action,
-        "category": log.category,
-        "description": log.description,
-        "details": log.details,
-        "timestamp": log.timestamp
-    } for log in logs]
+def _sanitize_csv_cell(val: any) -> str:
+    """
+    Prevents CSV Formula Injection (CWE-1236).
+    Prepends a single quote to prevent spreadsheet apps from executing formulas
+    if the value starts with =, +, -, @, tab, or carriage return (including leading whitespace).
+    """
+    if val is None:
+        return ""
+    s = str(val)
+    stripped = s.lstrip()
+    if stripped and stripped[0] in ("=", "+", "-", "@", "\t", "\r"):
+        return f"'{s}"
+    return s
+
+def _parse_details_safe(details_raw: any):
+    if not details_raw:
+        return None
+    if isinstance(details_raw, (dict, list)):
+        return details_raw
+    s = str(details_raw).strip()
+    if s.startswith("{") or s.startswith("["):
+        try:
+            return json.loads(s)
+        except Exception:
+            return s
+    return s
+
+@router.get("/activity/export")
+def export_tenant_activity(
+    format: str = Query("csv", regex="^(csv|json)$"),
+    category: Optional[str] = None,
+    user_id: Optional[int] = None,
+    search: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+):
+    """
+    Export tamper-evident tenant audit trail in CSV or JSON format for compliance audits.
+    """
+    base_query = _filter_activity_query(
+        db=db,
+        tenant_id=current_user.tenant_id,
+        category=category,
+        user_id=user_id,
+        search=search,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    logs = base_query.order_by(ActivityLog.timestamp.desc()).all()
+
+    tenant_name = current_user.tenant.name if current_user.tenant else f"tenant_{current_user.tenant_id}"
+    tenant_slug = re.sub(r'[^a-zA-Z0-9_]', '_', tenant_name.lower())
+    timestamp_str = datetime.utcnow().strftime("%Y%m%d_%H%M%SZ")
+
+    # Record the export event itself in the audit trail
+    log_activity(
+        tenant_id=current_user.tenant_id,
+        user_id=current_user.id,
+        action="AUDIT_EXPORT",
+        category="GOVERNANCE",
+        description=f"Exported {len(logs)} audit log records in {format.upper()} format",
+        details={"record_count": len(logs), "format": format, "category": category}
+    )
+
+    if format == "csv":
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["Log ID", "Timestamp (UTC)", "User ID", "Username", "Category", "Action", "Description", "Details (JSON)"])
+        for l in logs:
+            writer.writerow([
+                l.id,
+                l.timestamp.isoformat() if l.timestamp else "",
+                l.user_id or "",
+                _sanitize_csv_cell(l.user.username if l.user else "System"),
+                _sanitize_csv_cell(l.category),
+                _sanitize_csv_cell(l.action),
+                _sanitize_csv_cell(l.description),
+                _sanitize_csv_cell(l.details or "")
+            ])
+        output.seek(0)
+        filename = f"audit_log_{tenant_slug}_{timestamp_str}.csv"
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        )
+    else:
+        data = [{
+            "id": l.id,
+            "tenant_id": l.tenant_id,
+            "timestamp": l.timestamp.isoformat() if l.timestamp else None,
+            "user_id": l.user_id,
+            "username": l.user.username if l.user else "System",
+            "category": l.category,
+            "action": l.action,
+            "description": l.description,
+            "details": _parse_details_safe(l.details)
+        } for l in logs]
+        filename = f"audit_log_{tenant_slug}_{timestamp_str}.json"
+        json_content = json.dumps(data, indent=2)
+        return StreamingResponse(
+            iter([json_content]),
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        )
