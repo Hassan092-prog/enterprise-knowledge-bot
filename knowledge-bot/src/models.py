@@ -11,6 +11,7 @@ class Tenant(Base):
     slug = Column(String, unique=True, nullable=False, index=True)
     status = Column(String, default="active")  # 'active', 'suspended'
     join_code = Column(String, nullable=True)   # Join code for controlled onboarding
+    allowed_domains = Column(String, nullable=True)  # Comma-separated corporate domains, e.g. "acme.com,acmewidgets.com"
     superadmin_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL", use_alter=True, name="fk_tenant_superadmin_user_id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -25,8 +26,12 @@ class User(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String, unique=True, index=True, nullable=False)
-    hashed_password = Column(String, nullable=False)
+    email = Column(String, unique=True, index=True, nullable=True)
+    hashed_password = Column(String, nullable=True)  # Nullable for OAuth-only accounts
     role = Column(String, default="user")  # 'superadmin', 'admin', 'editor', 'user'
+    auth_provider = Column(String, default="local")  # 'local', 'google', 'github', 'microsoft'
+    oauth_id = Column(String, index=True, nullable=True)  # Provider's unique subject ID
+    avatar_url = Column(String, nullable=True)
     is_platform_admin = Column(Boolean, default=False, index=True)
     tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)

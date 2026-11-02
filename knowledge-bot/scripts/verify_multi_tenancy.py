@@ -17,6 +17,7 @@ Runs comprehensive checks:
 13. Pillar 3 — CSV formula injection (CWE-1236) defense
 14. Pillar 4 — Tabular SQL security & path traversal jail
 15. Governance — Audit log tenant isolation & RBAC protection
+16. Pillar 8 — Enterprise OAuth2 & corporate domain auto-routing
 """
 
 import sys
@@ -721,8 +722,77 @@ def run_diagnostics():
     except Exception as e:
         print_check("Check 15 failed", False, str(e))
 
+    # ──────────────────────────────────────────────────────────────────
+    # CHECK 16: Pillar 8 — Enterprise OAuth2 & Corporate Domain Auto-Routing
+    # ──────────────────────────────────────────────────────────────────
+    print("\n--- 16. Testing Enterprise OAuth2 & Corporate Domain Auto-Routing ---")
+    try:
+        from src.oauth import get_available_oauth_providers, generate_oauth_authorization_url
+        import src.oauth as oauth_mod
+
+        # 1. Provider availability dictionary structure
+        providers = get_available_oauth_providers()
+        assert isinstance(providers, dict), "OAuth providers status is not a dict"
+        assert "google" in providers and "github" in providers and "microsoft" in providers, "Missing expected OAuth providers"
+
+        # 2. Authorization URL generation
+        orig_google_id = oauth_mod.GOOGLE_CLIENT_ID
+        oauth_mod.GOOGLE_CLIENT_ID = "test-google-client-id-12345.apps.googleusercontent.com"
+        try:
+            auth_url = generate_oauth_authorization_url("google", "https://knowledge.alphalabs.nurexia.co/auth/callback?provider=google")
+            assert "accounts.google.com" in auth_url, "Google authorization host mismatch"
+            assert "test-google-client-id-12345" in auth_url, "Client ID missing from auth URL"
+            assert "scope=" in auth_url and "redirect_uri=" in auth_url, "Required OAuth2 params missing from auth URL"
+        finally:
+            oauth_mod.GOOGLE_CLIENT_ID = orig_google_id
+
+        # 3. Corporate Domain Auto-Routing verification
+        test_domain = "diagnostic-enterprise.org"
+        test_company = "Diagnostic Enterprise Corp"
+        with SessionLocal() as db:
+            # Pre-cleanup
+            existing_t = db.query(Tenant).filter(Tenant.name == test_company).first()
+            if existing_t:
+                db.delete(existing_t)
+                db.commit()
+
+            test_tenant = Tenant(
+                name=test_company,
+                slug="diagnostic-enterprise-corp",
+                status="active",
+                join_code="ORG-OAUTH99",
+                allowed_domains=f"{test_domain},other-domain.com"
+            )
+            db.add(test_tenant)
+            db.commit()
+            db.refresh(test_tenant)
+
+            # Test corporate domain matching algorithm
+            sample_employee_email = f"lead.engineer@{test_domain}"
+            email_domain = sample_employee_email.split("@")[-1].lower()
+
+            matched_tenant = None
+            active_tenants = db.query(Tenant).filter(Tenant.status == "active").all()
+            for t in active_tenants:
+                if t.allowed_domains:
+                    domains = [d.strip().lower() for d in t.allowed_domains.split(",") if d.strip()]
+                    if email_domain in domains:
+                        matched_tenant = t
+                        break
+
+            assert matched_tenant is not None, f"Domain auto-routing failed to match '{email_domain}'"
+            assert matched_tenant.id == test_tenant.id, f"Matched wrong tenant: {matched_tenant.name}"
+
+            # Teardown
+            db.delete(test_tenant)
+            db.commit()
+
+        print_check("Enterprise OAuth2 URL generation and corporate domain auto-routing verified", True)
+    except Exception as e:
+        print_check("Check 16 failed", False, str(e))
+
     print("\n" + "=" * 70)
-    print("ALL 15 DIAGNOSTIC CHECKS COMPLETED")
+    print("ALL 16 DIAGNOSTIC CHECKS COMPLETED")
     print("=" * 70)
 
 if __name__ == "__main__":

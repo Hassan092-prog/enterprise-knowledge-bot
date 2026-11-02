@@ -72,6 +72,31 @@ def run_db_migrations():
                 if "is_platform_admin" not in user_cols:
                     conn.execute(text("ALTER TABLE users ADD COLUMN is_platform_admin BOOLEAN DEFAULT FALSE"))
                     logger.info("Added 'is_platform_admin' column to users table.")
+                if "email" not in user_cols:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN email VARCHAR"))
+                    logger.info("Added 'email' column to users table.")
+                if "auth_provider" not in user_cols:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN auth_provider VARCHAR DEFAULT 'local'"))
+                    logger.info("Added 'auth_provider' column to users table.")
+                if "oauth_id" not in user_cols:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN oauth_id VARCHAR"))
+                    logger.info("Added 'oauth_id' column to users table.")
+                if "avatar_url" not in user_cols:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN avatar_url TEXT"))
+                    logger.info("Added 'avatar_url' column to users table.")
+                if engine.dialect.name == "postgresql":
+                    try:
+                        conn.execute(text("ALTER TABLE users ALTER COLUMN hashed_password DROP NOT NULL"))
+                    except Exception:
+                        pass
+                conn.commit()
+
+            # 1b. tenants table schema evolution
+            if "tenants" in existing_tables:
+                tenant_cols = {c["name"] for c in inspector.get_columns("tenants")}
+                if "allowed_domains" not in tenant_cols:
+                    conn.execute(text("ALTER TABLE tenants ADD COLUMN allowed_domains TEXT"))
+                    logger.info("Added 'allowed_domains' column to tenants table.")
                 conn.commit()
 
             # 2. chat_sessions table schema evolution
