@@ -869,8 +869,130 @@ def run_diagnostics():
     except Exception as e:
         print_check("Check 17 failed", False, str(e))
 
+    # ──────────────────────────────────────────────────────────────────
+    # CHECK 18: Phase 2 — Asynchronous Ingestion & Fine-Grained Stepper Progress
+    # ──────────────────────────────────────────────────────────────────
+    print("\n--- 18. Testing Asynchronous Ingestion & Task Stepper Progress ---")
+    try:
+        from pathlib import Path
+        import tempfile
+        import inspect
+        from src.retrieval.retriever import Retriever
+        from src.worker import process_document
+        from api.main import get_task_status
+
+        # 1. Verify Retriever.ingest_file accepts progress_callback
+        sig = inspect.signature(Retriever.ingest_file)
+        assert "progress_callback" in sig.parameters, "Retriever.ingest_file missing 'progress_callback' parameter"
+
+        # 2. Test progress_callback invocation across stages
+        recorded_stages = []
+        def mock_callback(stage: str, pct: int, msg: str):
+            recorded_stages.append((stage, pct, msg))
+
+        # Create sample test file
+        test_file_content = "Antigravity Architecture: Phase 2 Asynchronous Global Ingestion Engine.\n" * 20
+        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="w", encoding="utf-8") as tmp:
+            tmp.write(test_file_content)
+            tmp_path = Path(tmp.name)
+
+        try:
+            from api.main import retriever
+            if retriever is None:
+                retriever = Retriever()
+
+            ingest_res = retriever.ingest_file(
+                tmp_path,
+                user_id=None,
+                is_global=True,
+                tenant_id=1,
+                progress_callback=mock_callback,
+            )
+
+            stage_names = [s[0] for s in recorded_stages]
+            assert "PARSING" in stage_names, f"PARSING stage not emitted: {stage_names}"
+            assert "CHUNKING" in stage_names, f"CHUNKING stage not emitted: {stage_names}"
+            assert "EMBEDDING" in stage_names, f"EMBEDDING stage not emitted: {stage_names}"
+            assert "INDEXING" in stage_names, f"INDEXING stage not emitted: {stage_names}"
+            assert "COMPLETED" in stage_names, f"COMPLETED stage not emitted: {stage_names}"
+
+            # Verify ascending progress percentages
+            percentages = [s[1] for s in recorded_stages]
+            assert all(percentages[i] <= percentages[i + 1] for i in range(len(percentages) - 1)), f"Percentages not monotonic: {percentages}"
+            assert percentages[-1] == 100, f"Final percentage not 100: {percentages[-1]}"
+
+            # 3. Verify process_document Celery task is bound (bind=True) with update_state
+            assert inspect.ismethod(process_document.run), "process_document.run is not a bound method (bind=True required)"
+            assert callable(getattr(process_document, "update_state", None)), "process_document lacks update_state capability"
+
+            # 4. Verify /admin/upload_global dispatches background Celery task
+            import asyncio
+            import io
+            from api.admin import upload_global_document
+            from fastapi import UploadFile
+            from unittest.mock import patch
+
+            mock_file = UploadFile(
+                filename="company_policy_v2.txt",
+                file=io.BytesIO(b"Enterprise Knowledge Base Global Policy Document Chunks")
+            )
+            mock_editor = User(id=9902, username="corp_editor", role="editor", tenant_id=1)
+
+            with patch("src.worker.process_document.delay") as mock_delay:
+                class MockTask:
+                    id = "mock-global-celery-task-999"
+                mock_delay.return_value = MockTask()
+
+                upload_response = asyncio.run(upload_global_document(file=mock_file, current_user=mock_editor))
+                assert upload_response["status"] == "processing", f"Expected status 'processing', got {upload_response.get('status')}"
+                assert upload_response["task_id"] == "mock-global-celery-task-999", f"Expected mock task_id, got {upload_response.get('task_id')}"
+                assert mock_delay.called, "process_document.delay was not invoked for global upload"
+                _, delay_kwargs = mock_delay.call_args
+                assert delay_kwargs.get("is_global") is True, f"Expected is_global=True in delay call: {delay_kwargs}"
+
+            # 5. Verify /tasks/{task_id} exposes progress metadata
+            class MockAsyncResult:
+                def __init__(self, state, info, ready, successful, result):
+                    self.state = state
+                    self.status = state
+                    self.info = info
+                    self._ready = ready
+                    self._successful = successful
+                    self.result = result
+                def ready(self):
+                    return self._ready
+                def successful(self):
+                    return self._successful
+                def failed(self):
+                    return not self._successful and self._ready
+
+            # 5a. Mock task in PROGRESS state
+            mock_progress_meta = {"stage": "EMBEDDING", "pct": 70, "msg": "Generating neural vector embeddings..."}
+            with patch("src.worker.celery_app.AsyncResult", return_value=MockAsyncResult("PROGRESS", mock_progress_meta, False, False, None)):
+                task_res = get_task_status("mock-task-123", current_user=User(id=1, username="test", role="admin", tenant_id=1))
+                assert task_res["status"] == "PROGRESS", f"Expected PROGRESS status, got {task_res['status']}"
+                assert task_res["progress"] == mock_progress_meta, f"Progress meta mismatch: {task_res['progress']}"
+                assert task_res["ready"] is False, "Task should not be ready"
+
+            # 5b. Mock task in COMPLETED / SUCCESS state
+            with patch("src.worker.celery_app.AsyncResult", return_value=MockAsyncResult("SUCCESS", {"status": "ok"}, True, True, {"chunks_added": 5})):
+                comp_res = get_task_status("mock-task-456", current_user=User(id=1, username="test", role="admin", tenant_id=1))
+                assert comp_res["ready"] is True and comp_res["successful"] is True, "Task should be ready and successful"
+                assert comp_res["progress"]["stage"] == "COMPLETED", f"Expected stage COMPLETED, got {comp_res['progress']}"
+                assert comp_res["progress"]["pct"] == 100, f"Expected pct 100, got {comp_res['progress']['pct']}"
+
+            # Clean up test source from vector store
+            retriever.delete_document(tmp_path.name, user_id=None, tenant_id=1)
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
+
+        print_check("Asynchronous ingestion, Celery task state binding, and stepper progress pipeline verified", True)
+    except Exception as e:
+        print_check("Check 18 failed", False, str(e))
+
     print("\n" + "=" * 70)
-    print("ALL 17 DIAGNOSTIC CHECKS COMPLETED")
+    print("ALL 18 DIAGNOSTIC CHECKS COMPLETED")
     print("=" * 70)
 
 if __name__ == "__main__":

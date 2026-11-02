@@ -21,8 +21,8 @@ celery_app.conf.update(
 # Initialize Retriever once per worker process
 retriever = None
 
-@celery_app.task(name="process_document")
-def process_document(file_path: str, user_id: int, tenant_id: Optional[int] = None, is_global: bool = False):
+@celery_app.task(name="process_document", bind=True)
+def process_document(self, file_path: str, user_id: int, tenant_id: Optional[int] = None, is_global: bool = False):
     global retriever
     if retriever is None:
         from src.config import validate_config
@@ -33,16 +33,31 @@ def process_document(file_path: str, user_id: int, tenant_id: Optional[int] = No
         from src.retrieval.retriever import Retriever
         retriever = Retriever()
 
+    def _on_progress(stage: str, pct: int, msg: str = ""):
+        self.update_state(
+            state="PROGRESS",
+            meta={"stage": stage, "pct": pct, "msg": msg}
+        )
+
+    _on_progress("PARSING", 5, "Initializing background ingestion pipeline...")
+
     logger.info(f"Starting background ingestion for {file_path} (user={user_id}, tenant={tenant_id}, global={is_global})")
     try:
         from pathlib import Path
-        # Call ingest_file; in Phase 2 it will support tenant_id
+        target_user_id = None if is_global else user_id
+
         import inspect
         sig = inspect.signature(retriever.ingest_file)
-        if "tenant_id" in sig.parameters:
-            result = retriever.ingest_file(Path(file_path), user_id=user_id, is_global=is_global, tenant_id=tenant_id)
-        else:
-            result = retriever.ingest_file(Path(file_path), user_id=user_id, is_global=is_global)
+        kwargs = {
+            "file_path": Path(file_path),
+            "user_id": target_user_id,
+            "is_global": is_global,
+            "tenant_id": tenant_id,
+        }
+        if "progress_callback" in sig.parameters:
+            kwargs["progress_callback"] = _on_progress
+
+        result = retriever.ingest_file(**kwargs)
 
         logger.info(f"Successfully ingested {file_path}. Added {result.chunks_added} chunks.")
         
@@ -50,12 +65,13 @@ def process_document(file_path: str, user_id: int, tenant_id: Optional[int] = No
         if tenant_id:
             try:
                 from src.activity import log_activity
+                doc_type = "company" if is_global else "personal"
                 log_activity(
                     tenant_id=tenant_id,
                     user_id=user_id,
                     action="DOC_INDEXED",
                     category="KNOWLEDGE",
-                    description=f"Indexed document '{Path(file_path).name}' ({result.chunks_added} chunks)",
+                    description=f"Indexed {doc_type} document '{Path(file_path).name}' ({result.chunks_added} chunks)",
                     details={
                         "filename": Path(file_path).name,
                         "chunks_added": result.chunks_added,
@@ -66,7 +82,13 @@ def process_document(file_path: str, user_id: int, tenant_id: Optional[int] = No
             except Exception as act_err:
                 logger.warning(f"Failed to record DOC_INDEXED activity: {act_err}")
 
-        return {"filename": Path(file_path).name, "chunks_added": result.chunks_added}
+        _on_progress("COMPLETED", 100, f"Indexed {result.chunks_added} chunks.")
+        return {
+            "filename": Path(file_path).name,
+            "chunks_added": result.chunks_added,
+            "total_chunks": result.total_chunks,
+            "already_existed": result.already_existed
+        }
     except Exception as e:
         logger.error(f"Error ingesting {file_path}: {e}")
         raise e

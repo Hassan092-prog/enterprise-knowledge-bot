@@ -10,7 +10,7 @@ WHAT THIS FILE DOES:
 """
 
 from pathlib import Path
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict, Tuple, Callable
 import re
 
 import chromadb
@@ -203,6 +203,7 @@ class VectorStore:
         user_id: Optional[int] = None,
         is_global: bool = False,
         tenant_id: Optional[int] = None,
+        progress_callback: Optional[Callable[[str, int, str], None]] = None,
     ) -> int:
         """
         Embed a list of chunks and store them in ChromaDB with tenant isolation.
@@ -250,6 +251,9 @@ class VectorStore:
             embeddings_list = self._local_embedder.encode(texts).tolist()
         else:
             embeddings_list = self._embeddings.embed_documents(texts)
+
+        if progress_callback:
+            progress_callback("INDEXING", 85, f"Persisting {len(new_chunks)} chunks to ChromaDB & rebuilding lexical index...")
 
         self._collection.add(
             ids=ids,

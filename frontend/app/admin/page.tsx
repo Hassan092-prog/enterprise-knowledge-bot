@@ -6,6 +6,8 @@ import Link from "next/link";
 import { getApiUrl } from "@/lib/api";
 import CyberSpinner from "@/components/CyberSpinner";
 import TerminalSkeleton from "@/components/TerminalSkeleton";
+import TaskProgressStepper from "@/components/TaskProgressStepper";
+import { useTaskPolling } from "@/hooks/useTaskPolling";
 
 type Stats = {
   tenant_id: number;
@@ -112,6 +114,8 @@ export default function AdminDashboard() {
     }
     return res;
   }, [router]);
+
+  const taskPolling = useTaskPolling(authFetch);
 
   const fetchStatsAndData = useCallback(async () => {
     setIsLoadingStats(true);
@@ -313,6 +317,7 @@ export default function AdminDashboard() {
     if (!file) return;
 
     setIsUploading(true);
+    setError(null);
     const formData = new FormData();
     formData.append("file", file);
 
@@ -323,15 +328,28 @@ export default function AdminDashboard() {
       });
 
       if (res.ok) {
-        setSuccessMsg(`Document '${file.name}' successfully ingested into company corpus.`);
-        await fetchStatsAndData();
+        const data = await res.json();
+        if (data.task_id) {
+          taskPolling.startPolling(data.task_id, file.name, {
+            onSuccess: async () => {
+              setSuccessMsg(`Document '${file.name}' successfully ingested into company corpus.`);
+              await fetchStatsAndData();
+            },
+            onError: (errMsg) => {
+              setError(`Ingestion failed for '${file.name}': ${errMsg}`);
+            },
+          });
+        } else {
+          setSuccessMsg(`Document '${file.name}' successfully ingested into company corpus.`);
+          await fetchStatsAndData();
+        }
       } else {
         const err = await res.json();
-        alert(`Upload failed: ${err.detail}`);
+        setError(`Upload failed: ${err.detail || "Server error"}`);
       }
     } catch (error) {
       console.error("Upload error:", error);
-      alert("Failed to connect to backend for upload.");
+      setError("Failed to connect to backend for upload.");
     } finally {
       setIsUploading(false);
       if (fileInputRef.current) {
@@ -955,13 +973,34 @@ export default function AdminDashboard() {
                 />
                 <button
                   onClick={() => fileInputRef.current?.click()}
-                  disabled={isUploading}
-                  className="px-3.5 py-2 bg-accent hover:bg-accent-hover text-accent-ink rounded-base text-xs font-mono uppercase tracking-wider font-semibold transition-colors disabled:opacity-50 cursor-pointer"
+                  disabled={isUploading || taskPolling.isPolling}
+                  className="px-3.5 py-2 bg-accent hover:bg-accent-hover text-accent-ink rounded-base text-xs font-mono uppercase tracking-wider font-semibold transition-colors disabled:opacity-50 cursor-pointer flex items-center gap-1.5"
                 >
-                  {isUploading ? "Indexing..." : "+ Ingest Company Document"}
+                  {taskPolling.isPolling ? (
+                    <>
+                      <CyberSpinner size="xs" variant="ink" />
+                      <span>{taskPolling.progress?.stage || "INGESTING"} ({taskPolling.progress?.pct || 10}%)</span>
+                    </>
+                  ) : isUploading ? (
+                    "Uploading..."
+                  ) : (
+                    "+ Ingest Company Document"
+                  )}
                 </button>
               </div>
             </div>
+
+            {/* Active Ingestion Task Stepper */}
+            {(taskPolling.isPolling || taskPolling.isComplete || taskPolling.error) && (
+              <TaskProgressStepper
+                progress={taskPolling.progress}
+                filename={taskPolling.filename}
+                error={taskPolling.error}
+                isComplete={taskPolling.isComplete}
+                onDismiss={taskPolling.reset}
+                className="mb-4"
+              />
+            )}
 
             {!stats || !stats.documents || stats.documents.length === 0 ? (
               <div className="text-center py-8 border border-dashed border-rule rounded-base bg-paper text-muted text-xs font-mono">

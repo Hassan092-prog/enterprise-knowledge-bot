@@ -63,7 +63,7 @@ DATA FLOW:
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Callable
 import re
 import math
 
@@ -156,13 +156,17 @@ class Retriever:
         user_id: Optional[int] = None,
         is_global: bool = False,
         tenant_id: Optional[int] = None,
+        progress_callback: Optional[Callable[[str, int, str], None]] = None,
     ) -> IngestResult:
         """
         Full ingestion pipeline: parse → chunk → embed → store.
-        Now partitioned by tenant_id.
+        Now partitioned by tenant_id and emits fine-grained progress callbacks.
         """
         file_path = Path(file_path)
         logger.info("Starting ingestion for: %s (tenant=%s)", file_path.name, tenant_id)
+
+        if progress_callback:
+            progress_callback("PARSING", 10, f"Loading document and extracting text from '{file_path.name}'...")
 
         # ── Step 1: Parse the document ──────────────────────────────
         documents = load_document(file_path)
@@ -177,10 +181,14 @@ class Retriever:
             )
 
         # ── Step 2: Chunk the document ──────────────────────────────
+        if progress_callback:
+            progress_callback("CHUNKING", 30, f"Splitting document into semantic chunks...")
         chunks = chunk_documents(documents)
         
         # ── Step 2.5: Generate and add summary chunk ────────────────
         if not file_path.name.lower().endswith(".csv"):
+            if progress_callback:
+                progress_callback("SUMMARIZING", 50, "Generating executive summary chunk via LLM...")
             summary_text = generate_document_summary(documents)
             summary_chunk = Document(
                 page_content=f"EXECUTIVE SUMMARY OF {file_path.name}:\n{summary_text}",
@@ -198,12 +206,19 @@ class Retriever:
         already_existed = file_path.name in self._store.list_sources(user_id=user_id, tenant_id=tenant_id)
 
         # ── Step 4: Store embeddings ────────────────────────────────
+        if progress_callback:
+            progress_callback("EMBEDDING", 70, f"Computing neural vector embeddings for {len(chunks)} chunks...")
+
         chunks_added = self._store.add_documents(
             chunks,
             user_id=user_id,
             is_global=is_global,
             tenant_id=tenant_id,
+            progress_callback=progress_callback,
         )
+
+        if progress_callback:
+            progress_callback("COMPLETED", 100, f"Successfully indexed {chunks_added} chunks.")
 
         logger.info(
             "Ingestion complete: '%s' → %d/%d chunks added (tenant=%s, already_existed=%s)",

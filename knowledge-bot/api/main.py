@@ -138,12 +138,19 @@ async def upload_document(file: UploadFile = File(...), current_user: User = Dep
 def get_task_status(task_id: str, current_user: User = Depends(get_current_user)):
     from src.worker import celery_app
     res = celery_app.AsyncResult(task_id)
+    progress = {}
+    if res.state == "PROGRESS" and isinstance(res.info, dict):
+        progress = res.info
+    elif res.ready() and res.successful():
+        progress = {"stage": "COMPLETED", "pct": 100, "msg": "Document indexed successfully"}
+
     return {
         "task_id": task_id,
-        "status": res.status,
+        "status": res.state,
         "ready": res.ready(),
         "successful": res.successful() if res.ready() else False,
         "result": res.result if res.successful() else (str(res.result) if res.failed() else None),
+        "progress": progress,
     }
 
 @app.delete("/documents/{filename}")

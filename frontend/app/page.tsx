@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -12,6 +12,8 @@ import InteractiveChart from '@/components/InteractiveChart';
 import CyberSpinner from '@/components/CyberSpinner';
 import InferenceTelemetryLoader from '@/components/InferenceTelemetryLoader';
 import TerminalSkeleton from '@/components/TerminalSkeleton';
+import TaskProgressStepper from '@/components/TaskProgressStepper';
+import { useTaskPolling } from '@/hooks/useTaskPolling';
 
 type SourceCitation = {
   source: string;
@@ -73,7 +75,7 @@ export default function Home() {
   const router = useRouter();
 
   // Authenticated fetch helper
-  const authFetch = async (url: string, options: RequestInit = {}) => {
+  const authFetch = useCallback(async (url: string, options: RequestInit = {}) => {
     const token = localStorage.getItem("token");
     if (!token) {
       router.push("/login");
@@ -97,7 +99,9 @@ export default function Home() {
       }
       throw err;
     }
-  };
+  }, [router]);
+
+  const taskPolling = useTaskPolling(authFetch);
 
   const fetchDocuments = async () => {
     try {
@@ -258,40 +262,23 @@ export default function Home() {
         const data = await res.json();
         const taskId = data.task_id;
         if (taskId) {
-          toast.loading("Indexing document chunks in Celery worker...", { id: "upload-task" });
-          let attempts = 0;
-          const pollInterval = setInterval(async () => {
-            attempts++;
-            try {
-              const statusRes = await authFetch(`${API_URL}/tasks/${taskId}`);
-              if (statusRes.ok) {
-                const statusData = await statusRes.json();
-                if (statusData.ready) {
-                  clearInterval(pollInterval);
-                  if (statusData.successful) {
-                    toast.success("Document ingested and vector indexed!", { id: "upload-task" });
-                  } else {
-                    toast.error(`Ingestion error: ${statusData.result || "Worker fault"}`, { id: "upload-task" });
-                  }
-                  await fetchDocuments();
-                }
-              }
-            } catch {
-              // continue polling
-            }
-            if (attempts > 30) {
-              clearInterval(pollInterval);
-              toast.error("Upload worker timed out", { id: "upload-task" });
+          toast.loading(`Ingesting '${file.name}' in background...`, { id: "upload-task" });
+          taskPolling.startPolling(taskId, file.name, {
+            onSuccess: async () => {
+              toast.success(`Document '${file.name}' ingested and vector indexed!`, { id: "upload-task" });
               await fetchDocuments();
-            }
-          }, 1500);
+            },
+            onError: (errMsg) => {
+              toast.error(`Ingestion error: ${errMsg}`, { id: "upload-task" });
+            },
+          });
         } else {
           toast.success("Document uploaded successfully");
           await fetchDocuments();
         }
       } else {
         const err = await res.json();
-        toast.error(`Upload rejected: ${err.detail}`);
+        toast.error(`Upload rejected: ${err.detail || "Server error"}`);
       }
     } catch (error) {
       console.error("Upload error:", error);
@@ -319,11 +306,26 @@ export default function Home() {
       });
 
       if (res.ok) {
-        toast.success("Global document ingested successfully");
-        await fetchDocuments();
+        const data = await res.json();
+        const taskId = data.task_id;
+        if (taskId) {
+          toast.loading(`Ingesting company document '${file.name}'...`, { id: "global-upload-task" });
+          taskPolling.startPolling(taskId, file.name, {
+            onSuccess: async () => {
+              toast.success(`Company document '${file.name}' indexed successfully!`, { id: "global-upload-task" });
+              await fetchDocuments();
+            },
+            onError: (errMsg) => {
+              toast.error(`Global ingestion error: ${errMsg}`, { id: "global-upload-task" });
+            },
+          });
+        } else {
+          toast.success("Global document ingested successfully");
+          await fetchDocuments();
+        }
       } else {
         const err = await res.json();
-        toast.error(`Global upload failed: ${err.detail}`);
+        toast.error(`Global upload failed: ${err.detail || "Server error"}`);
       }
     } catch (error) {
       console.error("Upload error:", error);
@@ -833,6 +835,19 @@ export default function Home() {
             )}
           </div>
 
+          {/* Active Ingestion Task Stepper */}
+          {(taskPolling.isPolling || taskPolling.isComplete || taskPolling.error) && (
+            <div className="my-2">
+              <TaskProgressStepper
+                progress={taskPolling.progress}
+                filename={taskPolling.filename}
+                error={taskPolling.error}
+                isComplete={taskPolling.isComplete}
+                onDismiss={taskPolling.reset}
+              />
+            </div>
+          )}
+
           {/* Upload trigger */}
           <div className="pt-2 border-t border-rule mt-auto">
             <input
@@ -852,11 +867,13 @@ export default function Home() {
             {activeDocTab === "personal" ? (
               <button
                 onClick={() => fileInputRef.current?.click()}
-                disabled={isUploading}
+                disabled={isUploading || taskPolling.isPolling}
                 className="w-full py-2 px-3 rounded-base bg-paper-2 hover:bg-paper-3 border border-rule hover:border-accent text-ink text-xs font-mono uppercase tracking-wider font-medium transition-colors disabled:opacity-50 cursor-pointer flex items-center justify-center gap-2"
               >
-                {isUploading ? (
-                  <CyberSpinner size="xs" variant="accent" label="Indexing Vectors..." />
+                {taskPolling.isPolling ? (
+                  <CyberSpinner size="xs" variant="accent" label={`Indexing (${taskPolling.progress?.stage || "INGESTING"})...`} />
+                ) : isUploading ? (
+                  "Uploading..."
                 ) : (
                   "+ Ingest Document"
                 )}
@@ -865,11 +882,13 @@ export default function Home() {
               (["superadmin", "admin", "editor"].includes(userRole) || isPlatformAdmin) ? (
                 <button
                   onClick={() => globalFileInputRef.current?.click()}
-                  disabled={isUploading}
+                  disabled={isUploading || taskPolling.isPolling}
                   className="w-full py-2 px-3 rounded-base bg-paper-2 hover:bg-paper-3 border border-rule hover:border-accent text-ink text-xs font-mono uppercase tracking-wider font-medium transition-colors disabled:opacity-50 cursor-pointer flex items-center justify-center gap-2"
                 >
-                  {isUploading ? (
-                    <CyberSpinner size="xs" variant="accent" label="Indexing Global..." />
+                  {taskPolling.isPolling ? (
+                    <CyberSpinner size="xs" variant="accent" label={`Indexing (${taskPolling.progress?.stage || "INGESTING"})...`} />
+                  ) : isUploading ? (
+                    "Uploading..."
                   ) : (
                     "+ Ingest Company Doc"
                   )}

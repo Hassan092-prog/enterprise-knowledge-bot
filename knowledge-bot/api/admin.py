@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, status
 from fastapi.responses import StreamingResponse
 import csv
 import io
@@ -53,15 +53,11 @@ def get_admin_stats(db: Session = Depends(get_db), current_user: User = Depends(
         "documents": stats["sources"],
     }
 
-@router.post("/upload_global")
+@router.post("/upload_global", status_code=status.HTTP_202_ACCEPTED)
 async def upload_global_document(
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_editor_user),
 ):
-    from api.main import retriever
-    if not retriever:
-        raise HTTPException(status_code=500, detail="Retriever not initialized")
-
     try:
         clean_name = sanitize_filename(file.filename)
     except ValueError as e:
@@ -81,21 +77,23 @@ async def upload_global_document(
     save_path.write_bytes(contents)
 
     try:
-        result = retriever.ingest_file(
-            save_path,
-            user_id=None,
-            is_global=True,
+        from src.worker import process_document
+        task = process_document.delay(
+            str(save_path),
+            current_user.id,
             tenant_id=current_user.tenant_id,
+            is_global=True,
         )
+
         log_activity(
             tenant_id=current_user.tenant_id,
             user_id=current_user.id,
             action="DOC_UPLOAD",
             category="KNOWLEDGE",
-            description=f"Uploaded company document '{clean_name}' ({result.chunks_added} chunks)",
-            details={"filename": clean_name, "chunks_added": result.chunks_added, "is_global": True}
+            description=f"Queued company document '{clean_name}' for background ingestion (task={task.id})",
+            details={"filename": clean_name, "is_global": True, "task_id": task.id}
         )
-        return {"filename": clean_name, "chunks_added": result.chunks_added}
+        return {"filename": clean_name, "status": "processing", "task_id": task.id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
