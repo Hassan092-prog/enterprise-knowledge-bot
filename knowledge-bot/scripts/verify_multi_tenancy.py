@@ -1049,7 +1049,11 @@ def run_diagnostics():
         login_statuses = []
         last_login_resp = None
         for i in range(12):
-            res = client.post("/auth/login", json={"username": f"probe_user_{i}", "password": "wrongpassword"})
+            res = client.post(
+                "/auth/login",
+                json={"username": f"probe_user_{i}", "password": "wrongpassword"},
+                headers={"X-Forwarded-For": "203.0.113.88"}
+            )
             login_statuses.append(res.status_code)
             last_login_resp = res
             if res.status_code == 429:
@@ -1058,6 +1062,19 @@ def run_diagnostics():
         assert 429 in login_statuses, f"Failed to trigger 429 rate limit on /auth/login (statuses: {login_statuses})"
         assert last_login_resp.json()["error"]["code"] == "RATE_LIMIT_EXCEEDED", f"Unexpected error code: {last_login_resp.json()}"
         assert "Retry-After" in last_login_resp.headers or "retry-after" in last_login_resp.headers, "Missing Retry-After header on 429"
+
+        # 2b. Test Reverse-Proxy IP Isolation (different X-Forwarded-For client is not locked out by proxy IP)
+        res_diff_ip = client.post(
+            "/auth/login",
+            json={"username": "probe_user_clean", "password": "wrongpassword"},
+            headers={"X-Forwarded-For": "203.0.113.89"}
+        )
+        assert res_diff_ip.status_code == 401, f"Clean proxy client was unfairly locked out: status {res_diff_ip.status_code}"
+
+        # 2c. Test RequestValidationError RFC 7807 envelope (422)
+        res_invalid_json = client.post("/auth/login", json={"invalid_field": 123})
+        assert res_invalid_json.status_code == 422
+        assert res_invalid_json.json()["error"]["code"] == "VALIDATION_ERROR"
 
         # 3. Test Authenticated User Rate Limiting on /query (30/minute per user)
         # Hitting /query with admin_token until rate limit kicks in (30 allowed, 31st returns 429)

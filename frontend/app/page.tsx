@@ -516,7 +516,18 @@ export default function Home() {
       });
 
       if (!res.ok) {
-        throw new Error("Failed to receive telemetry response");
+        let errMsg = res.status === 429 
+          ? "Rate limit exceeded (30 queries/min). Please pause for a moment." 
+          : "Failed to receive telemetry response";
+        try {
+          const errData = await res.json();
+          if (errData.detail) {
+            errMsg = errData.detail;
+          } else if (errData.error?.message) {
+            errMsg = errData.error.message;
+          }
+        } catch {}
+        throw new Error(errMsg);
       }
 
       const reader = res.body?.getReader();
@@ -561,13 +572,16 @@ export default function Home() {
           return newMessages;
         });
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error("Query error:", error);
+      const displayMessage = error?.message && !error.message.includes("telemetry")
+        ? error.message
+        : "System alert: Error connecting to inference pipeline. Check model configuration or server status.";
       setMessages((prev) => {
         const newMessages = [...prev];
         newMessages[newMessages.length - 1] = {
           role: "assistant",
-          content: "System alert: Error connecting to inference pipeline. Check model configuration or server status.",
+          content: displayMessage,
         };
         return newMessages;
       });
@@ -1250,6 +1264,7 @@ export default function Home() {
               <input
                 ref={inputRef}
                 type="text"
+                maxLength={2000}
                 value={input}
                 onChange={handleInputChange}
                 onKeyDown={(e) => {

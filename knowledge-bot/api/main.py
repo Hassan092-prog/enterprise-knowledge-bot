@@ -65,6 +65,8 @@ app.include_router(auth_router, prefix="/auth")
 app.include_router(admin_router, prefix="/admin")
 app.include_router(platform_router, prefix="/platform")
 
+from fastapi.exceptions import RequestValidationError
+
 # Standardized RFC 7807 Error Envelopes
 @app.exception_handler(RateLimitExceeded)
 async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
@@ -82,6 +84,21 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
             "detail": msg
         },
         headers={"Retry-After": str(retry_after)}
+    )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": {
+                "code": "VALIDATION_ERROR",
+                "message": "Invalid request parameters or payload structure.",
+                "details": exc.errors(),
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            },
+            "detail": exc.errors()
+        }
     )
 
 @app.exception_handler(HTTPException)
@@ -325,7 +342,8 @@ def list_sessions(db: Session = Depends(get_db), current_user: User = Depends(ge
 def get_messages(session_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     session = db.query(ChatSession).filter(
         ChatSession.id == session_id,
-        ChatSession.user_id == current_user.id
+        ChatSession.user_id == current_user.id,
+        ChatSession.tenant_id == current_user.tenant_id
     ).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -351,7 +369,8 @@ def get_messages(session_id: int, db: Session = Depends(get_db), current_user: U
 def delete_session(session_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     session = db.query(ChatSession).filter(
         ChatSession.id == session_id,
-        ChatSession.user_id == current_user.id
+        ChatSession.user_id == current_user.id,
+        ChatSession.tenant_id == current_user.tenant_id
     ).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -365,7 +384,8 @@ def delete_session(session_id: int, db: Session = Depends(get_db), current_user:
 def update_session(session_id: int, update: SessionTitleUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     session = db.query(ChatSession).filter(
         ChatSession.id == session_id,
-        ChatSession.user_id == current_user.id
+        ChatSession.user_id == current_user.id,
+        ChatSession.tenant_id == current_user.tenant_id
     ).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -396,7 +416,8 @@ def query_bot(
 
     session = db.query(ChatSession).filter(
         ChatSession.id == query_req.session_id,
-        ChatSession.user_id == current_user.id
+        ChatSession.user_id == current_user.id,
+        ChatSession.tenant_id == current_user.tenant_id
     ).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
