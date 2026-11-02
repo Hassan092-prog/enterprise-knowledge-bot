@@ -16,6 +16,7 @@ from botocore.config import Config
 from src.config import (
     STORAGE_BACKEND,
     S3_ENDPOINT_URL,
+    S3_PUBLIC_ENDPOINT_URL,
     S3_ACCESS_KEY,
     S3_SECRET_KEY,
     S3_BUCKET_NAME,
@@ -190,8 +191,10 @@ class S3StorageProvider(BaseStorageProvider):
         secret_key: Optional[str] = None,
         bucket_name: Optional[str] = None,
         region_name: Optional[str] = None,
+        public_endpoint_url: Optional[str] = None,
     ):
         self.endpoint_url = endpoint_url or S3_ENDPOINT_URL
+        self.public_endpoint_url = public_endpoint_url or S3_PUBLIC_ENDPOINT_URL
         self.access_key = access_key or S3_ACCESS_KEY
         self.secret_key = secret_key or S3_SECRET_KEY
         self.bucket_name = bucket_name or S3_BUCKET_NAME
@@ -289,19 +292,25 @@ class S3StorageProvider(BaseStorageProvider):
 
     def generate_presigned_put_url(self, key: str, expiry_seconds: int = 3600) -> str:
         clean_key = key.lstrip("/")
-        return self.s3_client.generate_presigned_url(
+        url = self.s3_client.generate_presigned_url(
             "put_object",
             Params={"Bucket": self.bucket_name, "Key": clean_key},
             ExpiresIn=expiry_seconds,
         )
+        if self.public_endpoint_url and self.endpoint_url in url:
+            url = url.replace(self.endpoint_url, self.public_endpoint_url, 1)
+        return url
 
     def generate_presigned_get_url(self, key: str, expiry_seconds: int = 3600) -> str:
         clean_key = key.lstrip("/")
-        return self.s3_client.generate_presigned_url(
+        url = self.s3_client.generate_presigned_url(
             "get_object",
             Params={"Bucket": self.bucket_name, "Key": clean_key},
             ExpiresIn=expiry_seconds,
         )
+        if self.public_endpoint_url and self.endpoint_url in url:
+            url = url.replace(self.endpoint_url, self.public_endpoint_url, 1)
+        return url
 
 
 _storage_instance: Optional[BaseStorageProvider] = None

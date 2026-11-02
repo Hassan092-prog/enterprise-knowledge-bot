@@ -157,3 +157,8 @@ def run_tabular_query(query: str, filename: str, tenant_id: Optional[int] = None
     except Exception as e:
         logger.error(f"Tabular query error: {e}")
         return f"Error executing tabular query: {str(e)}"
+    finally:
+        try:
+            engine.dispose()
+        except Exception:
+            pass

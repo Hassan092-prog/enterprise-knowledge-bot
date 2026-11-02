@@ -1232,18 +1232,24 @@ def run_diagnostics():
             user = db.query(User).filter(User.id == 1).first()
             token = create_user_token(user)
 
-        # Test download endpoint for the verified indexed document
+        # Test direct streaming download endpoint for the verified indexed document
         dl_resp = client.get(
             f"/documents/{stream_doc_name}/download",
             headers={"Authorization": f"Bearer {token}"}
         )
-        assert dl_resp.status_code == 200, f"Download endpoint failed: {dl_resp.text}"
+        assert dl_resp.status_code == 200, f"Direct download failed: {dl_resp.text}"
+        assert dl_resp.content == stream_payload, "Direct download content mismatch"
+
+        # Test presigned URL query parameter mode
         if STORAGE_BACKEND == "s3":
-            dl_json = dl_resp.json()
+            dl_pre_resp = client.get(
+                f"/documents/{stream_doc_name}/download?presigned=true",
+                headers={"Authorization": f"Bearer {token}"}
+            )
+            assert dl_pre_resp.status_code == 200, f"Presigned URL generation failed: {dl_pre_resp.text}"
+            dl_json = dl_pre_resp.json()
             assert "download_url" in dl_json
             assert "expires_in" in dl_json
-        else:
-            assert dl_resp.content == stream_payload
 
         # Clean up via DELETE /documents/{filename} — verify cascade deletion
         del_resp = client.delete(

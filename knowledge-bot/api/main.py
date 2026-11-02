@@ -291,7 +291,11 @@ def get_task_status(
     }
 
 @app.get("/documents/{filename}/download")
-def download_document(filename: str, current_user: User = Depends(get_current_user)):
+def download_document(
+    filename: str,
+    presigned: bool = False,
+    current_user: User = Depends(get_current_user)
+):
     r = get_retriever()
 
     try:
@@ -332,7 +336,7 @@ def download_document(filename: str, current_user: User = Depends(get_current_us
             target_key = key_personal
 
     if target_key:
-        if STORAGE_BACKEND == "s3":
+        if presigned and STORAGE_BACKEND == "s3":
             url = storage.generate_presigned_url(target_key, expiration_seconds=900)
             return {"filename": clean_name, "download_url": url, "expires_in": 900}
         else:

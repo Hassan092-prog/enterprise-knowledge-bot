@@ -146,6 +146,12 @@ def process_document(
             }
         )
         raise e
+    finally:
+        if input_source is not None and hasattr(input_source, "close"):
+            try:
+                input_source.close()
+            except Exception:
+                pass
 
 
 @celery_app.task(name="log_activity_async")

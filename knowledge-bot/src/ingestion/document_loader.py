@@ -95,7 +95,8 @@ def load_document(file_source: Union[str, Path, BinaryIO], original_filename: Op
         with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
             tmp_path = Path(tmp.name)
             data = file_source.read()
-            tmp_path.write_bytes(data)
+            tmp.write(data if isinstance(data, bytes) else data.encode("utf-8"))
+            tmp.flush()
 
         try:
             logger.info("Loading document from stream: %s (type: %s)", clean_name, ext)
