@@ -10,6 +10,7 @@ import TerminalSkeleton from "@/components/TerminalSkeleton";
 type Stats = {
   tenant_id: number;
   tenant_name: string;
+  allowed_domains?: string;
   users: number;
   sessions: number;
   total_chunks: number;
@@ -74,6 +75,13 @@ export default function AdminDashboard() {
   const [isKeyCopied, setIsKeyCopied] = useState<boolean>(false);
   const [pendingTransfers, setPendingTransfers] = useState<PendingTransfer[]>([]);
   const [transferTargetUserId, setTransferTargetUserId] = useState<number | "">("");
+
+  // Enterprise Corporate Domain & SSO Routing (Pillar 8)
+  const [allowedDomains, setAllowedDomains] = useState<string>("");
+  const [domainInput, setDomainInput] = useState<string>("");
+  const [isSavingDomains, setIsSavingDomains] = useState<boolean>(false);
+  const [domainFeedback, setDomainFeedback] = useState<{ type: "success" | "error"; msg: string } | null>(null);
+  const [oauthProviders, setOauthProviders] = useState<{ google?: boolean; github?: boolean; microsoft?: boolean }>({});
 
   const [currentUserRole, setCurrentUserRole] = useState<string>("");
   const [isPlatformAdmin, setIsPlatformAdmin] = useState<boolean>(false);
@@ -155,6 +163,30 @@ export default function AdminDashboard() {
       const trRes = await authFetch(`${API_URL}/admin/pending_transfers`);
       if (trRes.ok) {
         setPendingTransfers(await trRes.json());
+      }
+
+      // Fetch OAuth Providers
+      try {
+        const provRes = await authFetch(`${API_URL}/auth/oauth/providers`);
+        if (provRes.ok) {
+          const provData = await provRes.json();
+          setOauthProviders(provData);
+        }
+      } catch (e) {
+        console.warn("Could not load OAuth provider status", e);
+      }
+
+      // Fetch Allowed Corporate Domains
+      try {
+        const domRes = await authFetch(`${API_URL}/auth/tenant/domains`);
+        if (domRes.ok) {
+          const domData = await domRes.json();
+          const domains = domData.allowed_domains || "";
+          setAllowedDomains(domains);
+          setDomainInput(domains);
+        }
+      } catch (e) {
+        console.warn("Could not load tenant domains", e);
       }
     } catch (err: unknown) {
       if (err instanceof Error) {
@@ -430,6 +462,77 @@ export default function AdminDashboard() {
       });
     } else {
       copyWithFallback();
+    }
+  };
+
+  const handleSaveDomains = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setDomainFeedback(null);
+
+    const rawList = domainInput
+      .split(",")
+      .map((d) => d.trim().toLowerCase())
+      .filter(Boolean);
+
+    const publicDomains = [
+      "gmail.com",
+      "yahoo.com",
+      "outlook.com",
+      "hotmail.com",
+      "icloud.com",
+      "mail.com",
+      "proton.me",
+      "protonmail.com",
+      "aol.com",
+    ];
+
+    for (const d of rawList) {
+      if (publicDomains.includes(d)) {
+        setDomainFeedback({
+          type: "error",
+          msg: `Public domain '${d}' cannot be configured for corporate SSO auto-routing. Please provide verified corporate hostnames.`,
+        });
+        return;
+      }
+      if (!/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(d)) {
+        setDomainFeedback({
+          type: "error",
+          msg: `Invalid domain format: '${d}'. Expected standard format like 'acme.com'.`,
+        });
+        return;
+      }
+    }
+
+    setIsSavingDomains(true);
+    try {
+      const sanitized = rawList.join(", ");
+      const res = await authFetch(`${API_URL}/auth/tenant/domains`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ allowed_domains: sanitized }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || "Failed to update tenant corporate domains");
+      }
+
+      const data = await res.json();
+      setAllowedDomains(data.allowed_domains || "");
+      setDomainInput(data.allowed_domains || "");
+      setDomainFeedback({
+        type: "success",
+        msg: "Corporate domains successfully updated and active for OAuth SSO auto-routing.",
+      });
+      setTimeout(() => setDomainFeedback(null), 5000);
+      await fetchStatsAndData();
+    } catch (err: unknown) {
+      setDomainFeedback({
+        type: "error",
+        msg: err instanceof Error ? err.message : "Error saving corporate domains",
+      });
+    } finally {
+      setIsSavingDomains(false);
     }
   };
 
@@ -1194,6 +1297,164 @@ export default function AdminDashboard() {
         {/* TAB 4: SETTINGS */}
         {activeTab === "settings" && (
           <div className="space-y-6">
+            {/* CORPORATE IDENTITY & SSO AUTO-ROUTING (PILLAR 8) */}
+            <div className="bg-paper-2 p-5 sm:p-6 rounded-card border border-rule space-y-5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-rule">
+                <div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="w-2 h-2 rounded-full bg-accent animate-pulse" />
+                    <h2 className="text-base font-display font-semibold text-ink">
+                      Corporate Identity & SSO Auto-Routing
+                    </h2>
+                  </div>
+                  <p className="text-xs text-muted max-w-xl">
+                    Configure authorized enterprise email domains. Employees signing in via Google Workspace, Microsoft 365, or GitHub using verified emails matching these domains are automatically provisioned and routed into this workspace without requiring manual join codes.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-[10px] uppercase tracking-wider text-muted px-2 py-0.5 rounded border border-rule bg-paper">
+                    Pillar 8 SSO
+                  </span>
+                </div>
+              </div>
+
+              {/* Identity Providers Status Bar */}
+              <div>
+                <label className="text-[10px] font-mono text-muted uppercase tracking-wider block mb-2">
+                  Configured Identity Providers
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  <div className="flex items-center justify-between p-2.5 bg-paper rounded-base border border-rule text-xs font-mono">
+                    <div className="flex items-center gap-2">
+                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24">
+                        <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                        <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                        <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
+                        <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
+                      </svg>
+                      <span className="text-ink">Google</span>
+                    </div>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                      oauthProviders.google
+                        ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30"
+                        : "bg-paper-3 text-muted border border-rule"
+                    }`}>
+                      {oauthProviders.google ? "Active" : "Unconfigured"}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between p-2.5 bg-paper rounded-base border border-rule text-xs font-mono">
+                    <div className="flex items-center gap-2">
+                      <svg className="w-3.5 h-3.5" viewBox="0 0 23 23">
+                        <path fill="#f35325" d="M1 1h10v10H1z" />
+                        <path fill="#81bc06" d="M12 1h10v10H12z" />
+                        <path fill="#05a6f0" d="M1 12h10v10H1z" />
+                        <path fill="#ffba08" d="M12 12h10v10H12z" />
+                      </svg>
+                      <span className="text-ink">Microsoft 365</span>
+                    </div>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                      oauthProviders.microsoft
+                        ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30"
+                        : "bg-paper-3 text-muted border border-rule"
+                    }`}>
+                      {oauthProviders.microsoft ? "Active" : "Unconfigured"}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between p-2.5 bg-paper rounded-base border border-rule text-xs font-mono">
+                    <div className="flex items-center gap-2">
+                      <svg className="w-3.5 h-3.5 fill-current text-ink" viewBox="0 0 24 24">
+                        <path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z" />
+                      </svg>
+                      <span className="text-ink">GitHub</span>
+                    </div>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                      oauthProviders.github
+                        ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30"
+                        : "bg-paper-3 text-muted border border-rule"
+                    }`}>
+                      {oauthProviders.github ? "Active" : "Unconfigured"}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Active Domains Pills */}
+              <div>
+                <label className="text-[10px] font-mono text-muted uppercase tracking-wider block mb-1.5">
+                  Currently Enforced Domain Route(s)
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {allowedDomains ? (
+                    allowedDomains.split(",").map((dom) => (
+                      <span
+                        key={dom.trim()}
+                        className="inline-flex items-center gap-1.5 px-3 py-1 rounded-base bg-paper border border-accent/40 text-accent font-mono text-xs font-semibold shadow-xs"
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full bg-accent" />
+                        @{dom.trim()}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="text-xs font-mono text-muted italic">
+                      [NO_DOMAINS_RESTRICTED: Members onboarding requires secret join-code]
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Feedback messages */}
+              {domainFeedback && (
+                <div
+                  className={`p-3 rounded-base text-xs font-mono flex items-start gap-2 ${
+                    domainFeedback.type === "success"
+                      ? "bg-emerald-500/10 border border-emerald-500/30 text-emerald-400"
+                      : "bg-ruby-subtle border border-ruby/30 text-ruby"
+                  }`}
+                >
+                  <span className="font-bold">[{domainFeedback.type.toUpperCase()}]</span>
+                  <span>{domainFeedback.msg}</span>
+                </div>
+              )}
+
+              {/* Form Input */}
+              <form onSubmit={handleSaveDomains} className="space-y-3">
+                <div>
+                  <label className="text-[10px] font-mono text-muted uppercase tracking-wider block mb-1">
+                    Allowed Corporate Email Domains (comma-separated)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. acme.com, engineering.acme.com, enterprise.org"
+                    value={domainInput}
+                    onChange={(e) => setDomainInput(e.target.value)}
+                    className="w-full p-2.5 bg-paper border border-rule rounded-base text-ink font-mono text-xs focus:outline-none focus:border-accent"
+                  />
+                  <span className="text-[11px] text-muted block mt-1 font-body">
+                    Public consumer email domains (e.g. gmail.com, yahoo.com) are rejected automatically for security.
+                  </span>
+                </div>
+
+                <div className="flex justify-end">
+                  <button
+                    type="submit"
+                    disabled={isSavingDomains}
+                    className="px-4 py-2 bg-accent hover:bg-accent-hover text-accent-ink text-xs font-mono uppercase tracking-wider font-semibold rounded-base transition-colors cursor-pointer disabled:opacity-50 flex items-center gap-2"
+                  >
+                    {isSavingDomains ? (
+                      <>
+                        <CyberSpinner size="xs" variant="accent" />
+                        <span>Updating Domains...</span>
+                      </>
+                    ) : (
+                      <span>Save Corporate Domains ✓</span>
+                    )}
+                  </button>
+                </div>
+              </form>
+            </div>
+
             {/* JOIN CODE */}
             <div className="bg-paper-2 p-5 sm:p-6 rounded-card border border-rule">
               <h2 className="text-base font-display font-semibold text-ink mb-1">

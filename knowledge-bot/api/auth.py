@@ -184,6 +184,7 @@ def get_me(current_user: User = Depends(get_current_user)):
         "tenant_id": current_user.tenant_id,
         "tenant_name": current_user.tenant.name if current_user.tenant else None,
         "tenant_slug": current_user.tenant.slug if current_user.tenant else None,
+        "allowed_domains": current_user.tenant.allowed_domains if current_user.tenant else None,
         "is_platform_admin": bool(current_user.is_platform_admin),
         "access_token": create_user_token(current_user)
     }
@@ -423,6 +424,16 @@ def oauth_callback(provider: str, request: OAuthCallbackRequest, db: Session = D
         "email": new_user.email,
         "avatar_url": new_user.avatar_url,
     }
+
+@router.get("/tenant/domains")
+def get_tenant_domains(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Returns the allowed corporate email domains for the user's organization."""
+    if not current_user.tenant_id:
+        return {"allowed_domains": None}
+    tenant = db.query(Tenant).filter(Tenant.id == current_user.tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return {"allowed_domains": tenant.allowed_domains}
 
 @router.patch("/tenant/domains")
 def update_tenant_domains(update: TenantDomainUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):

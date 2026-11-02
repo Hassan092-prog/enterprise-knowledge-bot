@@ -18,6 +18,7 @@ Runs comprehensive checks:
 14. Pillar 4 — Tabular SQL security & path traversal jail
 15. Governance — Audit log tenant isolation & RBAC protection
 16. Pillar 8 — Enterprise OAuth2 & corporate domain auto-routing
+17. Pillar 8 — Corporate domain management RBAC enforcement (PATCH /auth/tenant/domains)
 """
 
 import sys
@@ -791,8 +792,63 @@ def run_diagnostics():
     except Exception as e:
         print_check("Check 16 failed", False, str(e))
 
+    # ──────────────────────────────────────────────────────────────────
+    # CHECK 17: Pillar 8 — Corporate Domain Management RBAC Enforcement
+    # ──────────────────────────────────────────────────────────────────
+    print("\n--- 17. Testing Corporate Domain Management RBAC Enforcement ---")
+    try:
+        from fastapi import HTTPException
+        from api.auth import update_tenant_domains, get_tenant_domains, TenantDomainUpdate
+
+        with SessionLocal() as db:
+            tenant_1 = db.query(Tenant).filter(Tenant.id == 1).first()
+            orig_domains = tenant_1.allowed_domains
+
+            mock_user = User(id=9901, username="test_std_user", role="user", tenant_id=1)
+            mock_editor = User(id=9902, username="test_editor_user", role="editor", tenant_id=1)
+            mock_admin = User(id=9903, username="test_admin_user", role="admin", tenant_id=1)
+
+            # 1. Standard user role must be rejected with 403 Forbidden
+            blocked = False
+            try:
+                update_tenant_domains(TenantDomainUpdate(allowed_domains="hacked.com"), db=db, current_user=mock_user)
+            except HTTPException as exc:
+                if exc.status_code == 403:
+                    blocked = True
+            assert blocked, "Standard user was NOT blocked from modifying tenant corporate domains!"
+
+            # 2. Editor role must be rejected with 403 Forbidden
+            blocked_editor = False
+            try:
+                update_tenant_domains(TenantDomainUpdate(allowed_domains="hacked-editor.com"), db=db, current_user=mock_editor)
+            except HTTPException as exc:
+                if exc.status_code == 403:
+                    blocked_editor = True
+            assert blocked_editor, "Editor was NOT blocked from modifying tenant corporate domains!"
+
+            # 3. Admin role must succeed (200 OK)
+            update_res = update_tenant_domains(
+                TenantDomainUpdate(allowed_domains="corporate-verified.com, eng.corporate-verified.com"),
+                db=db,
+                current_user=mock_admin
+            )
+            assert update_res["status"] == "success", "Admin domain update did not return success"
+            assert "corporate-verified.com" in update_res["allowed_domains"], "Updated domains not returned"
+
+            # 4. Verification via get_tenant_domains
+            get_res = get_tenant_domains(db=db, current_user=mock_user)
+            assert get_res["allowed_domains"] == "corporate-verified.com, eng.corporate-verified.com", "get_tenant_domains returned unexpected value"
+
+            # Revert to original
+            tenant_1.allowed_domains = orig_domains
+            db.commit()
+
+        print_check("Corporate domain management RBAC enforcement verified (403 for user/editor, 200 for admin)", True)
+    except Exception as e:
+        print_check("Check 17 failed", False, str(e))
+
     print("\n" + "=" * 70)
-    print("ALL 16 DIAGNOSTIC CHECKS COMPLETED")
+    print("ALL 17 DIAGNOSTIC CHECKS COMPLETED")
     print("=" * 70)
 
 if __name__ == "__main__":

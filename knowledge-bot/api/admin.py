@@ -46,6 +46,7 @@ def get_admin_stats(db: Session = Depends(get_db), current_user: User = Depends(
     return {
         "tenant_id": tenant_id,
         "tenant_name": current_user.tenant.name if current_user.tenant else None,
+        "allowed_domains": current_user.tenant.allowed_domains if current_user.tenant else None,
         "users": user_count,
         "sessions": session_count,
         "total_chunks": stats["total_chunks"],
