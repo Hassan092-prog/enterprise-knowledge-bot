@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect } from "react";
+import { getApiUrl } from "@/lib/api";
 
 export type IngestionStage =
   | "PARSING"
@@ -44,13 +45,15 @@ export function useTaskPolling(
   const [error, setError] = useState<string | null>(null);
   const [isComplete, setIsComplete] = useState(false);
 
-  const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const pollTimerRef = useRef<NodeJS.Timeout | null>(null);
   const attemptsRef = useRef(0);
+  const isCancelledRef = useRef(false);
 
   const stopPolling = useCallback(() => {
-    if (pollIntervalRef.current) {
-      clearInterval(pollIntervalRef.current);
-      pollIntervalRef.current = null;
+    isCancelledRef.current = true;
+    if (pollTimerRef.current) {
+      clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
     }
     setIsPolling(false);
   }, []);
@@ -64,11 +67,12 @@ export function useTaskPolling(
     setIsComplete(false);
   }, [stopPolling]);
 
-  // Clean up interval on unmount
+  // Clean up timer on unmount
   useEffect(() => {
     return () => {
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
+      isCancelledRef.current = true;
+      if (pollTimerRef.current) {
+        clearTimeout(pollTimerRef.current);
       }
     };
   }, []);
@@ -80,6 +84,7 @@ export function useTaskPolling(
       callbacks?: { onSuccess?: (res?: any) => void; onError?: (err: string) => void }
     ) => {
       stopPolling();
+      isCancelledRef.current = false;
       setTaskId(id);
       if (targetFilename) setFilename(targetFilename);
       setIsPolling(true);
@@ -94,55 +99,76 @@ export function useTaskPolling(
       attemptsRef.current = 0;
       const intervalMs = options?.pollIntervalMs || 1000;
       const maxAttempts = options?.maxAttempts || 90; // 90 seconds timeout for OCR/LLM
-      const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const API_URL = getApiUrl();
 
-      pollIntervalRef.current = setInterval(async () => {
+      const pollTick = async () => {
+        if (isCancelledRef.current) return;
+
         attemptsRef.current += 1;
+        let shouldContinue = true;
+
         try {
           const res = await authFetch(`${API_URL}/tasks/${id}`);
+
+          if (isCancelledRef.current) return;
+
           if (!res.ok) {
             // Task not yet registered in Redis/Celery (race condition on fast poll)
-            if (res.status === 404 && attemptsRef.current <= 3) {
+            if (res.status === 404 && attemptsRef.current <= 5) {
+              // retry on next tick
+            } else if (res.status === 403) {
+              shouldContinue = false;
+              const forbiddenMsg = "Access denied: You do not have permission to inspect this task.";
+              setError(forbiddenMsg);
+              setProgress({ stage: "FAILED", pct: 0, msg: forbiddenMsg });
+              options?.onError?.(forbiddenMsg);
+              callbacks?.onError?.(forbiddenMsg);
+              stopPolling();
+              return;
+            } else {
+              throw new Error(`Failed to query task status (HTTP ${res.status})`);
+            }
+          } else {
+            const data: TaskStatusResponse = await res.json();
+
+            if (isCancelledRef.current) return;
+
+            if (data.progress && data.progress.stage) {
+              setProgress(data.progress);
+            }
+
+            if (data.ready) {
+              shouldContinue = false;
+              stopPolling();
+              if (data.successful) {
+                setProgress({
+                  stage: "COMPLETED",
+                  pct: 100,
+                  msg: "Document indexed successfully",
+                });
+                setIsComplete(true);
+                options?.onSuccess?.(data.result);
+                callbacks?.onSuccess?.(data.result);
+              } else {
+                const errMsg =
+                  typeof data.result === "string"
+                    ? data.result
+                    : data.progress?.msg || "Worker error during document processing";
+                setError(errMsg);
+                setProgress({
+                  stage: "FAILED",
+                  pct: 0,
+                  msg: errMsg,
+                });
+                options?.onError?.(errMsg);
+                callbacks?.onError?.(errMsg);
+              }
               return;
             }
-            throw new Error(`Failed to query task status (HTTP ${res.status})`);
-          }
-
-          const data: TaskStatusResponse = await res.json();
-
-          if (data.progress && data.progress.stage) {
-            setProgress(data.progress);
-          }
-
-          if (data.ready) {
-            stopPolling();
-            if (data.successful) {
-              setProgress({
-                stage: "COMPLETED",
-                pct: 100,
-                msg: "Document indexed successfully",
-              });
-              setIsComplete(true);
-              options?.onSuccess?.(data.result);
-              callbacks?.onSuccess?.(data.result);
-            } else {
-              const errMsg =
-                typeof data.result === "string"
-                  ? data.result
-                  : "Worker error during document processing";
-              setError(errMsg);
-              setProgress({
-                stage: "FAILED",
-                pct: 0,
-                msg: errMsg,
-              });
-              options?.onError?.(errMsg);
-              callbacks?.onError?.(errMsg);
-            }
-            return;
           }
 
           if (attemptsRef.current >= maxAttempts) {
+            shouldContinue = false;
             stopPolling();
             const timeoutMsg = "Ingestion task timed out after 90 seconds.";
             setError(timeoutMsg);
@@ -153,12 +179,21 @@ export function useTaskPolling(
             });
             options?.onError?.(timeoutMsg);
             callbacks?.onError?.(timeoutMsg);
+            return;
           }
         } catch (err: unknown) {
+          if (isCancelledRef.current) return;
           const errString = err instanceof Error ? err.message : String(err);
           console.warn("Task poll check error:", errString);
         }
-      }, intervalMs);
+
+        if (shouldContinue && !isCancelledRef.current) {
+          pollTimerRef.current = setTimeout(pollTick, intervalMs);
+        }
+      };
+
+      // Kick off first poll tick after interval
+      pollTimerRef.current = setTimeout(pollTick, intervalMs);
     },
     [authFetch, options, stopPolling]
   );
@@ -175,4 +210,3 @@ export function useTaskPolling(
     reset,
   };
 }
-

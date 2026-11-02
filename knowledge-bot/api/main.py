@@ -132,24 +132,55 @@ async def upload_document(file: UploadFile = File(...), current_user: User = Dep
 
         return {"filename": clean_name, "status": "processing", "task_id": task.id}
     except Exception as e:
+        if save_path.exists():
+            try:
+                save_path.unlink()
+            except Exception:
+                pass
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/tasks/{task_id}")
 def get_task_status(task_id: str, current_user: User = Depends(get_current_user)):
     from src.worker import celery_app
     res = celery_app.AsyncResult(task_id)
+
+    # Multi-tenant IDOR boundary: check if task metadata belongs to caller's tenant
+    task_tenant_id = None
+    if isinstance(res.info, dict) and "tenant_id" in res.info:
+        task_tenant_id = res.info.get("tenant_id")
+    elif isinstance(res.result, dict) and "tenant_id" in res.result:
+        task_tenant_id = res.result.get("tenant_id")
+
+    if task_tenant_id is not None and not getattr(current_user, "is_platform_admin", False):
+        if task_tenant_id != current_user.tenant_id:
+            raise HTTPException(status_code=403, detail="Forbidden: You do not have permission to inspect this background task.")
+
     progress = {}
     if res.state == "PROGRESS" and isinstance(res.info, dict):
-        progress = res.info
+        progress = {k: v for k, v in res.info.items() if k not in ("tenant_id", "user_id")}
     elif res.ready() and res.successful():
         progress = {"stage": "COMPLETED", "pct": 100, "msg": "Document indexed successfully"}
+    elif res.ready() and res.failed():
+        err_msg = str(res.result)
+        if isinstance(res.info, dict) and "msg" in res.info:
+            err_msg = res.info["msg"]
+        progress = {"stage": "FAILED", "pct": 0, "msg": err_msg}
+
+    result_data = None
+    if res.successful():
+        if isinstance(res.result, dict):
+            result_data = {k: v for k, v in res.result.items() if k not in ("tenant_id", "user_id")}
+        else:
+            result_data = res.result
+    elif res.failed():
+        result_data = str(res.result)
 
     return {
         "task_id": task_id,
         "status": res.state,
         "ready": res.ready(),
         "successful": res.successful() if res.ready() else False,
-        "result": res.result if res.successful() else (str(res.result) if res.failed() else None),
+        "result": result_data,
         "progress": progress,
     }
 

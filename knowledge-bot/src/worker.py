@@ -36,7 +36,13 @@ def process_document(self, file_path: str, user_id: int, tenant_id: Optional[int
     def _on_progress(stage: str, pct: int, msg: str = ""):
         self.update_state(
             state="PROGRESS",
-            meta={"stage": stage, "pct": pct, "msg": msg}
+            meta={
+                "stage": stage,
+                "pct": pct,
+                "msg": msg,
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+            }
         )
 
     _on_progress("PARSING", 5, "Initializing background ingestion pipeline...")
@@ -87,10 +93,22 @@ def process_document(self, file_path: str, user_id: int, tenant_id: Optional[int
             "filename": Path(file_path).name,
             "chunks_added": result.chunks_added,
             "total_chunks": result.total_chunks,
-            "already_existed": result.already_existed
+            "already_existed": result.already_existed,
+            "tenant_id": tenant_id,
+            "user_id": user_id,
         }
     except Exception as e:
         logger.error(f"Error ingesting {file_path}: {e}")
+        self.update_state(
+            state="FAILURE",
+            meta={
+                "stage": "FAILED",
+                "pct": 0,
+                "msg": str(e),
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+            }
+        )
         raise e
 
 

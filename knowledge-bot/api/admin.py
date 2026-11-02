@@ -95,6 +95,11 @@ async def upload_global_document(
         )
         return {"filename": clean_name, "status": "processing", "task_id": task.id}
     except Exception as e:
+        if save_path.exists():
+            try:
+                save_path.unlink()
+            except Exception:
+                pass
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/documents_global/{filename}")

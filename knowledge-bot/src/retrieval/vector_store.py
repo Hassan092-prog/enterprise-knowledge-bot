@@ -234,6 +234,8 @@ class VectorStore:
 
         if not new_chunks:
             logger.info("All %d chunks already indexed for tenant %d — skipping", len(chunks), tid)
+            if progress_callback:
+                progress_callback("INDEXING", 95, f"All {len(chunks)} chunks already present in knowledge base.")
             return 0
 
         texts = [c.page_content for c in new_chunks]

@@ -37,6 +37,16 @@ export function TaskProgressStepper({
   const currentPct = isComplete ? 100 : error ? 100 : progress?.pct ?? 10;
   const currentMsg = error || progress?.msg || (isComplete ? "Document indexed successfully and ready for queries" : "Processing document...");
 
+  // Auto-dismiss completed stepper after 8 seconds
+  React.useEffect(() => {
+    if (isComplete && onDismiss) {
+      const timer = setTimeout(() => {
+        onDismiss();
+      }, 8000);
+      return () => clearTimeout(timer);
+    }
+  }, [isComplete, onDismiss]);
+
   const getStageStatus = (stageKey: string, stageMinPct: number) => {
     if (error) return "error";
     if (isComplete) return "complete";

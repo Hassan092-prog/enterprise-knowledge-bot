@@ -981,6 +981,21 @@ def run_diagnostics():
                 assert comp_res["progress"]["stage"] == "COMPLETED", f"Expected stage COMPLETED, got {comp_res['progress']}"
                 assert comp_res["progress"]["pct"] == 100, f"Expected pct 100, got {comp_res['progress']['pct']}"
 
+            # 5c. Multi-tenant Task IDOR defense: cross-tenant task status query blocked with 403
+            task_foreign_meta = {"stage": "EMBEDDING", "pct": 70, "tenant_id": 2, "user_id": 999}
+            with patch("src.worker.celery_app.AsyncResult", return_value=MockAsyncResult("PROGRESS", task_foreign_meta, False, False, None)):
+                idor_blocked = False
+                try:
+                    get_task_status("mock-task-foreign", current_user=User(id=1, username="test", role="admin", tenant_id=1, is_platform_admin=False))
+                except HTTPException as exc:
+                    if exc.status_code == 403:
+                        idor_blocked = True
+                assert idor_blocked, "Failed to block cross-tenant task status inspection (IDOR vulnerability)!"
+
+                # Platform admin must have oversight capability
+                admin_res = get_task_status("mock-task-foreign", current_user=User(id=99, username="plat_admin", role="superadmin", tenant_id=1, is_platform_admin=True))
+                assert admin_res["status"] == "PROGRESS", "Platform admin was blocked from task status"
+
             # Clean up test source from vector store
             retriever.delete_document(tmp_path.name, user_id=None, tenant_id=1)
         finally:

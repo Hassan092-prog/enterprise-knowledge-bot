@@ -172,6 +172,8 @@ class Retriever:
         documents = load_document(file_path)
         if not documents:
             logger.warning("No content extracted from %s", file_path.name)
+            if progress_callback:
+                progress_callback("FAILED", 0, f"No readable content extracted from '{file_path.name}'.")
             return IngestResult(
                 source_filename=file_path.name,
                 chunks_added=0,
@@ -199,6 +201,9 @@ class Retriever:
                 }
             )
             chunks.append(summary_chunk)
+        else:
+            if progress_callback:
+                progress_callback("SUMMARIZING", 50, "Bypassing LLM summary for structured tabular dataset...")
             
         stats  = get_chunk_stats(chunks)
 
