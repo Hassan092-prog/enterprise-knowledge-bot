@@ -835,15 +835,37 @@ def run_diagnostics():
             assert update_res["status"] == "success", "Admin domain update did not return success"
             assert "corporate-verified.com" in update_res["allowed_domains"], "Updated domains not returned"
 
-            # 4. Verification via get_tenant_domains
+            # 4. Public consumer domain (e.g. gmail.com) must be rejected with 400 Bad Request
+            public_blocked = False
+            try:
+                update_tenant_domains(TenantDomainUpdate(allowed_domains="gmail.com"), db=db, current_user=mock_admin)
+            except HTTPException as exc:
+                if exc.status_code == 400 and "Public consumer email domain" in exc.detail:
+                    public_blocked = True
+            assert public_blocked, "Server failed to block public consumer domain 'gmail.com'!"
+
+            # 5. Malformed domain format must be rejected with 400 Bad Request
+            malformed_blocked = False
+            try:
+                update_tenant_domains(TenantDomainUpdate(allowed_domains="bad..domain"), db=db, current_user=mock_admin)
+            except HTTPException as exc:
+                if exc.status_code == 400 and "Invalid domain format" in exc.detail:
+                    malformed_blocked = True
+            assert malformed_blocked, "Server failed to block malformed domain format!"
+
+            # 6. Clearing domains with empty string must set allowed_domains to None
+            clear_res = update_tenant_domains(TenantDomainUpdate(allowed_domains=""), db=db, current_user=mock_admin)
+            assert clear_res["status"] == "success" and clear_res["allowed_domains"] is None, "Clearing domains failed"
+
+            # 7. Verification via get_tenant_domains
             get_res = get_tenant_domains(db=db, current_user=mock_user)
-            assert get_res["allowed_domains"] == "corporate-verified.com, eng.corporate-verified.com", "get_tenant_domains returned unexpected value"
+            assert get_res["allowed_domains"] is None, "get_tenant_domains did not reflect cleared state"
 
             # Revert to original
             tenant_1.allowed_domains = orig_domains
             db.commit()
 
-        print_check("Corporate domain management RBAC enforcement verified (403 for user/editor, 200 for admin)", True)
+        print_check("Corporate domain management RBAC and domain sanitization verified (403 for user/editor, 400 for public/malformed, 200 for admin)", True)
     except Exception as e:
         print_check("Check 17 failed", False, str(e))
 

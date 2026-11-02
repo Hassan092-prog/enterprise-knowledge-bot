@@ -19,12 +19,30 @@ MICROSOFT_CLIENT_SECRET = os.getenv("MICROSOFT_CLIENT_SECRET", "")
 MICROSOFT_TENANT_ID = os.getenv("MICROSOFT_TENANT_ID", "common")
 
 
+def _get_google_creds():
+    return os.getenv("GOOGLE_CLIENT_ID") or GOOGLE_CLIENT_ID, os.getenv("GOOGLE_CLIENT_SECRET") or GOOGLE_CLIENT_SECRET
+
+
+def _get_github_creds():
+    return os.getenv("GITHUB_CLIENT_ID") or GITHUB_CLIENT_ID, os.getenv("GITHUB_CLIENT_SECRET") or GITHUB_CLIENT_SECRET
+
+
+def _get_microsoft_creds():
+    cid = os.getenv("MICROSOFT_CLIENT_ID") or MICROSOFT_CLIENT_ID
+    csec = os.getenv("MICROSOFT_CLIENT_SECRET") or MICROSOFT_CLIENT_SECRET
+    tid = os.getenv("MICROSOFT_TENANT_ID") or MICROSOFT_TENANT_ID or "common"
+    return cid, csec, tid
+
+
 def get_available_oauth_providers() -> Dict[str, bool]:
     """Returns availability status for configured OAuth providers."""
+    g_id, g_sec = _get_google_creds()
+    gh_id, gh_sec = _get_github_creds()
+    ms_id, ms_sec, _ = _get_microsoft_creds()
     return {
-        "google": bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET),
-        "github": bool(GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET),
-        "microsoft": bool(MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET),
+        "google": bool(g_id and g_sec),
+        "github": bool(gh_id and gh_sec),
+        "microsoft": bool(ms_id and ms_sec),
     }
 
 
@@ -34,10 +52,11 @@ def generate_oauth_authorization_url(provider: str, redirect_uri: str, state: Op
     state_val = state or f"{prov}_oauth_session"
 
     if prov == "google":
-        if not GOOGLE_CLIENT_ID:
+        client_id, _ = _get_google_creds()
+        if not client_id:
             raise ValueError("Google OAuth is not configured. Please set GOOGLE_CLIENT_ID in your environment.")
         params = {
-            "client_id": GOOGLE_CLIENT_ID,
+            "client_id": client_id,
             "redirect_uri": redirect_uri,
             "response_type": "code",
             "scope": "openid email profile",
@@ -48,10 +67,11 @@ def generate_oauth_authorization_url(provider: str, redirect_uri: str, state: Op
         return f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
 
     elif prov == "github":
-        if not GITHUB_CLIENT_ID:
+        client_id, _ = _get_github_creds()
+        if not client_id:
             raise ValueError("GitHub OAuth is not configured. Please set GITHUB_CLIENT_ID in your environment.")
         params = {
-            "client_id": GITHUB_CLIENT_ID,
+            "client_id": client_id,
             "redirect_uri": redirect_uri,
             "scope": "read:user user:email",
             "state": state_val,
@@ -59,16 +79,17 @@ def generate_oauth_authorization_url(provider: str, redirect_uri: str, state: Op
         return f"https://github.com/login/oauth/authorize?{urllib.parse.urlencode(params)}"
 
     elif prov == "microsoft":
-        if not MICROSOFT_CLIENT_ID:
+        client_id, _, tenant_id = _get_microsoft_creds()
+        if not client_id:
             raise ValueError("Microsoft OAuth is not configured. Please set MICROSOFT_CLIENT_ID in your environment.")
         params = {
-            "client_id": MICROSOFT_CLIENT_ID,
+            "client_id": client_id,
             "redirect_uri": redirect_uri,
             "response_type": "code",
             "scope": "openid profile email User.Read",
             "state": state_val,
         }
-        return f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}/oauth2/v2.0/authorize?{urllib.parse.urlencode(params)}"
+        return f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/authorize?{urllib.parse.urlencode(params)}"
 
     else:
         raise ValueError(f"Unsupported OAuth provider: '{provider}'")
@@ -93,11 +114,12 @@ def exchange_oauth_code(provider: str, code: str, redirect_uri: str) -> Dict[str
 
 def _exchange_google_code(code: str, redirect_uri: str) -> Dict[str, Any]:
     """Exchange code with Google OAuth2."""
+    client_id, client_secret = _get_google_creds()
     token_url = "https://oauth2.googleapis.com/token"
     data = urllib.parse.urlencode({
         "code": code,
-        "client_id": GOOGLE_CLIENT_ID,
-        "client_secret": GOOGLE_CLIENT_SECRET,
+        "client_id": client_id,
+        "client_secret": client_secret,
         "redirect_uri": redirect_uri,
         "grant_type": "authorization_code",
     }).encode("utf-8")
@@ -143,10 +165,11 @@ def _exchange_google_code(code: str, redirect_uri: str) -> Dict[str, Any]:
 
 def _exchange_github_code(code: str, redirect_uri: str) -> Dict[str, Any]:
     """Exchange code with GitHub OAuth."""
+    client_id, client_secret = _get_github_creds()
     token_url = "https://github.com/login/oauth/access_token"
     data = urllib.parse.urlencode({
-        "client_id": GITHUB_CLIENT_ID,
-        "client_secret": GITHUB_CLIENT_SECRET,
+        "client_id": client_id,
+        "client_secret": client_secret,
         "code": code,
         "redirect_uri": redirect_uri,
     }).encode("utf-8")
@@ -208,10 +231,11 @@ def _exchange_github_code(code: str, redirect_uri: str) -> Dict[str, Any]:
 
 def _exchange_microsoft_code(code: str, redirect_uri: str) -> Dict[str, Any]:
     """Exchange code with Microsoft Entra / 365 OAuth."""
-    token_url = f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}/oauth2/v2.0/token"
+    client_id, client_secret, tenant_id = _get_microsoft_creds()
+    token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
     data = urllib.parse.urlencode({
-        "client_id": MICROSOFT_CLIENT_ID,
-        "client_secret": MICROSOFT_CLIENT_SECRET,
+        "client_id": client_id,
+        "client_secret": client_secret,
         "code": code,
         "redirect_uri": redirect_uri,
         "grant_type": "authorization_code",

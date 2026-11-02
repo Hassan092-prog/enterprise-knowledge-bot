@@ -41,6 +41,14 @@ class OAuthCallbackRequest(BaseModel):
 class TenantDomainUpdate(BaseModel):
     allowed_domains: str
 
+PUBLIC_EMAIL_DOMAINS = {
+    "gmail.com", "googlemail.com", "yahoo.com", "ymail.com",
+    "outlook.com", "hotmail.com", "live.com", "msn.com",
+    "icloud.com", "me.com", "mac.com",
+    "mail.com", "proton.me", "protonmail.com",
+    "aol.com", "zoho.com", "gmx.com", "yandex.com",
+}
+
 @router.post("/register", response_model=Token)
 def register(user_data: UserCreate, db: Session = Depends(get_db)):
     try:
@@ -326,7 +334,7 @@ def oauth_callback(provider: str, request: OAuthCallbackRequest, db: Session = D
     email_domain = email.split("@")[-1].lower() if "@" in email else ""
 
     # 2a. Check if email domain matches an existing tenant's allowed_domains
-    if email_domain and email_domain not in ("gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "icloud.com"):
+    if email_domain and email_domain not in PUBLIC_EMAIL_DOMAINS:
         matching_tenants = db.query(Tenant).filter(Tenant.status == "active").all()
         for t in matching_tenants:
             if t.allowed_domains:
@@ -348,7 +356,7 @@ def oauth_callback(provider: str, request: OAuthCallbackRequest, db: Session = D
                     slug=slug,
                     status="active",
                     join_code=generate_join_code(),
-                    allowed_domains=email_domain if email_domain not in ("gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "icloud.com") else None
+                    allowed_domains=email_domain if email_domain not in PUBLIC_EMAIL_DOMAINS else None
                 )
                 db.add(tenant)
                 db.flush()
@@ -370,7 +378,19 @@ def oauth_callback(provider: str, request: OAuthCallbackRequest, db: Session = D
         else:
             # Fallback to Default Organization (Tenant #1)
             tenant = db.query(Tenant).filter(Tenant.id == 1).first() or db.query(Tenant).first()
+            if tenant and tenant.status == "suspended":
+                raise HTTPException(status_code=403, detail="Default organization is suspended. Please contact platform administrator.")
             assigned_role = "user"
+
+    # Synchronize PostgreSQL auto-increment sequences before user insertion
+    from src.database import engine
+    from sqlalchemy import text
+    if engine.dialect.name == "postgresql":
+        try:
+            db.execute(text("SELECT setval(pg_get_serial_sequence('tenants', 'id'), COALESCE((SELECT MAX(id) FROM tenants), 1));"))
+            db.execute(text("SELECT setval(pg_get_serial_sequence('users', 'id'), COALESCE((SELECT MAX(id) FROM users), 1));"))
+        except Exception as seq_err:
+            logger.warning(f"OAuth sequence sync notice: {seq_err}")
 
     # Generate unique username from name or email
     base_user = re.sub(r'[^a-zA-Z0-9_]', '', name.lower().replace(" ", "_")).strip()
@@ -445,7 +465,38 @@ def update_tenant_domains(update: TenantDomainUpdate, db: Session = Depends(get_
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
         
-    tenant.allowed_domains = update.allowed_domains.strip().lower()
+    raw_domains = (update.allowed_domains or "").strip().lower()
+    if not raw_domains:
+        tenant.allowed_domains = None
+        db.commit()
+        log_activity(
+            tenant_id=tenant.id,
+            user_id=current_user.id,
+            action="TENANT_DOMAINS_CLEARED",
+            category="GOVERNANCE",
+            description="Cleared corporate domain restrictions (registration reverts to join code only)"
+        )
+        return {"status": "success", "allowed_domains": None}
+
+    import re
+    domain_list = [d.strip().lower() for d in raw_domains.split(",") if d.strip()]
+    cleaned_domains = []
+
+    for d in domain_list:
+        if d in PUBLIC_EMAIL_DOMAINS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Public consumer email domain '{d}' cannot be used for corporate identity auto-routing. Please specify a proprietary corporate domain."
+            )
+        if not re.match(r'^[a-z0-9.-]+\.[a-z]{2,}$', d) or ".." in d or d.startswith(".") or d.endswith("."):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid domain format: '{d}'. Expected standard hostname format (e.g. 'company.com')."
+            )
+        if d not in cleaned_domains:
+            cleaned_domains.append(d)
+
+    tenant.allowed_domains = ", ".join(cleaned_domains)
     db.commit()
     
     log_activity(
