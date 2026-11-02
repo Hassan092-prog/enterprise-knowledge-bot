@@ -238,3 +238,6 @@ CORS_ORIGINS: list[str] = [
     if origin.strip()
 ]
 
+# Deployment environment ('development' | 'production' | 'staging')
+ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development").lower()
+

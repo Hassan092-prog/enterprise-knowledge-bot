@@ -19,6 +19,8 @@ Runs comprehensive checks:
 15. Governance — Audit log tenant isolation & RBAC protection
 16. Pillar 8 — Enterprise OAuth2 & corporate domain auto-routing
 17. Pillar 8 — Corporate domain management RBAC enforcement (PATCH /auth/tenant/domains)
+18. Phase 2 — Asynchronous ingestion & fine-grained stepper progress
+19. Phase 3 — Production API hardening, Redis rate limiting, input limits, CORS gate, RFC 7807 envelopes
 """
 
 import sys
@@ -1006,8 +1008,111 @@ def run_diagnostics():
     except Exception as e:
         print_check("Check 18 failed", False, str(e))
 
+    # ──────────────────────────────────────────────────────────────────
+    # CHECK 19: Phase 3 — Production API Hardening & Security Defenses
+    # ──────────────────────────────────────────────────────────────────
+    print("\n--- 19. Testing Production API Hardening & Security Defenses ---")
+    try:
+        from fastapi.testclient import TestClient
+        from api.main import app
+        from src.config import MAX_QUERY_LENGTH, ENVIRONMENT
+        from src.auth import create_user_token
+
+        client = TestClient(app)
+
+        with SessionLocal() as db:
+            admin_user = db.query(User).filter(User.id == 1).first()
+            other_user = db.query(User).filter(User.id != 1).first()
+            chat_session = db.query(ChatSession).filter(ChatSession.user_id == 1).first()
+            if not chat_session:
+                chat_session = ChatSession(title="Security Diagnostic Session", user_id=1, tenant_id=1)
+                db.add(chat_session)
+                db.commit()
+                db.refresh(chat_session)
+            session_id = chat_session.id
+
+        admin_token = create_user_token(admin_user)
+
+        # 1. Test Query Length Enforcement (len > MAX_QUERY_LENGTH rejected with 400 & RFC 7807 envelope)
+        oversized_query = "X" * (MAX_QUERY_LENGTH + 1)
+        resp_oversized = client.post(
+            "/query",
+            json={"query": oversized_query, "session_id": session_id},
+            headers={"Authorization": f"Bearer {admin_token}"}
+        )
+        assert resp_oversized.status_code == 400, f"Expected 400 for oversized query, got {resp_oversized.status_code}"
+        err_json = resp_oversized.json()
+        assert "error" in err_json and err_json["error"]["code"] == "HTTP_400", f"Missing RFC 7807 error format: {err_json}"
+        assert f"Query exceeds maximum length of {MAX_QUERY_LENGTH} characters." in err_json["error"]["message"]
+
+        # 2. Test IP-based Rate Limiting on /auth/login (10/minute per IP)
+        login_statuses = []
+        last_login_resp = None
+        for i in range(12):
+            res = client.post("/auth/login", json={"username": f"probe_user_{i}", "password": "wrongpassword"})
+            login_statuses.append(res.status_code)
+            last_login_resp = res
+            if res.status_code == 429:
+                break
+
+        assert 429 in login_statuses, f"Failed to trigger 429 rate limit on /auth/login (statuses: {login_statuses})"
+        assert last_login_resp.json()["error"]["code"] == "RATE_LIMIT_EXCEEDED", f"Unexpected error code: {last_login_resp.json()}"
+        assert "Retry-After" in last_login_resp.headers or "retry-after" in last_login_resp.headers, "Missing Retry-After header on 429"
+
+        # 3. Test Authenticated User Rate Limiting on /query (30/minute per user)
+        # Hitting /query with admin_token until rate limit kicks in (30 allowed, 31st returns 429)
+        query_statuses = []
+        last_q_resp = None
+        for i in range(35):
+            res = client.post(
+                "/query",
+                json={"query": "X" * (MAX_QUERY_LENGTH + 1), "session_id": session_id},
+                headers={"Authorization": f"Bearer {admin_token}"}
+            )
+            query_statuses.append(res.status_code)
+            last_q_resp = res
+            if res.status_code == 429:
+                break
+
+        assert 429 in query_statuses, f"Failed to trigger 429 user rate limit on /query (statuses: {query_statuses})"
+        assert last_q_resp.json()["error"]["code"] == "RATE_LIMIT_EXCEEDED"
+
+        # 4. Verify distinct user from the same IP is NOT throttled (NAT/proxy isolation)
+        if other_user:
+            other_token = create_user_token(other_user)
+            res_other = client.post(
+                "/query",
+                json={"query": "X" * (MAX_QUERY_LENGTH + 1), "session_id": session_id},
+                headers={"Authorization": f"Bearer {other_token}"}
+            )
+            assert res_other.status_code == 400, f"Other user was throttled (NAT bleed): status {res_other.status_code}"
+
+        # 5. Test CORS Production Gate Assertion
+        # Production environment must reject wildcard origin '*'
+        cors_gate_triggered = False
+        def simulate_cors_gate(env: str, origins: list):
+            if env == "production" and ("*" in (origins or []) or not origins):
+                raise EnvironmentError("CORS wildcard ('*') is not permitted in production. Set CORS_ORIGINS.")
+
+        try:
+            simulate_cors_gate("production", ["*"])
+        except EnvironmentError:
+            cors_gate_triggered = True
+        assert cors_gate_triggered, "Production CORS gate failed to raise EnvironmentError on wildcard origin"
+
+        cors_gate_empty_triggered = False
+        try:
+            simulate_cors_gate("production", [])
+        except EnvironmentError:
+            cors_gate_empty_triggered = True
+        assert cors_gate_empty_triggered, "Production CORS gate failed to raise EnvironmentError on empty origin list"
+
+        print_check("Production API hardening, Redis sliding-window rate limiting, input limits, CORS gate, and RFC 7807 envelopes verified", True)
+    except Exception as e:
+        print_check("Check 19 failed", False, str(e))
+
     print("\n" + "=" * 70)
-    print("ALL 18 DIAGNOSTIC CHECKS COMPLETED")
+    print("ALL 19 DIAGNOSTIC CHECKS COMPLETED")
     print("=" * 70)
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, status, Request
 from fastapi.responses import StreamingResponse
 import csv
 import io
@@ -26,6 +26,7 @@ from src.config import (
 )
 from src.database import generate_join_code
 from src.activity import log_activity
+from api.limiter import limiter
 
 router = APIRouter()
 
@@ -54,7 +55,9 @@ def get_admin_stats(db: Session = Depends(get_db), current_user: User = Depends(
     }
 
 @router.post("/upload_global", status_code=status.HTTP_202_ACCEPTED)
+@limiter.limit("10/hour")
 async def upload_global_document(
+    request: Request,
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_editor_user),
 ):

@@ -1,13 +1,20 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 import os
 import time
+import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from sqlalchemy.orm import Session
 import re
 import json
+
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from api.limiter import limiter
+
 from src.retrieval.retriever import Retriever
 from src.retrieval.router import route_query
 from src.retrieval.tabular_agent import run_tabular_query
@@ -17,6 +24,8 @@ from src.config import (
     MAX_FILE_SIZE_MB,
     SUPPORTED_EXTENSIONS,
     CORS_ORIGINS,
+    ENVIRONMENT,
+    MAX_QUERY_LENGTH,
     sanitize_filename,
     get_tenant_upload_dir,
 )
@@ -28,34 +37,81 @@ from api.auth import router as auth_router
 from api.admin import router as admin_router
 from api.platform import router as platform_router
 
+api_logger = logging.getLogger("api.main")
+
+# Strict CORS environment gate: Fail fast if production environment lacks explicit non-wildcard origins
+if ENVIRONMENT == "production" and ("*" in (CORS_ORIGINS or []) or not CORS_ORIGINS):
+    raise EnvironmentError("CORS wildcard ('*') is not permitted in production. Set CORS_ORIGINS.")
+
+cors_allowed = CORS_ORIGINS if CORS_ORIGINS else ([] if ENVIRONMENT == "production" else ["*"])
+
 app = FastAPI(title="Enterprise Knowledge Bot API")
 
-app.include_router(auth_router, prefix="/auth")
-app.include_router(admin_router, prefix="/admin")
-app.include_router(platform_router, prefix="/platform")
+# Mount rate limiting state & middleware
+app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
 
 # Setup CORS to allow Next.js frontend to communicate securely
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ORIGINS if CORS_ORIGINS else ["*"],
+    allow_origins=cors_allowed,
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|.*\.nurexia\.co)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-from fastapi.responses import JSONResponse
-from fastapi import Request
-import logging
+app.include_router(auth_router, prefix="/auth")
+app.include_router(admin_router, prefix="/admin")
+app.include_router(platform_router, prefix="/platform")
 
-api_logger = logging.getLogger("api.main")
+# Standardized RFC 7807 Error Envelopes
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    retry_after = getattr(exc, "retry_after", 60)
+    msg = str(exc.detail) if exc.detail else "Rate limit exceeded"
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": {
+                "code": "RATE_LIMIT_EXCEEDED",
+                "message": msg,
+                "retry_after": retry_after,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            },
+            "detail": msg
+        },
+        headers={"Retry-After": str(retry_after)}
+    )
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": {
+                "code": f"HTTP_{exc.status_code}",
+                "message": str(exc.detail),
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            },
+            "detail": exc.detail
+        },
+        headers=exc.headers
+    )
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     api_logger.error(f"Global unhandled exception on {request.method} {request.url.path}: {exc}", exc_info=True)
     return JSONResponse(
         status_code=500,
-        content={"detail": f"Internal server error: {str(exc)}"}
+        content={
+            "error": {
+                "code": "INTERNAL_SERVER_ERROR",
+                "message": "An unexpected server error occurred.",
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            },
+            "detail": f"Internal server error: {str(exc)}"
+        }
     )
 
 # Initialize Retriever singleton
@@ -88,7 +144,12 @@ def list_documents(current_user: User = Depends(get_current_user)):
     return {"documents": sources["personal"], "global_documents": sources["global"]}
 
 @app.post("/upload")
-async def upload_document(file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
+@limiter.limit("15/hour")
+async def upload_document(
+    request: Request,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user)
+):
     if not retriever:
         raise HTTPException(status_code=500, detail="Retriever not initialized")
 
@@ -140,7 +201,12 @@ async def upload_document(file: UploadFile = File(...), current_user: User = Dep
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/tasks/{task_id}")
-def get_task_status(task_id: str, current_user: User = Depends(get_current_user)):
+@limiter.limit("120/minute")
+def get_task_status(
+    request: Request,
+    task_id: str,
+    current_user: User = Depends(get_current_user)
+):
     from src.worker import celery_app
     res = celery_app.AsyncResult(task_id)
 
@@ -309,15 +375,27 @@ def update_session(session_id: int, update: SessionTitleUpdate, db: Session = De
     return {"status": "updated", "title": session.title}
 
 @app.post("/query")
-def query_bot(request: QueryRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+@limiter.limit("30/minute")
+def query_bot(
+    request: Request,
+    query_req: QueryRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if len(query_req.query) > MAX_QUERY_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Query exceeds maximum length of {MAX_QUERY_LENGTH} characters."
+        )
+
+    if not query_req.query.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty")
+
     if not retriever:
         raise HTTPException(status_code=500, detail="Retriever not initialized")
 
-    if not request.query.strip():
-        raise HTTPException(status_code=400, detail="Query cannot be empty")
-
     session = db.query(ChatSession).filter(
-        ChatSession.id == request.session_id,
+        ChatSession.id == query_req.session_id,
         ChatSession.user_id == current_user.id
     ).first()
     if not session:
@@ -325,7 +403,7 @@ def query_bot(request: QueryRequest, db: Session = Depends(get_db), current_user
 
     # 1. Fetch recent conversation turns for multi-turn conversational memory (prior to current query)
     prior_messages = db.query(ChatMessage).filter(
-        ChatMessage.session_id == request.session_id
+        ChatMessage.session_id == query_req.session_id
     ).order_by(ChatMessage.timestamp.desc()).limit(6).all()
     prior_messages.reverse()
 
@@ -334,14 +412,14 @@ def query_bot(request: QueryRequest, db: Session = Depends(get_db), current_user
         for m in prior_messages
     ]
 
-    user_msg = ChatMessage(session_id=request.session_id, role="user", content=request.query)
+    user_msg = ChatMessage(session_id=query_req.session_id, role="user", content=query_req.query)
     db.add(user_msg)
     db.commit()
 
     # 2. Contextual Query Condensation: rewrite follow-ups into standalone search questions
-    effective_query = request.query
+    effective_query = query_req.query
     if chat_history:
-        effective_query = condense_query(request.query, chat_history)
+        effective_query = condense_query(query_req.query, chat_history)
 
     start_time = time.time()
 
@@ -349,15 +427,15 @@ def query_bot(request: QueryRequest, db: Session = Depends(get_db), current_user
     sources = retriever.list_sources(user_id=current_user.id, tenant_id=current_user.tenant_id)
 
     # Check if the user explicitly provided an @doc or !doc tag in their prompt
-    has_explicit_tag = bool(re.search(r'[@!]([\w\.,_-]+)', request.query))
+    has_explicit_tag = bool(re.search(r'[@!]([\w\.,_-]+)', query_req.query))
     if has_explicit_tag:
-        is_tabular, target_file = route_query(request.query, sources)
+        is_tabular, target_file = route_query(query_req.query, sources)
     else:
         # For general queries and conversational follow-ups, route using effective_query (full context)
         is_tabular, target_file = route_query(effective_query, sources)
 
     if not target_file:
-        query_lower = request.query.strip().lower()
+        query_lower = query_req.query.strip().lower()
         generic_words = ["summarize", "summarise", "summary", "give me a summary"]
         is_generic = query_lower in generic_words or query_lower.startswith("summarize ") or query_lower.startswith("summarise ")
         if is_generic:
@@ -366,7 +444,7 @@ def query_bot(request: QueryRequest, db: Session = Depends(get_db), current_user
                 yield warning_msg
                 from src.database import SessionLocal
                 with SessionLocal() as s_db:
-                    bot_msg = ChatMessage(session_id=request.session_id, role="assistant", content=warning_msg)
+                    bot_msg = ChatMessage(session_id=query_req.session_id, role="assistant", content=warning_msg)
                     s_db.add(bot_msg)
                     s_db.commit()
             return StreamingResponse(generate_warning(), media_type="text/plain")
@@ -375,7 +453,7 @@ def query_bot(request: QueryRequest, db: Session = Depends(get_db), current_user
         def generate_tabular():
             from src.database import SessionLocal
             try:
-                response = run_tabular_query(request.query, target_file, tenant_id=current_user.tenant_id)
+                response = run_tabular_query(query_req.query, target_file, tenant_id=current_user.tenant_id)
                 yield response
             except Exception as e:
                 response = f"\n\n[Error executing tabular query: {str(e)}]"
@@ -401,7 +479,7 @@ def query_bot(request: QueryRequest, db: Session = Depends(get_db), current_user
                 category="QUERY",
                 description=f"Tabular SQL query on '{target_file}' ({latency_ms}ms)",
                 details={
-                    "query_preview": request.query[:100],
+                    "query_preview": query_req.query[:100],
                     "target_file": target_file,
                     "route": "tabular",
                     "latency_ms": latency_ms
@@ -410,7 +488,7 @@ def query_bot(request: QueryRequest, db: Session = Depends(get_db), current_user
 
             with SessionLocal() as s_db:
                 bot_msg = ChatMessage(
-                    session_id=request.session_id,
+                    session_id=query_req.session_id,
                     role="assistant",
                     content=response,
                     sources_json=sources_payload
@@ -454,8 +532,8 @@ def query_bot(request: QueryRequest, db: Session = Depends(get_db), current_user
             category="QUERY",
             description=f"RAG query executed ({len(chunks)} chunks retrieved, {latency_ms}ms)",
             details={
-                "query_preview": request.query[:100],
-                "effective_query": effective_query[:100] if effective_query != request.query else None,
+                "query_preview": query_req.query[:100],
+                "effective_query": effective_query[:100] if effective_query != query_req.query else None,
                 "target_file": target_file,
                 "route": "semantic",
                 "chunks_count": len(chunks),
@@ -465,7 +543,7 @@ def query_bot(request: QueryRequest, db: Session = Depends(get_db), current_user
 
         with SessionLocal() as s_db:
             bot_msg = ChatMessage(
-                session_id=request.session_id,
+                session_id=query_req.session_id,
                 role="assistant",
                 content=full_response,
                 sources_json=sources_payload

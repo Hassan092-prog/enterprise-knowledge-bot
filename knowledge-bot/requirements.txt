@@ -65,3 +65,7 @@ nltk==3.9.1
 # ── Background Tasks (Celery & Redis) ─────────────────────────────────────
 celery[redis]==5.4.0
 redis==5.0.3
+
+# ── Rate Limiting (slowapi & Redis) ───────────────────────────────────────
+slowapi==0.1.9
+limits==3.12.0

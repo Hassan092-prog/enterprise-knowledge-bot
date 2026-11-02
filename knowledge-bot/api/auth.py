@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
@@ -8,6 +8,7 @@ from src.models import User, AccessRequest, Tenant
 from api.dependencies import get_db, get_current_user
 from src.auth import verify_password, get_password_hash, create_user_token
 from src.activity import log_activity
+from api.limiter import limiter, get_ip_rate_limit_key
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -50,7 +51,8 @@ PUBLIC_EMAIL_DOMAINS = {
 }
 
 @router.post("/register", response_model=Token)
-def register(user_data: UserCreate, db: Session = Depends(get_db)):
+@limiter.limit("5/minute", key_func=get_ip_rate_limit_key)
+def register(request: Request, user_data: UserCreate, db: Session = Depends(get_db)):
     try:
         # Synchronize postgres auto-increment sequences before insertions
         from src.database import slugify, generate_join_code, engine
@@ -137,7 +139,8 @@ def register(user_data: UserCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=f"Registration failed: {str(e)}")
 
 @router.post("/login", response_model=Token)
-def login(user_data: UserCreate, db: Session = Depends(get_db)):
+@limiter.limit("10/minute", key_func=get_ip_rate_limit_key)
+def login(request: Request, user_data: UserCreate, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == user_data.username).first()
     if not user or not verify_password(user_data.password, user.hashed_password):
         raise HTTPException(
