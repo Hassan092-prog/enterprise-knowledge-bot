@@ -134,13 +134,18 @@ async def global_exception_handler(request: Request, exc: Exception):
 # Initialize Retriever singleton
 retriever = None
 
+def get_retriever() -> Retriever:
+    global retriever
+    if retriever is None:
+        from src.config import validate_config
+        validate_config()
+        run_db_migrations()
+        retriever = Retriever()
+    return retriever
+
 @app.on_event("startup")
 async def startup_event():
-    global retriever
-    from src.config import validate_config
-    validate_config()
-    run_db_migrations()
-    retriever = Retriever()
+    get_retriever()
 
 class QueryRequest(BaseModel):
     query: str
@@ -155,9 +160,8 @@ def health_check():
 
 @app.get("/documents")
 def list_documents(current_user: User = Depends(get_current_user)):
-    if not retriever:
-        raise HTTPException(status_code=500, detail="Retriever not initialized")
-    sources = retriever.list_sources_by_type(user_id=current_user.id, tenant_id=current_user.tenant_id)
+    r = get_retriever()
+    sources = r.list_sources_by_type(user_id=current_user.id, tenant_id=current_user.tenant_id)
     return {"documents": sources["personal"], "global_documents": sources["global"]}
 
 @app.post("/upload")
@@ -167,8 +171,7 @@ async def upload_document(
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user)
 ):
-    if not retriever:
-        raise HTTPException(status_code=500, detail="Retriever not initialized")
+    get_retriever()
 
     try:
         clean_name = sanitize_filename(file.filename)
@@ -186,9 +189,24 @@ async def upload_document(
     if size_mb > MAX_FILE_SIZE_MB:
         raise HTTPException(status_code=400, detail=f"File too large. Max allowed: {MAX_FILE_SIZE_MB} MB")
 
+    from src.storage import get_storage_provider, get_object_key
+    storage = get_storage_provider()
+    storage_key = get_object_key(
+        tenant_id=current_user.tenant_id,
+        user_id=current_user.id,
+        filename=clean_name,
+        is_global=False
+    )
+
+    # Stream upload bytes to object storage
+    storage.upload_bytes(contents, storage_key)
+
     tenant_dir = get_tenant_upload_dir(current_user.tenant_id)
     save_path = tenant_dir / clean_name
-    save_path.write_bytes(contents)
+    try:
+        save_path.write_bytes(contents)
+    except Exception as io_err:
+        api_logger.warning(f"Could not cache file locally: {io_err}")
 
     try:
         from src.worker import process_document
@@ -196,7 +214,8 @@ async def upload_document(
             str(save_path),
             current_user.id,
             tenant_id=current_user.tenant_id,
-            is_global=False
+            is_global=False,
+            storage_key=storage_key
         )
 
         log_activity(
@@ -205,11 +224,15 @@ async def upload_document(
             action="DOC_UPLOAD",
             category="KNOWLEDGE",
             description=f"Uploaded personal document '{clean_name}'",
-            details={"filename": clean_name, "is_global": False, "task_id": task.id}
+            details={"filename": clean_name, "is_global": False, "task_id": task.id, "storage_key": storage_key}
         )
 
-        return {"filename": clean_name, "status": "processing", "task_id": task.id}
+        return {"filename": clean_name, "status": "processing", "task_id": task.id, "storage_key": storage_key}
     except Exception as e:
+        try:
+            storage.delete_object(storage_key)
+        except Exception:
+            pass
         if save_path.exists():
             try:
                 save_path.unlink()
@@ -267,10 +290,75 @@ def get_task_status(
         "progress": progress,
     }
 
+@app.get("/documents/{filename}/download")
+def download_document(filename: str, current_user: User = Depends(get_current_user)):
+    r = get_retriever()
+
+    try:
+        clean_name = sanitize_filename(filename)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Verify document access in ChromaDB
+    where_filter = {
+        "$and": [
+            {"source": clean_name},
+            {"tenant_id": current_user.tenant_id}
+        ]
+    }
+    metadata = r._store._collection.get(where=where_filter, include=["metadatas"])
+    if not metadata or not metadata.get("metadatas"):
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    meta = metadata["metadatas"][0]
+    is_global = meta.get("is_global") == 1
+    owner_id = meta.get("user_id")
+
+    if not is_global and owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Forbidden: You do not own this document.")
+
+    from src.storage import get_storage_provider, get_object_key
+    from src.config import STORAGE_BACKEND
+    storage = get_storage_provider()
+
+    target_key = None
+    if is_global:
+        key_global = get_object_key(tenant_id=current_user.tenant_id, user_id=None, filename=clean_name, is_global=True)
+        if storage.object_exists(key_global):
+            target_key = key_global
+    else:
+        key_personal = get_object_key(tenant_id=current_user.tenant_id, user_id=current_user.id, filename=clean_name, is_global=False)
+        if storage.object_exists(key_personal):
+            target_key = key_personal
+
+    if target_key:
+        if STORAGE_BACKEND == "s3":
+            url = storage.generate_presigned_url(target_key, expiration_seconds=900)
+            return {"filename": clean_name, "download_url": url, "expires_in": 900}
+        else:
+            stream = storage.download_stream(target_key)
+            return StreamingResponse(
+                stream,
+                media_type="application/octet-stream",
+                headers={"Content-Disposition": f'attachment; filename="{clean_name}"'}
+            )
+
+    # Local fallback if not in object storage
+    tenant_dir = get_tenant_upload_dir(current_user.tenant_id)
+    file_path = tenant_dir / clean_name
+    if file_path.exists():
+        import io
+        return StreamingResponse(
+            io.BytesIO(file_path.read_bytes()),
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{clean_name}"'}
+        )
+
+    raise HTTPException(status_code=404, detail="Document binary not found.")
+
 @app.delete("/documents/{filename}")
 def delete_document(filename: str, current_user: User = Depends(get_current_user)):
-    if not retriever:
-        raise HTTPException(status_code=500, detail="Retriever not initialized")
+    r = get_retriever()
 
     try:
         clean_name = sanitize_filename(filename)
@@ -284,7 +372,7 @@ def delete_document(filename: str, current_user: User = Depends(get_current_user
             {"tenant_id": current_user.tenant_id}
         ]
     }
-    metadata = retriever._store._collection.get(where=where_filter, include=["metadatas"])
+    metadata = r._store._collection.get(where=where_filter, include=["metadatas"])
 
     is_global = False
     if metadata and metadata.get("metadatas"):
@@ -299,17 +387,29 @@ def delete_document(filename: str, current_user: User = Depends(get_current_user
 
     # Delete chunks scoped to tenant
     if is_global or current_user.role in ["superadmin", "admin", "editor"]:
-        deleted_count = retriever._store.delete_source(clean_name, user_id=None, tenant_id=current_user.tenant_id)
+        deleted_count = r._store.delete_source(clean_name, user_id=None, tenant_id=current_user.tenant_id)
     else:
-        deleted_count = retriever._store.delete_source(clean_name, user_id=current_user.id, tenant_id=current_user.tenant_id)
+        deleted_count = r._store.delete_source(clean_name, user_id=current_user.id, tenant_id=current_user.tenant_id)
+
+    # Cascade delete from object storage
+    from src.storage import get_storage_provider, get_object_key
+    storage = get_storage_provider()
+    key_personal = get_object_key(tenant_id=current_user.tenant_id, user_id=current_user.id, filename=clean_name, is_global=False)
+    storage.delete_object(key_personal)
+    if is_global or current_user.role in ["superadmin", "admin", "editor"]:
+        key_global = get_object_key(tenant_id=current_user.tenant_id, user_id=None, filename=clean_name, is_global=True)
+        storage.delete_object(key_global)
 
     # Delete physical file
     tenant_dir = get_tenant_upload_dir(current_user.tenant_id)
     file_path = tenant_dir / clean_name
     file_deleted = False
     if file_path.exists():
-        os.remove(file_path)
-        file_deleted = True
+        try:
+            os.remove(file_path)
+            file_deleted = True
+        except Exception:
+            pass
 
     log_activity(
         tenant_id=current_user.tenant_id,
@@ -411,8 +511,7 @@ def query_bot(
     if not query_req.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
 
-    if not retriever:
-        raise HTTPException(status_code=500, detail="Retriever not initialized")
+    r = get_retriever()
 
     session = db.query(ChatSession).filter(
         ChatSession.id == query_req.session_id,

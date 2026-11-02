@@ -32,7 +32,8 @@ DATA FLOW:
 """
 
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Union, BinaryIO
+import tempfile
 
 from langchain_core.documents import Document
 
@@ -46,54 +47,84 @@ logger = get_logger(__name__)
 # Public interface — the only function other modules need to call
 # ---------------------------------------------------------------------------
 
-def load_document(file_path: str | Path) -> List[Document]:
-    """
-    Load a document from disk and return a list of LangChain Documents.
-
-    One Document per PAGE for PDFs (preserves page citations).
-    One Document for TXT and DOCX (split later by chunker).
-    One Document per ROW for CSV (each row is a discrete record).
-
-    Args:
-        file_path: Absolute or relative path to the file.
-
-    Returns:
-        List of Document objects, each with page_content and metadata.
-
-    Raises:
-        ValueError: If the file extension is not supported.
-        FileNotFoundError: If the file does not exist.
-    """
-    file_path = Path(file_path)
-
-    # Fail fast with clear messages instead of cryptic library errors
-    if not file_path.exists():
-        raise FileNotFoundError(f"File not found: {file_path}")
-
-    ext = file_path.suffix.lower()
-    if ext not in SUPPORTED_EXTENSIONS:
-        raise ValueError(
-            f"Unsupported file type: '{ext}'. "
-            f"Supported: {SUPPORTED_EXTENSIONS}"
-        )
-
-    logger.info("Loading document: %s (type: %s)", file_path.name, ext)
-
-    # Dispatch to the right parser based on file extension
-    # This is the Strategy pattern — swap parsers without changing callers
+def _load_by_extension(file_path: Path, ext: str, source_name: str) -> List[Document]:
     parsers = {
         ".pdf":  _load_pdf,
         ".docx": _load_docx,
         ".txt":  _load_txt,
         ".csv":  _load_csv,
     }
+    docs = parsers[ext](file_path)
+    if source_name and source_name != file_path.name:
+        for doc in docs:
+            doc.metadata["source"] = source_name
+    return docs
 
-    documents = parsers[ext](file_path)
+def load_document(file_source: Union[str, Path, BinaryIO], original_filename: Optional[str] = None) -> List[Document]:
+    """
+    Load a document from disk or binary stream and return a list of LangChain Documents.
+    Supports both file paths and seekable BinaryIO streams (e.g. from S3 / MinIO).
 
-    logger.info(
-        "Loaded '%s' → %d document section(s)", file_path.name, len(documents)
-    )
-    return documents
+    One Document per PAGE for PDFs (preserves page citations).
+    One Document for TXT and DOCX (split later by chunker).
+    One Document per ROW for CSV (each row is a discrete record).
+
+    Args:
+        file_source: Path to file on disk or readable BinaryIO stream.
+        original_filename: Canonical filename for metadata citations when streaming.
+
+    Returns:
+        List of Document objects, each with page_content and metadata.
+
+    Raises:
+        ValueError: If the file extension is not supported.
+        FileNotFoundError: If a file path is provided but does not exist.
+    """
+    if hasattr(file_source, "read"):
+        if hasattr(file_source, "seek"):
+            try:
+                file_source.seek(0)
+            except Exception:
+                pass
+        filename = original_filename or getattr(file_source, "name", "document.txt")
+        clean_name = Path(filename).name
+        ext = Path(clean_name).suffix.lower()
+        if ext not in SUPPORTED_EXTENSIONS:
+            raise ValueError(f"Unsupported file type: '{ext}'. Supported: {SUPPORTED_EXTENSIONS}")
+
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+            data = file_source.read()
+            tmp_path.write_bytes(data)
+
+        try:
+            logger.info("Loading document from stream: %s (type: %s)", clean_name, ext)
+            documents = _load_by_extension(tmp_path, ext, source_name=clean_name)
+            logger.info("Loaded '%s' from stream → %d document section(s)", clean_name, len(documents))
+            return documents
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except Exception:
+                    pass
+    else:
+        file_path = Path(file_source)
+        if not file_path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        clean_name = original_filename or file_path.name
+        ext = file_path.suffix.lower()
+        if ext not in SUPPORTED_EXTENSIONS:
+            raise ValueError(
+                f"Unsupported file type: '{ext}'. "
+                f"Supported: {SUPPORTED_EXTENSIONS}"
+            )
+
+        logger.info("Loading document: %s (type: %s)", clean_name, ext)
+        documents = _load_by_extension(file_path, ext, source_name=clean_name)
+        logger.info("Loaded '%s' → %d document section(s)", clean_name, len(documents))
+        return documents
 
 
 # ---------------------------------------------------------------------------

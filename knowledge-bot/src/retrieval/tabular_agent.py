@@ -45,6 +45,30 @@ def run_tabular_query(query: str, filename: str, tenant_id: Optional[int] = None
         return f"Path verification failed: {e}"
 
     if not file_path.exists():
+        # Attempt to retrieve CSV from decoupled object storage
+        try:
+            from src.storage import get_storage_provider, get_object_key
+            storage = get_storage_provider()
+            key_global = get_object_key(tenant_id=tenant_id, user_id=None, filename=clean_name, is_global=True)
+            content_bytes = None
+            if storage.object_exists(key_global):
+                content_bytes = storage.download_bytes(key_global)
+            else:
+                prefix = f"tenants/{tenant_id}/" if tenant_id else ""
+                objs = storage.list_objects(prefix=prefix)
+                for obj in objs:
+                    if obj.endswith(f"/{clean_name}") or obj == clean_name:
+                        content_bytes = storage.download_bytes(obj)
+                        break
+
+            if content_bytes:
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                file_path.write_bytes(content_bytes)
+                logger.info(f"Retrieved and cached {clean_name} from object storage for tabular query.")
+        except Exception as storage_err:
+            logger.warning(f"Failed to fetch {clean_name} from storage: {storage_err}")
+
+    if not file_path.exists():
         return f"File {filename} not found in your organization's repository."
 
     try:

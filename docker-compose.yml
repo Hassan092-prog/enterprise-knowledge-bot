@@ -26,6 +26,20 @@ services:
       - ./knowledge-bot/chroma_data:/chroma/chroma
     restart: unless-stopped
 
+  minio:
+    image: minio/minio:RELEASE.2023-09-07T02-05-02Z
+    container_name: knowledge-bot-minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9010:9000"
+      - "9011:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - ./knowledge-bot/minio_data:/data
+    restart: unless-stopped
+
   backend:
     build:
       context: ./knowledge-bot
@@ -35,6 +49,7 @@ services:
       - db
       - chromadb
       - redis
+      - minio
     ports:
       - "8000:8000"
     volumes:
@@ -49,6 +64,12 @@ services:
       - CHROMA_HOST=chromadb
       - CHROMA_PORT=8000
       - REDIS_URL=redis://redis:6379/0
+      - STORAGE_BACKEND=s3
+      - S3_ENDPOINT_URL=http://minio:9000
+      - S3_ACCESS_KEY=minioadmin
+      - S3_SECRET_KEY=minioadmin
+      - S3_BUCKET_NAME=enterprise-documents
+      - S3_REGION=us-east-1
     restart: unless-stopped
 
   worker:
@@ -61,6 +82,7 @@ services:
       - redis
       - db
       - chromadb
+      - minio
     volumes:
       - ./knowledge-bot/data:/app/data
       - ./knowledge-bot/src:/app/src
@@ -71,6 +93,12 @@ services:
       - CHROMA_HOST=chromadb
       - CHROMA_PORT=8000
       - REDIS_URL=redis://redis:6379/0
+      - STORAGE_BACKEND=s3
+      - S3_ENDPOINT_URL=http://minio:9000
+      - S3_ACCESS_KEY=minioadmin
+      - S3_SECRET_KEY=minioadmin
+      - S3_BUCKET_NAME=enterprise-documents
+      - S3_REGION=us-east-1
     restart: unless-stopped
 
   frontend:

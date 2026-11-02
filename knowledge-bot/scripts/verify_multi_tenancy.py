@@ -1128,8 +1128,154 @@ def run_diagnostics():
     except Exception as e:
         print_check("Check 19 failed", False, str(e))
 
+    # ──────────────────────────────────────────────────────────────────
+    # CHECK 20: Phase 4 — Decoupled Distributed Object Storage (MinIO / S3)
+    # ──────────────────────────────────────────────────────────────────
+    print("\n--- 20. Testing Decoupled Distributed Object Storage (MinIO / S3) ---")
+    try:
+        import io
+        import tempfile
+        from src.storage import (
+            get_storage_provider,
+            get_object_key,
+            LocalStorageProvider,
+            S3StorageProvider,
+            BaseStorageProvider
+        )
+        from src.config import S3_BUCKET_NAME, STORAGE_BACKEND
+
+        # 1. Multi-tenant Canonical Key Isolation
+        k_user1 = get_object_key(tenant_id=1, filename="sales_data.csv", is_global=False, user_id=10)
+        assert k_user1 == "tenants/1/personal/10/sales_data.csv", f"Unexpected key: {k_user1}"
+
+        k_global1 = get_object_key(tenant_id=1, filename="handbook.pdf", is_global=True)
+        assert k_global1 == "tenants/1/global/handbook.pdf", f"Unexpected key: {k_global1}"
+
+        k_user2 = get_object_key(tenant_id=2, filename="sales_data.csv", is_global=False, user_id=10)
+        assert k_user2 == "tenants/2/personal/10/sales_data.csv", f"Unexpected key: {k_user2}"
+        assert k_user1 != k_user2, "Tenant keys collided across tenant boundary!"
+
+        # 2. LocalStorageProvider Validation
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            local_store = LocalStorageProvider(base_dir=Path(tmp_dir))
+            test_key = "tenants/1/test_local.txt"
+            test_content = b"Local Storage Provider Diagnostic Bytes"
+            local_store.upload_bytes(test_content, test_key)
+            assert local_store.object_exists(test_key)
+            assert local_store.download_bytes(test_key) == test_content
+            stream = local_store.download_stream(test_key)
+            assert stream.read() == test_content
+            objs = local_store.list_objects(prefix="tenants/1")
+            assert test_key in objs
+            local_store.delete_object(test_key)
+            assert not local_store.object_exists(test_key)
+
+        # 3. S3StorageProvider / MinIO Active Provider Validation
+        storage = get_storage_provider()
+        assert isinstance(storage, BaseStorageProvider)
+        
+        s3_key = "tenants/999/global/phase4_diagnostic.txt"
+        s3_payload = b"Phase 4 MinIO S3 Integration Diagnostic Payload"
+        storage.upload_bytes(s3_payload, s3_key)
+        assert storage.object_exists(s3_key), f"Object {s3_key} was not detected in storage provider"
+        assert storage.download_bytes(s3_key) == s3_payload, "Downloaded bytes do not match uploaded payload"
+        
+        # Stream read check
+        s3_stream = storage.download_stream(s3_key)
+        assert s3_stream.read() == s3_payload, "Downloaded stream read mismatch"
+        
+        # Presigned URL generation
+        presigned_get = storage.generate_presigned_url(s3_key, expiration_seconds=900)
+        assert presigned_get is not None and len(presigned_get) > 10, "Failed to generate presigned GET URL"
+        if STORAGE_BACKEND == "s3":
+            assert "X-Amz-Signature" in presigned_get or "Signature=" in presigned_get or "minio" in presigned_get or "9000" in presigned_get
+
+        # Delete from storage provider
+        deleted = storage.delete_object(s3_key)
+        assert deleted is True, "Storage delete_object returned False"
+        assert not storage.object_exists(s3_key), "Object still exists after delete_object call"
+
+        # 4. Stream Ingestion Pipeline into Retriever
+        from src.retrieval.retriever import Retriever
+        r = Retriever()
+        import api.main
+        api.main.retriever = r
+
+        stream_doc_name = "phase4_stream_test_doc.txt"
+        stream_payload = b"AlphaCorp enterprise streaming document testing decoupled object storage ingestion."
+        stream_bytes = io.BytesIO(stream_payload)
+        ingest_res = r.ingest_file(
+            file_path=stream_bytes,
+            filename=stream_doc_name,
+            user_id=1,
+            tenant_id=1,
+            is_global=False
+        )
+        assert ingest_res.chunks_added > 0, f"Expected chunks added > 0, got {ingest_res.chunks_added}"
+
+        # Upload corresponding object to storage under canonical personal key
+        stream_key = get_object_key(tenant_id=1, user_id=1, filename=stream_doc_name, is_global=False)
+        storage.upload_bytes(stream_payload, stream_key)
+        assert storage.object_exists(stream_key), "Stream key not found in storage"
+
+        # Verify query retrieval sees the stream-ingested document
+        sources = r.list_sources_by_type(user_id=1, tenant_id=1)
+        assert stream_doc_name in sources["personal"], f"{stream_doc_name} missing from retriever personal sources"
+
+        # 5. API Download & Cascade Deletion Flow
+        from fastapi.testclient import TestClient
+        from api.main import app
+        from src.auth import create_user_token
+        client = TestClient(app)
+
+        with SessionLocal() as db:
+            user = db.query(User).filter(User.id == 1).first()
+            token = create_user_token(user)
+
+        # Test download endpoint for the verified indexed document
+        dl_resp = client.get(
+            f"/documents/{stream_doc_name}/download",
+            headers={"Authorization": f"Bearer {token}"}
+        )
+        assert dl_resp.status_code == 200, f"Download endpoint failed: {dl_resp.text}"
+        if STORAGE_BACKEND == "s3":
+            dl_json = dl_resp.json()
+            assert "download_url" in dl_json
+            assert "expires_in" in dl_json
+        else:
+            assert dl_resp.content == stream_payload
+
+        # Clean up via DELETE /documents/{filename} — verify cascade deletion
+        del_resp = client.delete(
+            f"/documents/{stream_doc_name}",
+            headers={"Authorization": f"Bearer {token}"}
+        )
+        assert del_resp.status_code == 200, f"Delete endpoint failed: {del_resp.text}"
+        # Verify object removed from storage
+        assert not storage.object_exists(stream_key), f"Storage object {stream_key} was not cascade-deleted"
+
+        # Test POST /upload endpoint
+        file_payload = b"Sample upload content for phase 4 verification"
+        upload_resp = client.post(
+            "/upload",
+            files={"file": ("phase4_api_upload_test.txt", io.BytesIO(file_payload), "text/plain")},
+            headers={"Authorization": f"Bearer {token}"}
+        )
+        assert upload_resp.status_code == 200, f"Upload API failed: {upload_resp.text}"
+        upload_data = upload_resp.json()
+        assert upload_data["status"] == "processing"
+        assert "storage_key" in upload_data
+        assert storage.object_exists(upload_data["storage_key"]), "Uploaded object missing from storage"
+
+        # Clean up upload test object
+        storage.delete_object(upload_data["storage_key"])
+
+        print_check("Decoupled distributed object storage (MinIO/S3), canonical keys, stream ingestion, presigned URLs & cascade deletion verified", True)
+    except Exception as e:
+        print_check("Check 20 failed", False, str(e))
+
     print("\n" + "=" * 70)
-    print("ALL 19 DIAGNOSTIC CHECKS COMPLETED")
+    print("ALL 20 DIAGNOSTIC CHECKS COMPLETED")
     print("=" * 70)
 
 if __name__ == "__main__":

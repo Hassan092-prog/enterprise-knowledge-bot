@@ -36,13 +36,14 @@ router = APIRouter()
 
 @router.get("/stats")
 def get_admin_stats(db: Session = Depends(get_db), current_user: User = Depends(get_current_admin_user)):
-    from api.main import retriever
+    from api.main import get_retriever
+    r = get_retriever()
     tenant_id = current_user.tenant_id
 
     user_count = db.query(User).filter(User.tenant_id == tenant_id).count()
     session_count = db.query(ChatSession).filter(ChatSession.tenant_id == tenant_id).count()
 
-    stats = retriever.get_knowledge_base_stats(user_id=None, tenant_id=tenant_id)
+    stats = r.get_knowledge_base_stats(user_id=None, tenant_id=tenant_id)
 
     return {
         "tenant_id": tenant_id,
@@ -77,7 +78,15 @@ async def upload_global_document(
 
     tenant_dir = get_tenant_upload_dir(current_user.tenant_id)
     save_path = tenant_dir / clean_name
-    save_path.write_bytes(contents)
+    try:
+        save_path.write_bytes(contents)
+    except Exception as io_err:
+        logger.warning(f"Could not cache global file locally: {io_err}")
+
+    from src.storage import get_storage_provider, get_object_key
+    storage = get_storage_provider()
+    storage_key = get_object_key(tenant_id=current_user.tenant_id, user_id=None, filename=clean_name, is_global=True)
+    storage.upload_bytes(contents, storage_key)
 
     try:
         from src.worker import process_document
@@ -86,6 +95,7 @@ async def upload_global_document(
             current_user.id,
             tenant_id=current_user.tenant_id,
             is_global=True,
+            storage_key=storage_key,
         )
 
         log_activity(
@@ -94,10 +104,14 @@ async def upload_global_document(
             action="DOC_UPLOAD",
             category="KNOWLEDGE",
             description=f"Queued company document '{clean_name}' for background ingestion (task={task.id})",
-            details={"filename": clean_name, "is_global": True, "task_id": task.id}
+            details={"filename": clean_name, "is_global": True, "task_id": task.id, "storage_key": storage_key}
         )
-        return {"filename": clean_name, "status": "processing", "task_id": task.id}
+        return {"filename": clean_name, "status": "processing", "task_id": task.id, "storage_key": storage_key}
     except Exception as e:
+        try:
+            storage.delete_object(storage_key)
+        except Exception:
+            pass
         if save_path.exists():
             try:
                 save_path.unlink()
@@ -110,25 +124,33 @@ def delete_global_document(
     filename: str,
     current_user: User = Depends(get_current_editor_user),
 ):
-    from api.main import retriever
-    if not retriever:
-        raise HTTPException(status_code=500, detail="Retriever not initialized")
+    from api.main import get_retriever
+    r = get_retriever()
 
     try:
         clean_name = sanitize_filename(filename)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    deleted_count = retriever.delete_document(
+    deleted_count = r.delete_document(
         clean_name,
         user_id=None,
         tenant_id=current_user.tenant_id,
     )
 
+    # Clean from object storage
+    from src.storage import get_storage_provider, get_object_key
+    storage = get_storage_provider()
+    storage_key = get_object_key(tenant_id=current_user.tenant_id, user_id=None, filename=clean_name, is_global=True)
+    storage.delete_object(storage_key)
+
     # Clean from tenant directory if present
     file_path = get_tenant_upload_dir(current_user.tenant_id) / clean_name
     if file_path.exists():
-        file_path.unlink()
+        try:
+            file_path.unlink()
+        except Exception:
+            pass
 
     log_activity(
         tenant_id=current_user.tenant_id,

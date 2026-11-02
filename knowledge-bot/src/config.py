@@ -241,3 +241,11 @@ CORS_ORIGINS: list[str] = [
 # Deployment environment ('development' | 'production' | 'staging')
 ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development").lower()
 
+# ── Distributed Object Storage (MinIO / S3) ──────────────────────────────
+STORAGE_BACKEND: str = os.getenv("STORAGE_BACKEND", "local").lower()  # 'local' | 's3'
+S3_ENDPOINT_URL: str = os.getenv("S3_ENDPOINT_URL", "http://minio:9000")
+S3_ACCESS_KEY: str = os.getenv("S3_ACCESS_KEY", "minioadmin")
+S3_SECRET_KEY: str = os.getenv("S3_SECRET_KEY", "minioadmin")
+S3_BUCKET_NAME: str = os.getenv("S3_BUCKET_NAME", "enterprise-documents")
+S3_REGION: str = os.getenv("S3_REGION", "us-east-1")
+

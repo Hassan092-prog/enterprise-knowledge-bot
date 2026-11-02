@@ -63,7 +63,7 @@ DATA FLOW:
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Callable
+from typing import List, Optional, Callable, Union, BinaryIO
 import re
 import math
 
@@ -152,30 +152,41 @@ class Retriever:
 
     def ingest_file(
         self,
-        file_path: str | Path,
+        file_path: Union[str, Path, BinaryIO],
         user_id: Optional[int] = None,
         is_global: bool = False,
         tenant_id: Optional[int] = None,
         progress_callback: Optional[Callable[[str, int, str], None]] = None,
+        filename: Optional[str] = None,
     ) -> IngestResult:
         """
         Full ingestion pipeline: parse → chunk → embed → store.
-        Now partitioned by tenant_id and emits fine-grained progress callbacks.
+        Partitioned by tenant_id and emits fine-grained progress callbacks.
+        Supports local file paths and seekable BinaryIO streams (e.g. MinIO / S3).
         """
-        file_path = Path(file_path)
-        logger.info("Starting ingestion for: %s (tenant=%s)", file_path.name, tenant_id)
+        if hasattr(file_path, "read"):
+            source_filename = filename or getattr(file_path, "name", "document")
+            source_stem = Path(source_filename).stem
+            is_csv = source_filename.lower().endswith(".csv")
+            documents = load_document(file_path, original_filename=source_filename)
+        else:
+            p = Path(file_path)
+            source_filename = filename or p.name
+            source_stem = Path(source_filename).stem
+            is_csv = source_filename.lower().endswith(".csv")
+            documents = load_document(p, original_filename=source_filename)
+
+        logger.info("Starting ingestion for: %s (tenant=%s)", source_filename, tenant_id)
 
         if progress_callback:
-            progress_callback("PARSING", 10, f"Loading document and extracting text from '{file_path.name}'...")
+            progress_callback("PARSING", 10, f"Loading document and extracting text from '{source_filename}'...")
 
-        # ── Step 1: Parse the document ──────────────────────────────
-        documents = load_document(file_path)
         if not documents:
-            logger.warning("No content extracted from %s", file_path.name)
+            logger.warning("No content extracted from %s", source_filename)
             if progress_callback:
-                progress_callback("FAILED", 0, f"No readable content extracted from '{file_path.name}'.")
+                progress_callback("FAILED", 0, f"No readable content extracted from '{source_filename}'.")
             return IngestResult(
-                source_filename=file_path.name,
+                source_filename=source_filename,
                 chunks_added=0,
                 total_chunks=0,
                 stats={},
@@ -188,16 +199,16 @@ class Retriever:
         chunks = chunk_documents(documents)
         
         # ── Step 2.5: Generate and add summary chunk ────────────────
-        if not file_path.name.lower().endswith(".csv"):
+        if not is_csv:
             if progress_callback:
                 progress_callback("SUMMARIZING", 50, "Generating executive summary chunk via LLM...")
             summary_text = generate_document_summary(documents)
             summary_chunk = Document(
-                page_content=f"EXECUTIVE SUMMARY OF {file_path.name}:\n{summary_text}",
+                page_content=f"EXECUTIVE SUMMARY OF {source_filename}:\n{summary_text}",
                 metadata={
-                    "source": file_path.name,
+                    "source": source_filename,
                     "is_summary": True,
-                    "chunk_id": f"{file_path.stem}_chunk_summary"
+                    "chunk_id": f"{source_stem}_chunk_summary"
                 }
             )
             chunks.append(summary_chunk)
@@ -208,7 +219,7 @@ class Retriever:
         stats  = get_chunk_stats(chunks)
 
         # ── Step 3: Check if already indexed within tenant ──────────
-        already_existed = file_path.name in self._store.list_sources(user_id=user_id, tenant_id=tenant_id)
+        already_existed = source_filename in self._store.list_sources(user_id=user_id, tenant_id=tenant_id)
 
         # ── Step 4: Store embeddings ────────────────────────────────
         if progress_callback:
@@ -227,11 +238,11 @@ class Retriever:
 
         logger.info(
             "Ingestion complete: '%s' → %d/%d chunks added (tenant=%s, already_existed=%s)",
-            file_path.name, chunks_added, len(chunks), tenant_id, already_existed,
+            source_filename, chunks_added, len(chunks), tenant_id, already_existed,
         )
 
         return IngestResult(
-            source_filename=file_path.name,
+            source_filename=source_filename,
             chunks_added=chunks_added,
             total_chunks=len(chunks),
             stats=stats,

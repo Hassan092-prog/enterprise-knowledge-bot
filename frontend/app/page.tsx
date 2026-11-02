@@ -386,6 +386,38 @@ export default function Home() {
     }
   };
 
+  const handleDownloadDoc = async (filename: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      const res = await authFetch(`${API_URL}/documents/${encodeURIComponent(filename)}/download`);
+      if (res.ok) {
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.includes("application/json")) {
+          const data = await res.json();
+          if (data.download_url) {
+            window.open(data.download_url, "_blank");
+            return;
+          }
+        }
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+      } else {
+        const err = await res.json();
+        toast.error(`Download failed: ${err.detail || "Unknown error"}`);
+      }
+    } catch (error) {
+      console.error("Download error:", error);
+      toast.error("Failed to download document.");
+    }
+  };
+
   const handleDeleteDoc = async (filename: string, e: React.MouseEvent) => {
     e.stopPropagation();
     try {
@@ -792,6 +824,13 @@ export default function Home() {
                     </div>
                     <div className="flex items-center gap-1">
                       <button
+                        onClick={(e) => handleDownloadDoc(doc, e)}
+                        className="text-muted hover:text-ink p-0.5 font-mono text-[10px]"
+                        title="Download file"
+                      >
+                        ↓
+                      </button>
+                      <button
                         onClick={() => {
                           const prefix = doc.endsWith('.csv') ? '!' : '@';
                           setInput((prev) => `${prev} ${prefix}${doc} `);
@@ -832,17 +871,26 @@ export default function Home() {
                         {doc}
                       </span>
                     </div>
-                    <button
-                      onClick={() => {
-                        const prefix = doc.endsWith('.csv') ? '!' : '@';
-                        setInput((prev) => `${prev} ${prefix}${doc} `);
-                        inputRef.current?.focus();
-                      }}
-                      className="text-muted hover:text-accent font-mono text-[10px]"
-                      title="Target document in prompt"
-                    >
-                      Target
-                    </button>
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={(e) => handleDownloadDoc(doc, e)}
+                        className="text-muted hover:text-ink p-0.5 font-mono text-[10px]"
+                        title="Download file"
+                      >
+                        ↓
+                      </button>
+                      <button
+                        onClick={() => {
+                          const prefix = doc.endsWith('.csv') ? '!' : '@';
+                          setInput((prev) => `${prev} ${prefix}${doc} `);
+                          inputRef.current?.focus();
+                        }}
+                        className="text-muted hover:text-accent font-mono text-[10px]"
+                        title="Target document in prompt"
+                      >
+                        Target
+                      </button>
+                    </div>
                   </div>
                 ))
               )

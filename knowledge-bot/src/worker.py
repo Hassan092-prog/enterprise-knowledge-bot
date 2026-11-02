@@ -22,7 +22,14 @@ celery_app.conf.update(
 retriever = None
 
 @celery_app.task(name="process_document", bind=True)
-def process_document(self, file_path: str, user_id: int, tenant_id: Optional[int] = None, is_global: bool = False):
+def process_document(
+    self,
+    file_path: Optional[str] = None,
+    user_id: int = 0,
+    tenant_id: Optional[int] = None,
+    is_global: bool = False,
+    storage_key: Optional[str] = None,
+):
     global retriever
     if retriever is None:
         from src.config import validate_config
@@ -47,25 +54,52 @@ def process_document(self, file_path: str, user_id: int, tenant_id: Optional[int
 
     _on_progress("PARSING", 5, "Initializing background ingestion pipeline...")
 
-    logger.info(f"Starting background ingestion for {file_path} (user={user_id}, tenant={tenant_id}, global={is_global})")
+    from pathlib import Path
+    from src.storage import get_storage_provider, get_object_key
+    storage = get_storage_provider()
+    target_user_id = None if is_global else user_id
+
+    filename = None
+    if file_path:
+        filename = Path(file_path).name
+    elif storage_key:
+        filename = Path(storage_key).name
+
+    logger.info(f"Starting background ingestion for {filename or file_path or storage_key} (user={user_id}, tenant={tenant_id}, global={is_global}, storage_key={storage_key})")
     try:
-        from pathlib import Path
-        target_user_id = None if is_global else user_id
+        input_source = None
+        if storage_key and storage.object_exists(storage_key):
+            logger.info(f"Streaming document from object storage: {storage_key}")
+            input_source = storage.download_stream(storage_key)
+        elif file_path and Path(file_path).is_file():
+            logger.info(f"Reading document from local file: {file_path}")
+            input_source = Path(file_path)
+        else:
+            computed_key = get_object_key(tenant_id=tenant_id, user_id=target_user_id, filename=filename, is_global=is_global)
+            if storage.object_exists(computed_key):
+                logger.info(f"Streaming document from computed object storage key: {computed_key}")
+                input_source = storage.download_stream(computed_key)
+            elif file_path:
+                input_source = Path(file_path)
+            else:
+                raise FileNotFoundError(f"Document not found on storage or disk (storage_key={storage_key}, file_path={file_path})")
 
         import inspect
         sig = inspect.signature(retriever.ingest_file)
         kwargs = {
-            "file_path": Path(file_path),
+            "file_path": input_source,
             "user_id": target_user_id,
             "is_global": is_global,
             "tenant_id": tenant_id,
+            "filename": filename,
         }
         if "progress_callback" in sig.parameters:
             kwargs["progress_callback"] = _on_progress
 
         result = retriever.ingest_file(**kwargs)
 
-        logger.info(f"Successfully ingested {file_path}. Added {result.chunks_added} chunks.")
+        doc_display_name = filename or (Path(file_path).name if file_path else "document")
+        logger.info(f"Successfully ingested {doc_display_name}. Added {result.chunks_added} chunks.")
         
         # Async activity log if tenant_id is available
         if tenant_id:
@@ -77,12 +111,13 @@ def process_document(self, file_path: str, user_id: int, tenant_id: Optional[int
                     user_id=user_id,
                     action="DOC_INDEXED",
                     category="KNOWLEDGE",
-                    description=f"Indexed {doc_type} document '{Path(file_path).name}' ({result.chunks_added} chunks)",
+                    description=f"Indexed {doc_type} document '{doc_display_name}' ({result.chunks_added} chunks)",
                     details={
-                        "filename": Path(file_path).name,
+                        "filename": doc_display_name,
                         "chunks_added": result.chunks_added,
                         "total_chunks": result.total_chunks,
-                        "is_global": is_global
+                        "is_global": is_global,
+                        "storage_key": storage_key,
                     }
                 )
             except Exception as act_err:
@@ -90,15 +125,16 @@ def process_document(self, file_path: str, user_id: int, tenant_id: Optional[int
 
         _on_progress("COMPLETED", 100, f"Indexed {result.chunks_added} chunks.")
         return {
-            "filename": Path(file_path).name,
+            "filename": doc_display_name,
             "chunks_added": result.chunks_added,
             "total_chunks": result.total_chunks,
             "already_existed": result.already_existed,
             "tenant_id": tenant_id,
             "user_id": user_id,
+            "storage_key": storage_key,
         }
     except Exception as e:
-        logger.error(f"Error ingesting {file_path}: {e}")
+        logger.error(f"Error ingesting {filename or file_path or storage_key}: {e}")
         self.update_state(
             state="FAILURE",
             meta={

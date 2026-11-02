@@ -69,3 +69,6 @@ redis==5.0.3
 # ── Rate Limiting (slowapi & Redis) ───────────────────────────────────────
 slowapi==0.1.9
 limits==3.12.0
+
+# ── Distributed Object Storage (S3 & MinIO) ──────────────────────────────
+boto3==1.35.71

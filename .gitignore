@@ -11,5 +11,6 @@ node_modules/
 knowledge-bot/data/
 knowledge-bot/chroma_data/
 knowledge-bot/db_data/
+knowledge-bot/minio_data/
 files/
 .agents/
