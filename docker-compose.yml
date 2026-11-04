@@ -57,6 +57,7 @@ services:
       - ./knowledge-bot/src:/app/src
       - ./knowledge-bot/api:/app/api
       - ./knowledge-bot/scripts:/app/scripts
+      - ./knowledge-bot/tests:/app/tests
     env_file:
       - ./knowledge-bot/.env
     environment:

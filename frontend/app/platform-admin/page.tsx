@@ -26,6 +26,9 @@ type TenantRecord = {
   member_count: number;
   doc_count: number;
   chunk_count: number;
+  monthly_token_budget?: number;
+  current_month_tokens?: number;
+  budget_reset_at?: string;
 };
 
 type TenantDetail = {
@@ -36,6 +39,9 @@ type TenantDetail = {
     status: string;
     join_code: string;
     created_at: string;
+    monthly_token_budget?: number;
+    current_month_tokens?: number;
+    budget_reset_at?: string;
   };
   members: Array<{ id: number; username: string; role: string; created_at: string }>;
   documents: { personal: string[]; global: string[] };
@@ -72,6 +78,9 @@ export default function PlatformAdminDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [editingBudgetId, setEditingBudgetId] = useState<number | null>(null);
+  const [editBudgetVal, setEditBudgetVal] = useState<string>("");
+  const [isExportingCsv, setIsExportingCsv] = useState<boolean>(false);
 
   const router = useRouter();
 
@@ -197,6 +206,82 @@ export default function PlatformAdminDashboard() {
     }
   };
 
+  const handleUpdateBudget = async (tenantId: number) => {
+    const val = parseInt(editBudgetVal, 10);
+    if (isNaN(val) || val < 0) {
+      alert("Please enter a valid positive number for monthly token budget.");
+      return;
+    }
+    try {
+      const res = await authFetch(`${API_URL}/platform/tenants/${tenantId}/budget`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ monthly_token_budget: val }),
+      });
+      if (res.ok) {
+        setSuccessMsg("Token budget updated successfully.");
+        setEditingBudgetId(null);
+        await loadData();
+        if (inspectedTenant && inspectedTenant.tenant.id === tenantId) {
+          await inspectTenant(tenantId);
+        }
+      } else {
+        const err = await res.json();
+        alert(err.detail || "Failed to update token budget");
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleResetUsage = async (tenantId: number) => {
+    if (!confirm("Are you sure you want to reset this tenant's current month token usage to 0?")) {
+      return;
+    }
+    try {
+      const res = await authFetch(`${API_URL}/platform/tenants/${tenantId}/budget`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reset_usage: true }),
+      });
+      if (res.ok) {
+        setSuccessMsg("Tenant monthly token usage has been reset to 0.");
+        await loadData();
+        if (inspectedTenant && inspectedTenant.tenant.id === tenantId) {
+          await inspectTenant(tenantId);
+        }
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleExportCsv = async () => {
+    setIsExportingCsv(true);
+    try {
+      const token = localStorage.getItem("token");
+      const res = await fetch(`${API_URL}/platform/export/csv`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!res.ok) throw new Error("CSV Export failed");
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `tenants_token_usage_${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      setSuccessMsg("Token usage report exported to CSV.");
+    } catch (err: unknown) {
+      if (err instanceof Error) setError(err.message);
+      else setError("Failed to export usage CSV");
+    } finally {
+      setIsExportingCsv(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-paper text-ink p-4 sm:p-8">
       <div className="max-w-6xl mx-auto space-y-6">
@@ -225,6 +310,14 @@ export default function PlatformAdminDashboard() {
             >
               {isLoading ? <CyberSpinner size="xs" variant="ink" /> : "↻"}
               <span>Refresh All</span>
+            </button>
+            <button
+              onClick={handleExportCsv}
+              disabled={isExportingCsv}
+              className="px-3.5 py-1.5 bg-paper hover:bg-paper-3 rounded-base border border-rule text-xs font-mono uppercase tracking-wider text-ink transition-colors cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+            >
+              {isExportingCsv ? <CyberSpinner size="xs" variant="ink" /> : "⬇"}
+              <span>Export Usage CSV</span>
             </button>
             <Link
               href="/admin"
@@ -331,61 +424,91 @@ export default function PlatformAdminDashboard() {
                   <th className="p-3">Owner (SuperAdmin)</th>
                   <th className="p-3">Members</th>
                   <th className="p-3">Docs / Chunks</th>
+                  <th className="p-3">Token Usage</th>
                   <th className="p-3">Status</th>
                   <th className="p-3 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="text-xs divide-y divide-rule font-body">
-                {tenants.map((t) => (
-                  <tr key={t.id} className="hover:bg-paper-2 transition-colors">
-                    <td className="p-3">
-                      <div className="font-semibold text-ink">{t.name}</div>
-                      <div className="font-mono text-[11px] text-muted">/{t.slug} · ID #{t.id}</div>
-                    </td>
-                    <td className="p-3 font-mono text-ink">
-                      {t.owner}
-                    </td>
-                    <td className="p-3 font-mono text-ink">
-                      {t.member_count}
-                    </td>
-                    <td className="p-3 font-mono text-muted">
-                      {t.doc_count} docs ({t.chunk_count} chks)
-                    </td>
-                    <td className="p-3 font-mono">
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                        t.status === "active"
-                          ? "bg-emerald-500/10 text-emerald border border-emerald-500/30"
-                          : "bg-ruby-subtle text-ruby border border-ruby/30"
-                      }`}>
-                        {t.status}
-                      </span>
-                    </td>
-                    <td className="p-3 text-right">
-                      <div className="flex items-center justify-end gap-1.5">
-                        <button
-                          onClick={() => inspectTenant(t.id)}
-                          className="px-2.5 py-1 bg-paper-2 hover:bg-paper-3 border border-rule rounded-base font-mono text-xs text-ink cursor-pointer"
-                        >
-                          Inspect
-                        </button>
-                        <button
-                          onClick={() => toggleTenantStatus(t.id, t.status)}
-                          className="px-2.5 py-1 bg-paper-2 hover:bg-paper-3 border border-rule rounded-base font-mono text-xs text-muted hover:text-ink cursor-pointer"
-                        >
-                          {t.status === "active" ? "Suspend" : "Activate"}
-                        </button>
-                        {t.id !== 1 && (
+                {tenants.map((t) => {
+                  const budget = t.monthly_token_budget || 500000;
+                  const used = t.current_month_tokens || 0;
+                  const pct = Math.min(100, Math.round((used / budget) * 100));
+                  const barColor = pct >= 90 ? "bg-ruby" : pct >= 75 ? "bg-amber-500" : "bg-emerald-500";
+
+                  return (
+                    <tr key={t.id} className="hover:bg-paper-2 transition-colors">
+                      <td className="p-3">
+                        <div className="font-semibold text-ink">{t.name}</div>
+                        <div className="font-mono text-[11px] text-muted">/{t.slug} · ID #{t.id}</div>
+                      </td>
+                      <td className="p-3 font-mono text-ink">
+                        {t.owner}
+                      </td>
+                      <td className="p-3 font-mono text-ink">
+                        {t.member_count}
+                      </td>
+                      <td className="p-3 font-mono text-muted">
+                        {t.doc_count} docs ({t.chunk_count} chks)
+                      </td>
+                      <td className="p-3 font-mono">
+                        <div className="w-40 space-y-1">
+                          <div className="flex justify-between text-[11px]">
+                            <span className="text-ink font-semibold">{used.toLocaleString()}</span>
+                            <span className="text-muted">/ {budget.toLocaleString()}</span>
+                          </div>
+                          <div className="w-full bg-paper-3 rounded-full h-1.5 overflow-hidden border border-rule">
+                            <div
+                              className={`h-full transition-all duration-300 ${barColor}`}
+                              style={{ width: `${pct}%` }}
+                            />
+                          </div>
+                          <div className="flex justify-between items-center text-[10px] text-muted">
+                            <span className={pct >= 90 ? "text-ruby font-semibold" : pct >= 75 ? "text-amber-500 font-semibold" : "text-muted"}>
+                              {pct}% used
+                            </span>
+                            {t.budget_reset_at && (
+                              <span>Reset: {new Date(t.budget_reset_at).toLocaleDateString([], { month: 'numeric', day: 'numeric' })}</span>
+                            )}
+                          </div>
+                        </div>
+                      </td>
+                      <td className="p-3 font-mono">
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                          t.status === "active"
+                            ? "bg-emerald-500/10 text-emerald border border-emerald-500/30"
+                            : "bg-ruby-subtle text-ruby border border-ruby/30"
+                        }`}>
+                          {t.status}
+                        </span>
+                      </td>
+                      <td className="p-3 text-right">
+                        <div className="flex items-center justify-end gap-1.5">
                           <button
-                            onClick={() => purgeTenant(t.id, t.name)}
-                            className="px-2.5 py-1 bg-ruby-subtle hover:bg-ruby/20 border border-ruby/30 rounded-base font-mono text-xs text-ruby cursor-pointer"
+                            onClick={() => inspectTenant(t.id)}
+                            className="px-2.5 py-1 bg-paper-2 hover:bg-paper-3 border border-rule rounded-base font-mono text-xs text-ink cursor-pointer"
                           >
-                            Purge
+                            Inspect
                           </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                          <button
+                            onClick={() => toggleTenantStatus(t.id, t.status)}
+                            className="px-2.5 py-1 bg-paper-2 hover:bg-paper-3 border border-rule rounded-base font-mono text-xs text-muted hover:text-ink cursor-pointer"
+                          >
+                            {t.status === "active" ? "Suspend" : "Activate"}
+                          </button>
+                          {t.id !== 1 && (
+                            <button
+                              onClick={() => purgeTenant(t.id, t.name)}
+                              className="px-2.5 py-1 bg-ruby-subtle hover:bg-ruby/20 border border-ruby/30 rounded-base font-mono text-xs text-ruby cursor-pointer"
+                            >
+                              Purge
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -412,7 +535,7 @@ export default function PlatformAdminDashboard() {
               </button>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               {/* Member list */}
               <div className="bg-paper p-3 rounded-base border border-rule">
                 <span className="font-mono text-[11px] uppercase font-bold text-muted block mb-2">
@@ -455,6 +578,51 @@ export default function PlatformAdminDashboard() {
                   <div>Join Code: <strong className="text-accent">{inspectedTenant.tenant.join_code}</strong></div>
                   <div>Status: <span className="uppercase">{inspectedTenant.tenant.status}</span></div>
                   <div>Created: {new Date(inspectedTenant.tenant.created_at).toLocaleDateString()}</div>
+                </div>
+              </div>
+
+              {/* Token Budget & Cost Governance */}
+              <div className="bg-paper p-3 rounded-base border border-rule space-y-2">
+                <span className="font-mono text-[11px] uppercase font-bold text-muted block">
+                  Budget & Token Limits
+                </span>
+                <div className="text-xs font-mono space-y-1">
+                  <div>
+                    Used: <strong className="text-ink">{(inspectedTenant.tenant.current_month_tokens || 0).toLocaleString()}</strong>
+                  </div>
+                  <div>
+                    Cap: <strong className="text-accent">{(inspectedTenant.tenant.monthly_token_budget || 500000).toLocaleString()}</strong>
+                  </div>
+                  <div>
+                    Reset: <span className="text-muted">{inspectedTenant.tenant.budget_reset_at ? new Date(inspectedTenant.tenant.budget_reset_at).toLocaleDateString() : "Monthly"}</span>
+                  </div>
+                </div>
+
+                <div className="pt-2 border-t border-rule space-y-2">
+                  <div className="flex gap-1.5">
+                    <input
+                      type="number"
+                      placeholder="New Budget"
+                      value={editingBudgetId === inspectedTenant.tenant.id ? editBudgetVal : ""}
+                      onChange={(e) => {
+                        setEditingBudgetId(inspectedTenant.tenant.id);
+                        setEditBudgetVal(e.target.value);
+                      }}
+                      className="w-full bg-paper-2 border border-rule px-2 py-1 text-xs font-mono rounded text-ink focus:outline-none focus:border-accent"
+                    />
+                    <button
+                      onClick={() => handleUpdateBudget(inspectedTenant.tenant.id)}
+                      className="px-2 py-1 bg-accent text-accent-ink font-mono text-[11px] rounded font-semibold hover:bg-accent-hover cursor-pointer"
+                    >
+                      Save
+                    </button>
+                  </div>
+                  <button
+                    onClick={() => handleResetUsage(inspectedTenant.tenant.id)}
+                    className="w-full px-2 py-1 bg-paper-2 hover:bg-paper-3 border border-rule text-muted hover:text-ink font-mono text-[10px] rounded cursor-pointer"
+                  >
+                    Reset Usage to 0
+                  </button>
                 </div>
               </div>
             </div>

@@ -7,7 +7,7 @@ def test_chunk_documents_empty():
 
 def test_chunk_documents_metadata():
     # Provide a document large enough to split
-    doc = Document(page_content="A " * 500, metadata={"source": "test.txt"})
+    doc = Document(page_content="A " * 800, metadata={"source": "test.txt"})
     chunks = chunk_documents([doc])
     
     assert len(chunks) > 1

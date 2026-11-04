@@ -1280,8 +1280,151 @@ def run_diagnostics():
     except Exception as e:
         print_check("Check 20 failed", False, str(e))
 
+    # ──────────────────────────────────────────────────────────────────
+    # CHECK 21: Production Observability, LLM Telemetry & Tenant Cost Governance
+    # ──────────────────────────────────────────────────────────────────
+    print("\n--- 21. Testing Production Observability, Telemetry & Cost Governance ---")
+    try:
+        from src.telemetry import create_rag_trace, count_tokens, estimate_token_cost
+        from src.database import check_and_reset_tenant_budget, record_tenant_token_usage
+        from datetime import datetime, timedelta
+        import secrets
+
+        # 1. Token Counting & Cost Estimation Utilities
+        sample_prompt = "What was Acme Corporation's consolidated revenue in Q3 2026?"
+        sample_completion = "Acme Corporation reported $48,500,000 USD in consolidated revenue."
+        prompt_tokens = count_tokens(sample_prompt, "gpt-4o-mini")
+        comp_tokens = count_tokens(sample_completion, "gpt-4o-mini")
+        assert prompt_tokens > 0, "Token counter failed on prompt"
+        assert comp_tokens > 0, "Token counter failed on completion"
+        cost = estimate_token_cost(prompt_tokens, comp_tokens, "gpt-4o-mini")
+        assert cost > 0.0, "Cost estimation returned zero"
+
+        # 2. Telemetry Root Trace & Nested Spans
+        trace = create_rag_trace(
+            name="rag_verification_trace",
+            tenant_id=1,
+            user_id=1,
+            session_id="test-session-obs",
+            metadata={"test_mode": True}
+        )
+        with trace.span(name="query_condense", input_data={"query": sample_prompt}) as s1:
+            s1.end(output={"effective_query": sample_prompt})
+        assert "query_condense" in trace.spans
+        assert trace.spans["query_condense"].duration_ms >= 0
+
+        with trace.span(name="hybrid_retrieval", input_data={"k": 5}) as s2:
+            s2.metadata["n_candidates"] = 10
+            s2.end(output={"candidates_count": 10})
+        assert "hybrid_retrieval" in trace.spans
+
+        with trace.span(name="rerank_mmr", input_data={"candidate_count": 10}) as s3:
+            s3.metadata["k_final"] = 5
+            s3.end(output={"final_count": 5})
+        assert "rerank_mmr" in trace.spans
+
+        with trace.span(name="llm_stream", input_data={"prompt_tokens": prompt_tokens}) as s4:
+            s4.metadata["completion_tokens"] = comp_tokens
+            s4.end(output={"tokens": prompt_tokens + comp_tokens})
+        assert "llm_stream" in trace.spans
+
+        total_ms = trace.end(output={"status": "completed"})
+        assert total_ms >= 0
+
+        # 3. Tenant Budget Model, Atomic Increment & Reset Window
+        with SessionLocal() as db:
+            unique_suffix = secrets.token_hex(3)
+            test_tenant = Tenant(
+                name=f"Telemetry Budget Org {unique_suffix}",
+                slug=f"telemetry-budget-org-{unique_suffix}",
+                monthly_token_budget=1000,
+                current_month_tokens=900,
+                budget_reset_at=datetime.utcnow() - timedelta(days=45)  # Previous month
+            )
+            db.add(test_tenant)
+            db.commit()
+            db.refresh(test_tenant)
+
+            # Test automatic monthly reset
+            was_reset = check_and_reset_tenant_budget(test_tenant, db)
+            assert was_reset, "Expected budget to reset due to past reset date"
+            assert test_tenant.current_month_tokens == 0, "Tokens not zeroed on reset"
+
+            # Test atomic usage increment
+            new_tokens = record_tenant_token_usage(test_tenant.id, 250, db)
+            assert new_tokens == 250, f"Expected 250 tokens, got {new_tokens}"
+
+            new_tokens_2 = record_tenant_token_usage(test_tenant.id, 750, db)
+            assert new_tokens_2 == 1000, f"Expected 1000 tokens, got {new_tokens_2}"
+
+            # 4. HTTP 402 Rejection Enforcement on /query
+            budget_user = User(
+                username=f"budget_user_{unique_suffix}",
+                hashed_password=get_password_hash("testpass"),
+                role="user",
+                tenant_id=test_tenant.id
+            )
+            db.add(budget_user)
+            db.commit()
+            db.refresh(budget_user)
+
+            chat_sess = ChatSession(
+                user_id=budget_user.id,
+                tenant_id=test_tenant.id,
+                title="Budget Enforcement Test"
+            )
+            db.add(chat_sess)
+            db.commit()
+            db.refresh(chat_sess)
+
+            b_token = create_user_token(budget_user)
+
+            client = TestClient(app)
+            # Query when current_month_tokens (1000) >= monthly_token_budget (1000)
+            resp_402 = client.post(
+                "/query",
+                json={"query": "Test query exceeding budget limit", "session_id": chat_sess.id},
+                headers={"Authorization": f"Bearer {b_token}"}
+            )
+            assert resp_402.status_code == 402, f"Expected HTTP 402, got {resp_402.status_code}: {resp_402.text}"
+            assert "monthly token budget exceeded" in resp_402.text.lower()
+
+            # 5. Platform Admin Token Budget Update & CSV Export
+            platform_admin = db.query(User).filter(User.is_platform_admin == True).first()
+            p_token = create_user_token(platform_admin)
+
+            # PATCH /platform/tenants/{tenant_id}/budget
+            patch_resp = client.patch(
+                f"/platform/tenants/{test_tenant.id}/budget",
+                json={"monthly_token_budget": 50000, "reset_usage": True},
+                headers={"Authorization": f"Bearer {p_token}"}
+            )
+            assert patch_resp.status_code == 200, f"Budget update failed: {patch_resp.text}"
+            patch_data = patch_resp.json()
+            assert patch_data["monthly_token_budget"] == 50000
+            assert patch_data["current_month_tokens"] == 0
+
+            # GET /platform/export/csv
+            csv_resp = client.get(
+                "/platform/export/csv",
+                headers={"Authorization": f"Bearer {p_token}"}
+            )
+            assert csv_resp.status_code == 200, f"CSV export failed: {csv_resp.text}"
+            assert "Monthly Token Budget" in csv_resp.text
+            assert test_tenant.name in csv_resp.text
+
+            # Teardown test tenant
+            db.delete(chat_sess)
+            db.delete(budget_user)
+            db.delete(test_tenant)
+            db.commit()
+
+        print_check("Production observability, LLM telemetry spans, tenant token accounting, HTTP 402 budget cap & CSV usage exporter verified", True)
+    except Exception as e:
+        print_check("Check 21 failed", False, str(e))
+
     print("\n" + "=" * 70)
-    print("ALL 20 DIAGNOSTIC CHECKS COMPLETED")
+    print("ALL 21 DIAGNOSTIC CHECKS COMPLETED")
     print("=" * 70)
 
 if __name__ == "__main__":

@@ -63,7 +63,7 @@ DATA FLOW:
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Callable, Union, BinaryIO
+from typing import List, Optional, Callable, Union, BinaryIO, Any, Dict
 import re
 import math
 
@@ -274,9 +274,12 @@ class Retriever:
         source_filter: Optional[str] = None,
         use_mmr: bool = True,
         tenant_id: Optional[int] = None,
+        trace: Optional[Any] = None,
+        use_expansion: bool = True,
     ) -> List[Document]:
         """
         Retrieve the most relevant chunks for a query within the user's tenant.
+        Instruments hybrid_retrieval and rerank_mmr spans when trace is provided.
         """
         k = k or RETRIEVAL_TOP_K
 
@@ -289,67 +292,100 @@ class Retriever:
             return []
 
         # ── Step 1: Expand query ─────────────────────────────────────
-        queries = self._expand_query(query)
+        queries = self._expand_query(query) if use_expansion else [query]
 
-        # ── Step 2: Fetch candidates ────────────────────────────────
+        # ── Step 2: Fetch candidates (Hybrid Retrieval) ──────────────
         tenant_stats = self._store.get_stats(user_id=user_id, tenant_id=tenant_id)
         n_candidates = min(
             k * _CANDIDATE_MULTIPLIER,
             tenant_stats["total_chunks"] or 1,
         )
 
-        rrf_k = 60
-        scores_map = {}
-        docs_map = {}
+        def _do_hybrid_search():
+            rrf_k = 60
+            scores_map = {}
+            docs_map = {}
+            total_vec = 0
+            total_bm25 = 0
 
-        for q in queries:
-            # Hybrid Search: Get candidates from both Vector and BM25 scoped to tenant
-            vector_candidates = self._store.search(
-                query=q,
-                k=n_candidates,
-                source_filter=source_filter,
-                user_id=user_id,
-                tenant_id=tenant_id,
-            )
-            
-            bm25_candidates = self._store.search_bm25(
-                query=q,
-                k=n_candidates,
-                source_filter=source_filter,
-                user_id=user_id,
-                tenant_id=tenant_id,
-            )
-            
-            # Combine using Reciprocal Rank Fusion (RRF)
-            for rank, doc in enumerate(vector_candidates):
-                chunk_id = doc.metadata.get("chunk_id", str(rank))
-                scores_map[chunk_id] = scores_map.get(chunk_id, 0.0) + 1.0 / (rrf_k + rank + 1)
-                docs_map[chunk_id] = doc
-                
-            for rank, doc in enumerate(bm25_candidates):
-                chunk_id = doc.metadata.get("chunk_id", str(rank + len(vector_candidates)))
-                scores_map[chunk_id] = scores_map.get(chunk_id, 0.0) + 1.0 / (rrf_k + rank + 1)
-                if chunk_id not in docs_map:
+            for q in queries:
+                vector_candidates = self._store.search(
+                    query=q,
+                    k=n_candidates,
+                    source_filter=source_filter,
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                )
+                total_vec += len(vector_candidates)
+
+                bm25_candidates = self._store.search_bm25(
+                    query=q,
+                    k=n_candidates,
+                    source_filter=source_filter,
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                )
+                total_bm25 += len(bm25_candidates)
+
+                # Combine using Reciprocal Rank Fusion (RRF)
+                for rank, doc in enumerate(vector_candidates):
+                    chunk_id = doc.metadata.get("chunk_id", str(rank))
+                    scores_map[chunk_id] = scores_map.get(chunk_id, 0.0) + 1.0 / (rrf_k + rank + 1)
                     docs_map[chunk_id] = doc
-                
-        # Sort by RRF score and take top n_candidates
-        candidates = []
-        for chunk_id, _ in sorted(scores_map.items(), key=lambda x: x[1], reverse=True):
-            candidates.append(docs_map[chunk_id])
-            
-        candidates = candidates[:n_candidates]
+
+                for rank, doc in enumerate(bm25_candidates):
+                    chunk_id = doc.metadata.get("chunk_id", str(rank + len(vector_candidates)))
+                    scores_map[chunk_id] = scores_map.get(chunk_id, 0.0) + 1.0 / (rrf_k + rank + 1)
+                    if chunk_id not in docs_map:
+                        docs_map[chunk_id] = doc
+
+            cands = []
+            for chunk_id, _ in sorted(scores_map.items(), key=lambda x: x[1], reverse=True):
+                cands.append(docs_map[chunk_id])
+
+            return cands[:n_candidates], total_vec, total_bm25
+
+        if trace:
+            with trace.span(
+                name="hybrid_retrieval",
+                input_data={"query": query, "source_filter": source_filter},
+                metadata={"tenant_id": tenant_id, "source_filter": source_filter}
+            ) as hr_span:
+                candidates, n_vec, n_bm = _do_hybrid_search()
+                hr_span.metadata["n_candidates"] = len(candidates)
+                hr_span.metadata["vector_candidates"] = n_vec
+                hr_span.metadata["bm25_candidates"] = n_bm
+                hr_span.end(output={"candidates_count": len(candidates)})
+        else:
+            candidates, _, _ = _do_hybrid_search()
 
         if not candidates:
             return []
 
-        # ── Step 2: Re-rank ─────────────────────────────────────────
-        ranked = self._rerank(query, candidates)
+        # ── Step 3: Re-rank & MMR Diversity ──────────────────────────
+        def _do_rerank_mmr():
+            ranked = self._rerank(query, candidates)
+            if use_mmr and len(ranked) > k:
+                final = self._mmr_filter(ranked, k=k)
+            else:
+                final = ranked[:k]
+            score_range = [
+                float(final[0].metadata.get("rerank_score", 0.0)),
+                float(final[-1].metadata.get("rerank_score", 0.0))
+            ] if final else []
+            return final, score_range
 
-        # ── Step 3: MMR diversity filter ────────────────────────────
-        if use_mmr and len(ranked) > k:
-            final = self._mmr_filter(ranked, k=k)
+        if trace:
+            with trace.span(
+                name="rerank_mmr",
+                input_data={"candidate_count": len(candidates)},
+                metadata={"candidate_count": len(candidates), "k_final": k, "use_mmr": use_mmr}
+            ) as rr_span:
+                final, scores = _do_rerank_mmr()
+                rr_span.metadata["score_range"] = scores
+                rr_span.end(output={"final_count": len(final)})
         else:
-            final = ranked[:k]
+            final, _ = _do_rerank_mmr()
 
         logger.info(
             "retrieve(): query='%s' → %d candidates → %d final results",

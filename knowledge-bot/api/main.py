@@ -18,7 +18,7 @@ from api.limiter import limiter
 from src.retrieval.retriever import Retriever
 from src.retrieval.router import route_query
 from src.retrieval.tabular_agent import run_tabular_query
-from src.generation.llm_chain import stream_answer, condense_query, extract_citation_metadata
+from src.generation.llm_chain import stream_answer, condense_query, extract_citation_metadata, build_context_block
 from src.config import (
     UPLOAD_DIR,
     MAX_FILE_SIZE_MB,
@@ -26,11 +26,21 @@ from src.config import (
     CORS_ORIGINS,
     ENVIRONMENT,
     MAX_QUERY_LENGTH,
+    LLM_MODEL,
+    LLM_PROVIDER,
     sanitize_filename,
     get_tenant_upload_dir,
 )
-from src.database import engine, Base, get_db, run_db_migrations
-from src.models import ChatSession, ChatMessage, User
+from src.database import (
+    engine,
+    Base,
+    get_db,
+    run_db_migrations,
+    check_and_reset_tenant_budget,
+    record_tenant_token_usage,
+)
+from src.models import ChatSession, ChatMessage, User, Tenant
+from src.telemetry import create_rag_trace, count_tokens, estimate_token_cost
 from src.activity import log_activity
 from api.dependencies import get_current_user
 from api.auth import router as auth_router
@@ -515,6 +525,17 @@ def query_bot(
     if not query_req.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
 
+    # 0. Check Tenant Monthly Token Budget & Reset Window
+    if current_user.tenant_id:
+        tenant = db.query(Tenant).filter(Tenant.id == current_user.tenant_id).first()
+        if tenant:
+            check_and_reset_tenant_budget(tenant, db)
+            if tenant.monthly_token_budget and (tenant.current_month_tokens or 0) >= tenant.monthly_token_budget:
+                raise HTTPException(
+                    status_code=402,
+                    detail="Monthly token budget exceeded. Contact your organization admin."
+                )
+
     r = get_retriever()
 
     session = db.query(ChatSession).filter(
@@ -524,6 +545,15 @@ def query_bot(
     ).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    # Root telemetry trace for request lifecycle
+    trace = create_rag_trace(
+        name="rag_query",
+        tenant_id=current_user.tenant_id,
+        user_id=current_user.id,
+        session_id=str(query_req.session_id),
+        metadata={"query_length": len(query_req.query)},
+    )
 
     # 1. Fetch recent conversation turns for multi-turn conversational memory (prior to current query)
     prior_messages = db.query(ChatMessage).filter(
@@ -543,12 +573,18 @@ def query_bot(
     # 2. Contextual Query Condensation: rewrite follow-ups into standalone search questions
     effective_query = query_req.query
     if chat_history:
-        effective_query = condense_query(query_req.query, chat_history)
+        with trace.span(
+            name="query_condense",
+            input_data={"query": query_req.query, "history_turns": len(chat_history)},
+            metadata={"llm_model": LLM_MODEL, "history_turns": len(chat_history)}
+        ) as span_condense:
+            effective_query = condense_query(query_req.query, chat_history)
+            span_condense.end(output={"effective_query": effective_query})
 
     start_time = time.time()
 
     # 3. Route Query scoped to tenant
-    sources = retriever.list_sources(user_id=current_user.id, tenant_id=current_user.tenant_id)
+    sources = r.list_sources(user_id=current_user.id, tenant_id=current_user.tenant_id)
 
     # Check if the user explicitly provided an @doc or !doc tag in their prompt
     has_explicit_tag = bool(re.search(r'[@!]([\w\.,_-]+)', query_req.query))
@@ -563,6 +599,7 @@ def query_bot(
         generic_words = ["summarize", "summarise", "summary", "give me a summary"]
         is_generic = query_lower in generic_words or query_lower.startswith("summarize ") or query_lower.startswith("summarise ")
         if is_generic:
+            trace.end(output={"route": "warning_unspecified_document"})
             def generate_warning():
                 warning_msg = "Please specify which document you would like me to summarize by tagging it with `@` or `!` (e.g., 'summarize @sample.txt')."
                 yield warning_msg
@@ -596,17 +633,28 @@ def query_bot(
             yield f"\n\n__SOURCES_METADATA_START__{sources_payload}__SOURCES_METADATA_END__"
 
             latency_ms = int((time.time() - start_time) * 1000)
+            tabular_tokens = count_tokens(query_req.query + response, LLM_MODEL)
+            if current_user.tenant_id:
+                try:
+                    with SessionLocal() as s_db:
+                        record_tenant_token_usage(current_user.tenant_id, tabular_tokens, s_db)
+                except Exception as db_err:
+                    api_logger.error(f"Failed to record tabular token usage: {db_err}")
+
+            trace.end(output={"route": "tabular", "tokens": tabular_tokens, "latency_ms": latency_ms})
+
             log_activity(
                 tenant_id=current_user.tenant_id,
                 user_id=current_user.id,
                 action="QUERY_EXECUTED",
                 category="QUERY",
-                description=f"Tabular SQL query on '{target_file}' ({latency_ms}ms)",
+                description=f"Tabular SQL query on '{target_file}' ({latency_ms}ms, {tabular_tokens} tokens)",
                 details={
                     "query_preview": query_req.query[:100],
                     "target_file": target_file,
                     "route": "tabular",
-                    "latency_ms": latency_ms
+                    "latency_ms": latency_ms,
+                    "tokens": tabular_tokens
                 }
             )
 
@@ -623,11 +671,12 @@ def query_bot(
         return StreamingResponse(generate_tabular(), media_type="text/plain")
 
     # Fallback to standard semantic RAG search scoped to tenant using effective_query
-    chunks = retriever.retrieve(
+    chunks = r.retrieve(
         effective_query,
         user_id=current_user.id,
         source_filter=target_file,
-        tenant_id=current_user.tenant_id
+        tenant_id=current_user.tenant_id,
+        trace=trace
     )
 
     citations = extract_citation_metadata(chunks)
@@ -636,8 +685,12 @@ def query_bot(
     def generate():
         from src.database import SessionLocal
         full_response = ""
+        ttft = None
+        stream_start = time.perf_counter()
         try:
             for chunk in stream_answer(effective_query, chunks, chat_history=chat_history):
+                if ttft is None:
+                    ttft = round((time.perf_counter() - stream_start) * 1000, 2)
                 full_response += chunk
                 yield chunk
         except Exception as e:
@@ -649,19 +702,63 @@ def query_bot(
         yield f"\n\n__SOURCES_METADATA_START__{sources_payload}__SOURCES_METADATA_END__"
 
         latency_ms = int((time.time() - start_time) * 1000)
+
+        # Telemetry & Cost Accounting
+        context_text = build_context_block(chunks) if chunks else ""
+        prompt_tokens = count_tokens(effective_query + "\n" + context_text, LLM_MODEL)
+        completion_tokens = count_tokens(full_response, LLM_MODEL)
+        total_tokens = prompt_tokens + completion_tokens
+        cost_usd = estimate_token_cost(prompt_tokens, completion_tokens, LLM_MODEL)
+
+        with trace.span(
+            name="llm_stream",
+            input_data={"prompt_tokens": prompt_tokens},
+            metadata={
+                "ttft_ms": ttft or 0.0,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+                "cost_usd": cost_usd,
+                "chunks_used": len(chunks),
+                "llm_provider": LLM_PROVIDER,
+                "model": LLM_MODEL,
+            }
+        ) as llm_span:
+            llm_span.end(output={"completion_tokens": completion_tokens, "cost_usd": cost_usd})
+
+        if current_user.tenant_id:
+            try:
+                with SessionLocal() as s_db:
+                    record_tenant_token_usage(current_user.tenant_id, total_tokens, s_db)
+            except Exception as db_err:
+                api_logger.error(f"Failed to record RAG token usage: {db_err}")
+
+        trace.record_generation(
+            name="rag_completion",
+            model=LLM_MODEL,
+            prompt=effective_query,
+            completion=full_response,
+            usage={"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": total_tokens},
+            metadata={"cost_usd": cost_usd, "ttft_ms": ttft or 0.0}
+        )
+        trace.end(output={"total_tokens": total_tokens, "cost_usd": cost_usd})
+
         log_activity(
             tenant_id=current_user.tenant_id,
             user_id=current_user.id,
             action="QUERY_EXECUTED",
             category="QUERY",
-            description=f"RAG query executed ({len(chunks)} chunks retrieved, {latency_ms}ms)",
+            description=f"RAG query executed ({len(chunks)} chunks, {total_tokens} tokens, {latency_ms}ms)",
             details={
                 "query_preview": query_req.query[:100],
                 "effective_query": effective_query[:100] if effective_query != query_req.query else None,
                 "target_file": target_file,
                 "route": "semantic",
                 "chunks_count": len(chunks),
-                "latency_ms": latency_ms
+                "latency_ms": latency_ms,
+                "tokens": total_tokens,
+                "cost_usd": cost_usd,
+                "ttft_ms": ttft or 0.0
             }
         )
 

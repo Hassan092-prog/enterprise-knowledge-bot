@@ -1,6 +1,9 @@
 import shutil
+import io
+import csv
+from datetime import datetime
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
@@ -77,6 +80,9 @@ def list_all_tenants(
             "member_count": member_count,
             "doc_count": doc_count,
             "chunk_count": chunk_count,
+            "monthly_token_budget": t.monthly_token_budget if t.monthly_token_budget is not None else 500000,
+            "current_month_tokens": t.current_month_tokens if t.current_month_tokens is not None else 0,
+            "budget_reset_at": t.budget_reset_at,
         })
 
     return results
@@ -110,6 +116,9 @@ def inspect_tenant(
             "status": tenant.status,
             "join_code": tenant.join_code,
             "created_at": tenant.created_at,
+            "monthly_token_budget": tenant.monthly_token_budget if tenant.monthly_token_budget is not None else 500000,
+            "current_month_tokens": tenant.current_month_tokens if tenant.current_month_tokens is not None else 0,
+            "budget_reset_at": tenant.budget_reset_at,
         },
         "members": [{
             "id": u.id,
@@ -127,6 +136,88 @@ def inspect_tenant(
             "timestamp": a.timestamp
         } for a in recent_activity]
     }
+
+class TenantBudgetUpdate(BaseModel):
+    monthly_token_budget: Optional[int] = None
+    reset_usage: bool = False
+
+@router.patch("/tenants/{tenant_id}/budget")
+def update_tenant_budget(
+    tenant_id: int,
+    budget_data: TenantBudgetUpdate,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_platform_admin),
+):
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant organization not found")
+
+    if budget_data.monthly_token_budget is not None:
+        if budget_data.monthly_token_budget < 0:
+            raise HTTPException(status_code=400, detail="Token budget cannot be negative")
+        tenant.monthly_token_budget = budget_data.monthly_token_budget
+
+    if budget_data.reset_usage:
+        tenant.current_month_tokens = 0
+        tenant.budget_reset_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(tenant)
+
+    return {
+        "status": "success",
+        "tenant_id": tenant.id,
+        "monthly_token_budget": tenant.monthly_token_budget,
+        "current_month_tokens": tenant.current_month_tokens,
+        "budget_reset_at": tenant.budget_reset_at,
+    }
+
+@router.get("/export/csv")
+def export_tenants_csv(
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_platform_admin),
+):
+    from api.admin import _sanitize_csv_cell
+
+    tenants = db.query(Tenant).order_by(Tenant.id.asc()).all()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Tenant ID",
+        "Organization Name",
+        "Slug",
+        "Status",
+        "Monthly Token Budget",
+        "Current Month Tokens",
+        "Usage Percent",
+        "Reset Date",
+        "Created At"
+    ])
+
+    for t in tenants:
+        budget = t.monthly_token_budget if t.monthly_token_budget is not None else 500000
+        used = t.current_month_tokens if t.current_month_tokens is not None else 0
+        pct = round((used / budget * 100), 2) if budget > 0 else 0.0
+        reset_str = t.budget_reset_at.strftime("%Y-%m-%d %H:%M:%S") if t.budget_reset_at else "N/A"
+        created_str = t.created_at.strftime("%Y-%m-%d %H:%M:%S") if t.created_at else "N/A"
+        writer.writerow([
+            t.id,
+            _sanitize_csv_cell(t.name),
+            _sanitize_csv_cell(t.slug),
+            _sanitize_csv_cell(t.status),
+            budget,
+            used,
+            f"{pct}%",
+            reset_str,
+            created_str
+        ])
+
+    csv_content = output.getvalue()
+    return Response(
+        content=csv_content,
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=tenants_usage_report_{datetime.utcnow().strftime('%Y%m%d')}.csv"}
+    )
 
 class TenantStatusUpdate(BaseModel):
     status: str

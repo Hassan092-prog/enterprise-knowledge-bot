@@ -1,7 +1,8 @@
 import os
 import secrets
+from datetime import datetime
 from sqlalchemy import create_engine, inspect, text
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from src.config import DATA_DIR, DATABASE_URL
 from src.logger import get_logger
 
@@ -97,6 +98,15 @@ def run_db_migrations():
                 if "allowed_domains" not in tenant_cols:
                     conn.execute(text("ALTER TABLE tenants ADD COLUMN allowed_domains TEXT"))
                     logger.info("Added 'allowed_domains' column to tenants table.")
+                if "monthly_token_budget" not in tenant_cols:
+                    conn.execute(text("ALTER TABLE tenants ADD COLUMN monthly_token_budget INTEGER DEFAULT 500000"))
+                    logger.info("Added 'monthly_token_budget' column to tenants table.")
+                if "current_month_tokens" not in tenant_cols:
+                    conn.execute(text("ALTER TABLE tenants ADD COLUMN current_month_tokens INTEGER DEFAULT 0"))
+                    logger.info("Added 'current_month_tokens' column to tenants table.")
+                if "budget_reset_at" not in tenant_cols:
+                    conn.execute(text("ALTER TABLE tenants ADD COLUMN budget_reset_at TIMESTAMP"))
+                    logger.info("Added 'budget_reset_at' column to tenants table.")
                 conn.commit()
 
             # 2. chat_sessions table schema evolution
@@ -209,3 +219,46 @@ def run_db_migrations():
         except Exception as e:
             db.rollback()
             logger.error(f"Error during database bootstrap: {e}")
+
+
+def check_and_reset_tenant_budget(tenant, db: Session) -> bool:
+    """
+    Check if tenant's monthly token budget should be reset (if budget_reset_at is in a previous month).
+    Returns True if a reset occurred, False otherwise.
+    """
+    now = datetime.utcnow()
+    current_month_start = datetime(now.year, now.month, 1)
+
+    if tenant.budget_reset_at is None:
+        tenant.budget_reset_at = current_month_start
+        db.commit()
+        return False
+
+    if tenant.budget_reset_at < current_month_start:
+        tenant.current_month_tokens = 0
+        tenant.budget_reset_at = current_month_start
+        db.commit()
+        logger.info(f"Monthly token budget reset to 0 for tenant '{tenant.name}' (ID: {tenant.id}) for {current_month_start.strftime('%Y-%m')}.")
+        return True
+
+    return False
+
+
+def record_tenant_token_usage(tenant_id: int, tokens_used: int, db: Session) -> int:
+    """
+    Atomically increment a tenant's current_month_tokens by tokens_used.
+    Works across PostgreSQL and SQLite. Returns new current_month_tokens value.
+    """
+    from src.models import Tenant
+    if tokens_used <= 0:
+        tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+        return tenant.current_month_tokens if tenant else 0
+
+    db.execute(
+        text("UPDATE tenants SET current_month_tokens = COALESCE(current_month_tokens, 0) + :tokens WHERE id = :tenant_id"),
+        {"tokens": tokens_used, "tenant_id": tenant_id}
+    )
+    db.commit()
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    return tenant.current_month_tokens if tenant else 0
+

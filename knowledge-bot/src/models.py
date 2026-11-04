@@ -12,6 +12,9 @@ class Tenant(Base):
     status = Column(String, default="active")  # 'active', 'suspended'
     join_code = Column(String, nullable=True)   # Join code for controlled onboarding
     allowed_domains = Column(String, nullable=True)  # Comma-separated corporate domains, e.g. "acme.com,acmewidgets.com"
+    monthly_token_budget = Column(Integer, default=500_000)   # Token cap per month
+    current_month_tokens = Column(Integer, default=0)         # Running total
+    budget_reset_at = Column(DateTime, nullable=True)         # Timestamp when month was last reset
     superadmin_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL", use_alter=True, name="fk_tenant_superadmin_user_id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 

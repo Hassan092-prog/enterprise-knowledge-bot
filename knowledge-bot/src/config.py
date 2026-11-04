@@ -250,3 +250,9 @@ S3_SECRET_KEY: str = os.getenv("S3_SECRET_KEY", "minioadmin")
 S3_BUCKET_NAME: str = os.getenv("S3_BUCKET_NAME", "enterprise-documents")
 S3_REGION: str = os.getenv("S3_REGION", "us-east-1")
 
+# ── Observability & LLM Telemetry (Langfuse) ─────────────────────────────
+LANGFUSE_PUBLIC_KEY: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+LANGFUSE_SECRET_KEY: str = os.getenv("LANGFUSE_SECRET_KEY", "")
+LANGFUSE_HOST: str = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
+
+
