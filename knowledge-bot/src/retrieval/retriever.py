@@ -292,7 +292,19 @@ class Retriever:
             return []
 
         # ── Step 1: Expand query ─────────────────────────────────────
-        queries = self._expand_query(query) if use_expansion else [query]
+        if trace and use_expansion:
+            with trace.span(
+                name="query_expansion",
+                input_data={"query": query},
+                metadata={"tenant_id": tenant_id}
+            ) as exp_span:
+                queries = self._expand_query(query)
+                exp_span.metadata["variations_count"] = len(queries) - 1
+                exp_span.end(output={"expanded_queries": queries})
+        elif use_expansion:
+            queries = self._expand_query(query)
+        else:
+            queries = [query]
 
         # ── Step 2: Fetch candidates (Hybrid Retrieval) ──────────────
         tenant_stats = self._store.get_stats(user_id=user_id, tenant_id=tenant_id)

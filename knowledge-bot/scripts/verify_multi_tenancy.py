@@ -1389,6 +1389,17 @@ def run_diagnostics():
             assert resp_402.status_code == 402, f"Expected HTTP 402, got {resp_402.status_code}: {resp_402.text}"
             assert "monthly token budget exceeded" in resp_402.text.lower()
 
+            # Test zero-budget hard freeze (budget=0, usage=0 must still reject with 402)
+            test_tenant.monthly_token_budget = 0
+            test_tenant.current_month_tokens = 0
+            db.commit()
+            resp_zero_budget = client.post(
+                "/query",
+                json={"query": "Test query with frozen zero budget", "session_id": chat_sess.id},
+                headers={"Authorization": f"Bearer {b_token}"}
+            )
+            assert resp_zero_budget.status_code == 402, f"Expected HTTP 402 for zero budget freeze, got {resp_zero_budget.status_code}"
+
             # 5. Platform Admin Token Budget Update & CSV Export
             platform_admin = db.query(User).filter(User.is_platform_admin == True).first()
             p_token = create_user_token(platform_admin)

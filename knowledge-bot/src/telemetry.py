@@ -44,7 +44,7 @@ def count_tokens(text: str, model_name: str = "gpt-4o-mini") -> int:
     """
     if not text:
         return 0
-    encoder = get_token_encoder(model_name)
+    encoder = get_token_encoder(model_name or "gpt-4o-mini")
     if encoder:
         try:
             return len(encoder.encode(text))
@@ -62,7 +62,7 @@ def estimate_token_cost(prompt_tokens: int, completion_tokens: int, model_name: 
       - mistral-small: $0.20 input / $0.60 output
       - groq/gpt-oss-120b: $0.05 input / $0.08 output
     """
-    m = model_name.lower()
+    m = (model_name or "gpt-4o-mini").lower()
     if "mistral" in m:
         input_rate = 0.20 / 1_000_000
         output_rate = 0.60 / 1_000_000
@@ -133,6 +133,8 @@ class TelemetrySpan:
 
     def end(self, output: Any = None, metadata: Optional[Dict[str, Any]] = None, level: str = "DEFAULT"):
         """End the span and record execution metrics."""
+        if self.end_time is not None:
+            return self
         self.end_time = time.perf_counter()
         self.duration_ms = round((self.end_time - self.start_time) * 1000, 2)
         self.status = "SUCCESS" if level != "ERROR" else "ERROR"
@@ -174,9 +176,10 @@ class RAGTrace:
         self.tenant_id = tenant_id
         self.user_id = user_id
         self.session_id = session_id
-        self.metadata = metadata or {}
-        self.tags = tags or []
+        self.metadata = dict(metadata) if metadata else {}
+        self.tags = list(tags) if tags else []
         self.start_time = time.perf_counter()
+        self.end_time: Optional[float] = None
         self.spans: Dict[str, TelemetrySpan] = {}
         self.langfuse_trace = None
 
@@ -258,7 +261,10 @@ class RAGTrace:
 
     def end(self, output: Any = None, metadata: Optional[Dict[str, Any]] = None):
         """Flush trace and finalize metrics."""
-        total_duration_ms = round((time.perf_counter() - self.start_time) * 1000, 2)
+        if self.end_time is not None:
+            return round((self.end_time - self.start_time) * 1000, 2)
+        self.end_time = time.perf_counter()
+        total_duration_ms = round((self.end_time - self.start_time) * 1000, 2)
         if self.langfuse_trace:
             try:
                 update_params = {"metadata": {**self.metadata, **(metadata or {}), "total_duration_ms": total_duration_ms}}

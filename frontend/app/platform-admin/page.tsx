@@ -431,9 +431,9 @@ export default function PlatformAdminDashboard() {
               </thead>
               <tbody className="text-xs divide-y divide-rule font-body">
                 {tenants.map((t) => {
-                  const budget = t.monthly_token_budget || 500000;
-                  const used = t.current_month_tokens || 0;
-                  const pct = Math.min(100, Math.round((used / budget) * 100));
+                  const budget = t.monthly_token_budget ?? 500000;
+                  const used = t.current_month_tokens ?? 0;
+                  const pct = budget > 0 ? Math.min(100, Math.round((used / budget) * 100)) : (used > 0 ? 100 : 0);
                   const barColor = pct >= 90 ? "bg-ruby" : pct >= 75 ? "bg-amber-500" : "bg-emerald-500";
 
                   return (
@@ -588,10 +588,10 @@ export default function PlatformAdminDashboard() {
                 </span>
                 <div className="text-xs font-mono space-y-1">
                   <div>
-                    Used: <strong className="text-ink">{(inspectedTenant.tenant.current_month_tokens || 0).toLocaleString()}</strong>
+                    Used: <strong className="text-ink">{(inspectedTenant.tenant.current_month_tokens ?? 0).toLocaleString()}</strong>
                   </div>
                   <div>
-                    Cap: <strong className="text-accent">{(inspectedTenant.tenant.monthly_token_budget || 500000).toLocaleString()}</strong>
+                    Cap: <strong className="text-accent">{(inspectedTenant.tenant.monthly_token_budget ?? 500000).toLocaleString()}</strong>
                   </div>
                   <div>
                     Reset: <span className="text-muted">{inspectedTenant.tenant.budget_reset_at ? new Date(inspectedTenant.tenant.budget_reset_at).toLocaleDateString() : "Monthly"}</span>
