@@ -540,6 +540,10 @@ class Retriever:
         """Return True if no documents have been indexed yet."""
         return self._store.is_empty()
 
+    def heartbeat(self) -> int:
+        """Return vector store server heartbeat timestamp."""
+        return self._store.heartbeat()
+
     def _expand_query(self, query: str) -> List[str]:
         """
         Use the LLM to generate variations of the user's query to improve recall.

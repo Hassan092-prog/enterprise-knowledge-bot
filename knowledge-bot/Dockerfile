@@ -5,6 +5,7 @@ WORKDIR /app
 # System dependencies for python-docx, pypdf, and OCR
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    curl \
     tesseract-ocr \
     tesseract-ocr-eng \
     poppler-utils \

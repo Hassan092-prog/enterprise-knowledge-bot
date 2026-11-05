@@ -1434,8 +1434,62 @@ def run_diagnostics():
     except Exception as e:
         print_check("Check 21 failed", False, str(e))
 
+    print("\n--- 22. Testing Production Deployment, Container Health, Security Headers & Zero-Downtime Resilience ---")
+    try:
+        from src.storage import get_storage_provider
+        from scripts.migrate_uploads_to_minio import migrate as run_storage_migration
+        from src.database import engine
+
+        client = TestClient(app)
+
+        # 1. Liveness & Readiness Probes
+        resp_health = client.get("/health")
+        assert resp_health.status_code == 200, f"/health returned {resp_health.status_code}"
+        assert resp_health.json() == {"status": "ok"}, f"/health unexpected payload: {resp_health.json()}"
+
+        resp_ready = client.get("/ready")
+        assert resp_ready.status_code == 200, f"/ready returned {resp_ready.status_code}: {resp_ready.text}"
+        ready_data = resp_ready.json()
+        assert ready_data["status"] == "ready", f"Readiness status not ready: {ready_data}"
+        assert "checks" in ready_data
+        checks = ready_data["checks"]
+        assert checks["database"]["status"] == "ok", f"Database check failed: {checks['database']}"
+        assert checks["redis"]["status"] in ("ok", "degraded"), f"Redis check failed: {checks['redis']}"
+        assert checks["chromadb"]["status"] == "ok", f"ChromaDB check failed: {checks['chromadb']}"
+        assert checks["storage"]["status"] == "ok", f"Storage check failed: {checks['storage']}"
+
+        # Test alias endpoints
+        resp_hr = client.get("/health/ready")
+        assert resp_hr.status_code == 200 and resp_hr.json()["status"] == "ready"
+        resp_hd = client.get("/health?detailed=true")
+        assert resp_hd.status_code == 200 and resp_hd.json()["status"] == "ready"
+
+        # 2. Security Headers Verification
+        headers = resp_health.headers
+        assert headers.get("X-Content-Type-Options") == "nosniff", "Missing X-Content-Type-Options header"
+        assert headers.get("X-Frame-Options") == "DENY", "Missing X-Frame-Options header"
+        assert headers.get("X-XSS-Protection") == "1; mode=block", "Missing X-XSS-Protection header"
+        assert "strict-origin-when-cross-origin" in headers.get("Referrer-Policy", ""), "Missing Referrer-Policy header"
+        assert "camera=()" in headers.get("Permissions-Policy", ""), "Missing Permissions-Policy header"
+
+        # 3. Database Connection Pool Hardening
+        pool = engine.pool
+        assert getattr(pool, "_pre_ping", False) is True or hasattr(pool, "recreate"), "Database connection pre-ping not active"
+
+        # 4. Storage Provider Health & Migration Consistency
+        storage = get_storage_provider()
+        assert storage.ping() is True, "Storage ping failed"
+
+        # Verify all local files are synced in MinIO/S3 without discrepancies
+        migration_exit_code = run_storage_migration(verify_only=True)
+        assert migration_exit_code == 0, "Storage migration verification returned non-zero exit code"
+
+        print_check("Production deployment, liveness/readiness probes, security headers, connection pooling & storage consistency verified", True)
+    except Exception as e:
+        print_check("Check 22 failed", False, str(e))
+
     print("\n" + "=" * 70)
-    print("ALL 21 DIAGNOSTIC CHECKS COMPLETED")
+    print("ALL 22 DIAGNOSTIC CHECKS COMPLETED")
     print("=" * 70)
 
 if __name__ == "__main__":

@@ -105,6 +105,29 @@ def test_health_check(client):
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
+def test_readiness_check(client, mock_retriever):
+    mock_retriever.heartbeat.return_value = 123456789
+    with patch("src.storage.get_storage_provider") as mock_storage_factory:
+        mock_storage = MagicMock()
+        mock_storage.ping.return_value = True
+        mock_storage.__class__.__name__ = "MockStorageProvider"
+        mock_storage_factory.return_value = mock_storage
+        response = client.get("/ready")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ready"
+        assert "checks" in data
+        assert data["checks"]["database"]["status"] == "ok"
+        assert data["checks"]["chromadb"]["status"] == "ok"
+        assert data["checks"]["storage"]["status"] == "ok"
+
+def test_security_headers(client):
+    response = client.get("/health")
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers["X-Frame-Options"] == "DENY"
+    assert response.headers["X-XSS-Protection"] == "1; mode=block"
+    assert "strict-origin-when-cross-origin" in response.headers["Referrer-Policy"]
+
 def test_list_documents(client, mock_retriever):
     mock_retriever.list_sources_by_type.return_value = {
         "personal": ["personal.pdf"],

@@ -99,6 +99,10 @@ class VectorStore:
         self._backfill_legacy_chunks(1)
         self._build_all_bm25()
 
+    def heartbeat(self) -> int:
+        """Return ChromaDB server heartbeat timestamp."""
+        return self._client.heartbeat()
+
     def _backfill_legacy_chunks(self, default_tenant_id: int = 1):
         """
         Backfill any legacy chunks stored before multi-tenancy was enabled.

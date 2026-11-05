@@ -21,6 +21,8 @@ from src.config import (
     S3_SECRET_KEY,
     S3_BUCKET_NAME,
     S3_REGION,
+    S3_MAX_POOL_CONNECTIONS,
+    S3_MAX_RETRIES,
     UPLOAD_DIR,
 )
 
@@ -87,6 +89,16 @@ class BaseStorageProvider(ABC):
     @abstractmethod
     def object_exists(self, key: str) -> bool:
         """Check if object exists under key."""
+        pass
+
+    @abstractmethod
+    def get_object_size(self, key: str) -> Optional[int]:
+        """Return size of object in bytes, or None if not found."""
+        pass
+
+    @abstractmethod
+    def ping(self) -> bool:
+        """Healthcheck check if storage engine is reachable and writable."""
         pass
 
     @abstractmethod
@@ -160,6 +172,18 @@ class LocalStorageProvider(BaseStorageProvider):
     def object_exists(self, key: str) -> bool:
         return self._resolve_path(key).exists()
 
+    def get_object_size(self, key: str) -> Optional[int]:
+        path = self._resolve_path(key)
+        if not path.exists() or not path.is_file():
+            return None
+        return path.stat().st_size
+
+    def ping(self) -> bool:
+        try:
+            return self.base_dir.exists() and os.access(str(self.base_dir), os.W_OK)
+        except Exception:
+            return False
+
     def list_objects(self, prefix: str = "") -> List[str]:
         clean_prefix = prefix.lstrip("/\\")
         target_dir = self.base_dir / clean_prefix
@@ -206,7 +230,12 @@ class S3StorageProvider(BaseStorageProvider):
             aws_access_key_id=self.access_key,
             aws_secret_access_key=self.secret_key,
             region_name=self.region_name,
-            config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+            config=Config(
+                signature_version="s3v4",
+                s3={"addressing_style": "path"},
+                max_pool_connections=S3_MAX_POOL_CONNECTIONS,
+                retries={"max_attempts": S3_MAX_RETRIES, "mode": "standard"},
+            ),
         )
         self._ensure_bucket_exists()
 
@@ -275,6 +304,22 @@ class S3StorageProvider(BaseStorageProvider):
             self.s3_client.head_object(Bucket=self.bucket_name, Key=clean_key)
             return True
         except ClientError:
+            return False
+
+    def get_object_size(self, key: str) -> Optional[int]:
+        clean_key = key.lstrip("/")
+        try:
+            resp = self.s3_client.head_object(Bucket=self.bucket_name, Key=clean_key)
+            return resp.get("ContentLength")
+        except ClientError:
+            return None
+
+    def ping(self) -> bool:
+        try:
+            self.s3_client.head_bucket(Bucket=self.bucket_name)
+            return True
+        except Exception as e:
+            logger.warning(f"S3Storage ping check failed: {e}")
             return False
 
     def list_objects(self, prefix: str = "") -> List[str]:

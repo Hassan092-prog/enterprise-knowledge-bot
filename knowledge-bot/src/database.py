@@ -12,9 +12,22 @@ logger = get_logger(__name__)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 if DATABASE_URL:
-    # Use PostgreSQL (Production)
+    # Use PostgreSQL (Production Hardened Connection Pool)
+    from src.config import (
+        DB_POOL_SIZE,
+        DB_MAX_OVERFLOW,
+        DB_POOL_TIMEOUT,
+        DB_POOL_RECYCLE,
+    )
     SQLALCHEMY_DATABASE_URL = DATABASE_URL
-    engine = create_engine(SQLALCHEMY_DATABASE_URL)
+    engine = create_engine(
+        SQLALCHEMY_DATABASE_URL,
+        pool_pre_ping=True,
+        pool_recycle=DB_POOL_RECYCLE,
+        pool_size=DB_POOL_SIZE,
+        max_overflow=DB_MAX_OVERFLOW,
+        pool_timeout=DB_POOL_TIMEOUT,
+    )
 else:
     # Fallback to local SQLite (Development)
     SQLALCHEMY_DATABASE_URL = f"sqlite:///{DATA_DIR / 'chat.db'}"

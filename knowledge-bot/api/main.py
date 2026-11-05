@@ -10,6 +10,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 import re
 import json
+from contextlib import asynccontextmanager
 
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
@@ -55,11 +56,50 @@ if ENVIRONMENT == "production" and ("*" in (CORS_ORIGINS or []) or not CORS_ORIG
 
 cors_allowed = CORS_ORIGINS if CORS_ORIGINS else ([] if ENVIRONMENT == "production" else ["*"])
 
-app = FastAPI(title="Enterprise Knowledge Bot API")
+# Initialize Retriever singleton
+retriever = None
+
+def get_retriever() -> Retriever:
+    global retriever
+    if retriever is None:
+        from src.config import validate_config
+        validate_config()
+        run_db_migrations()
+        retriever = Retriever()
+    return retriever
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Application startup: validate configuration, run migrations, warm singleton
+    try:
+        get_retriever()
+    except Exception as e:
+        api_logger.error(f"Application startup initialization warning: {e}", exc_info=True)
+    yield
+    # Application shutdown: cleanup database connection pool
+    try:
+        engine.dispose()
+    except Exception:
+        pass
+
+app = FastAPI(title="Enterprise Knowledge Bot API", lifespan=lifespan)
 
 # Mount rate limiting state & middleware
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)
+
+# Security headers middleware (OWASP hardening)
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if ENVIRONMENT == "production" or request.url.scheme == "https":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
 
 # Setup CORS to allow Next.js frontend to communicate securely
 app.add_middleware(
@@ -141,22 +181,6 @@ async def global_exception_handler(request: Request, exc: Exception):
         }
     )
 
-# Initialize Retriever singleton
-retriever = None
-
-def get_retriever() -> Retriever:
-    global retriever
-    if retriever is None:
-        from src.config import validate_config
-        validate_config()
-        run_db_migrations()
-        retriever = Retriever()
-    return retriever
-
-@app.on_event("startup")
-async def startup_event():
-    get_retriever()
-
 class QueryRequest(BaseModel):
     query: str
     session_id: int
@@ -165,8 +189,119 @@ class SessionTitleUpdate(BaseModel):
     title: str
 
 @app.get("/health")
-def health_check():
+def health_check(detailed: bool = False):
+    """
+    Liveness probe endpoint.
+    Returns lightweight health status, or full dependency diagnostics when detailed=True.
+    """
+    if detailed:
+        return readiness_check()
     return {"status": "ok"}
+
+@app.get("/ready")
+@app.get("/health/ready")
+def readiness_check():
+    """
+    Readiness probe endpoint.
+    Performs deep dependency checks:
+    - PostgreSQL database (SELECT 1)
+    - Redis task queue / limiter
+    - ChromaDB vector store heartbeat
+    - Distributed object storage (S3 / MinIO) ping
+    Returns HTTP 200 if all critical dependencies are ready, HTTP 503 if any critical dependency fails.
+    """
+    from sqlalchemy import text
+    from src.storage import get_storage_provider
+    import redis
+
+    checks = {}
+    is_ready = True
+
+    # 1. Database check
+    t0 = time.perf_counter()
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        checks["database"] = {
+            "status": "ok",
+            "latency_ms": round((time.perf_counter() - t0) * 1000, 2)
+        }
+    except Exception as e:
+        is_ready = False
+        checks["database"] = {
+            "status": "error",
+            "error": str(e)
+        }
+
+    # 2. Redis check
+    t0 = time.perf_counter()
+    try:
+        from src.config import REDIS_URL
+        r = redis.from_url(REDIS_URL, socket_timeout=2)
+        r.ping()
+        checks["redis"] = {
+            "status": "ok",
+            "latency_ms": round((time.perf_counter() - t0) * 1000, 2)
+        }
+    except Exception as e:
+        checks["redis"] = {
+            "status": "degraded",
+            "warning": str(e)
+        }
+
+    # 3. ChromaDB check
+    t0 = time.perf_counter()
+    try:
+        r = get_retriever()
+        hb = r.heartbeat()
+        checks["chromadb"] = {
+            "status": "ok",
+            "heartbeat": hb,
+            "latency_ms": round((time.perf_counter() - t0) * 1000, 2)
+        }
+    except Exception as e:
+        is_ready = False
+        checks["chromadb"] = {
+            "status": "error",
+            "error": str(e)
+        }
+
+    # 4. Storage check
+    t0 = time.perf_counter()
+    try:
+        storage = get_storage_provider()
+        ok = storage.ping()
+        if ok:
+            checks["storage"] = {
+                "status": "ok",
+                "backend": storage.__class__.__name__,
+                "latency_ms": round((time.perf_counter() - t0) * 1000, 2)
+            }
+        else:
+            is_ready = False
+            checks["storage"] = {
+                "status": "error",
+                "backend": storage.__class__.__name__,
+                "error": "Storage ping check failed"
+            }
+    except Exception as e:
+        is_ready = False
+        checks["storage"] = {
+            "status": "error",
+            "error": str(e)
+        }
+
+    payload = {
+        "status": "ready" if is_ready else "unhealthy",
+        "environment": ENVIRONMENT,
+        "version": "2.2.0",
+        "checks": checks,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+    if not is_ready:
+        return JSONResponse(status_code=503, content=payload)
+    return payload
 
 @app.get("/documents")
 def list_documents(current_user: User = Depends(get_current_user)):

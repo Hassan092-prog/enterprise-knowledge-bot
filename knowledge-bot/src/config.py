@@ -231,6 +231,15 @@ def get_tenant_upload_dir(tenant_id: int) -> Path:
 # Activity log retention
 ACTIVITY_LOG_RETENTION_DAYS: int = int(os.getenv("ACTIVITY_LOG_RETENTION_DAYS", "90"))
 
+# Task queue & rate limiter Redis URL
+REDIS_URL: str = os.getenv("REDIS_URL", "redis://redis:6379/0")
+
+# Database connection pool settings (PostgreSQL)
+DB_POOL_SIZE: int = int(os.getenv("DB_POOL_SIZE", "10"))
+DB_MAX_OVERFLOW: int = int(os.getenv("DB_MAX_OVERFLOW", "20"))
+DB_POOL_TIMEOUT: int = int(os.getenv("DB_POOL_TIMEOUT", "30"))
+DB_POOL_RECYCLE: int = int(os.getenv("DB_POOL_RECYCLE", "1800"))
+
 # Allowed CORS origins
 CORS_ORIGINS: list[str] = [
     origin.strip()
@@ -249,6 +258,8 @@ S3_ACCESS_KEY: str = os.getenv("S3_ACCESS_KEY", "minioadmin")
 S3_SECRET_KEY: str = os.getenv("S3_SECRET_KEY", "minioadmin")
 S3_BUCKET_NAME: str = os.getenv("S3_BUCKET_NAME", "enterprise-documents")
 S3_REGION: str = os.getenv("S3_REGION", "us-east-1")
+S3_MAX_POOL_CONNECTIONS: int = int(os.getenv("S3_MAX_POOL_CONNECTIONS", "25"))
+S3_MAX_RETRIES: int = int(os.getenv("S3_MAX_RETRIES", "3"))
 
 # ── Observability & LLM Telemetry (Langfuse) ─────────────────────────────
 LANGFUSE_PUBLIC_KEY: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")
