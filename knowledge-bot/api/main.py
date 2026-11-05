@@ -388,8 +388,22 @@ def delete_document(filename: str, current_user: User = Depends(get_current_user
     }
     metadata = r._store._collection.get(where=where_filter, include=["metadatas"])
 
+    from src.storage import get_storage_provider, get_object_key
+    storage = get_storage_provider()
+    key_personal = get_object_key(tenant_id=current_user.tenant_id, user_id=current_user.id, filename=clean_name, is_global=False)
+    key_global = get_object_key(tenant_id=current_user.tenant_id, user_id=None, filename=clean_name, is_global=True)
+    tenant_dir = get_tenant_upload_dir(current_user.tenant_id)
+    file_path = tenant_dir / clean_name
+
+    has_chroma = bool(metadata and metadata.get("metadatas"))
+    has_storage = storage.object_exists(key_personal) or storage.object_exists(key_global)
+    has_disk = file_path.exists()
+
+    if not has_chroma and not has_storage and not has_disk:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
     is_global = False
-    if metadata and metadata.get("metadatas"):
+    if has_chroma:
         meta = metadata["metadatas"][0]
         is_global = meta.get("is_global") == 1
         owner_id = meta.get("user_id")
@@ -397,6 +411,10 @@ def delete_document(filename: str, current_user: User = Depends(get_current_user
         if not is_global and owner_id != current_user.id:
             raise HTTPException(status_code=403, detail="Forbidden: You do not own this document.")
         if is_global and current_user.role not in ["superadmin", "admin", "editor"]:
+            raise HTTPException(status_code=403, detail="Forbidden: You must be an admin or editor to delete a company document.")
+    elif storage.object_exists(key_global):
+        is_global = True
+        if current_user.role not in ["superadmin", "admin", "editor"]:
             raise HTTPException(status_code=403, detail="Forbidden: You must be an admin or editor to delete a company document.")
 
     # Delete chunks scoped to tenant
@@ -406,12 +424,8 @@ def delete_document(filename: str, current_user: User = Depends(get_current_user
         deleted_count = r._store.delete_source(clean_name, user_id=current_user.id, tenant_id=current_user.tenant_id)
 
     # Cascade delete from object storage
-    from src.storage import get_storage_provider, get_object_key
-    storage = get_storage_provider()
-    key_personal = get_object_key(tenant_id=current_user.tenant_id, user_id=current_user.id, filename=clean_name, is_global=False)
     storage.delete_object(key_personal)
     if is_global or current_user.role in ["superadmin", "admin", "editor"]:
-        key_global = get_object_key(tenant_id=current_user.tenant_id, user_id=None, filename=clean_name, is_global=True)
         storage.delete_object(key_global)
 
     # Delete physical file

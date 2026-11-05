@@ -132,20 +132,27 @@ def delete_global_document(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    from src.storage import get_storage_provider, get_object_key
+    storage = get_storage_provider()
+    storage_key = get_object_key(tenant_id=current_user.tenant_id, user_id=None, filename=clean_name, is_global=True)
+    file_path = get_tenant_upload_dir(current_user.tenant_id) / clean_name
+
+    has_storage = storage.object_exists(storage_key)
+    has_disk = file_path.exists()
+
     deleted_count = r.delete_document(
         clean_name,
         user_id=None,
         tenant_id=current_user.tenant_id,
     )
 
+    if deleted_count == 0 and not has_storage and not has_disk:
+        raise HTTPException(status_code=404, detail="Company document not found.")
+
     # Clean from object storage
-    from src.storage import get_storage_provider, get_object_key
-    storage = get_storage_provider()
-    storage_key = get_object_key(tenant_id=current_user.tenant_id, user_id=None, filename=clean_name, is_global=True)
     storage.delete_object(storage_key)
 
     # Clean from tenant directory if present
-    file_path = get_tenant_upload_dir(current_user.tenant_id) / clean_name
     if file_path.exists():
         try:
             file_path.unlink()

@@ -53,10 +53,16 @@ import hashlib
 # Simple in-memory cache: 1000 items, 24-hour TTL
 _semantic_cache = TTLCache(maxsize=1000, ttl=86400)
 
-def _get_cache_key(query: str, chunks: List[Document]) -> str:
-    """Generate a deterministic hash for the cache key."""
-    chunk_summary = "|".join([c.metadata.get("source", "") + str(c.metadata.get("page", "")) for c in chunks])
-    combined = f"{query.lower().strip()}::{chunk_summary}"
+def _get_cache_key(query: str, chunks: List[Document], chat_history: Optional[List[dict]] = None) -> str:
+    """Generate a deterministic hash for the cache key partitioned strictly by tenant, history, and chunk IDs."""
+    tenant_ids = {str(c.metadata.get("tenant_id", "0")) for c in chunks}
+    tenant_str = ",".join(sorted(tenant_ids))
+    chunk_summary = "|".join([
+        f"{c.metadata.get('tenant_id', '')}:{c.metadata.get('source', '')}:{c.metadata.get('page', '')}:{c.metadata.get('chunk_id', '')}"
+        for c in chunks
+    ])
+    history_str = "|".join([f"{m.get('role', '')}:{m.get('content', '')}" for m in (chat_history or [])])
+    combined = f"tenant={tenant_str}::query={query.lower().strip()}::hist={history_str}::chunks={chunk_summary}"
     return hashlib.md5(combined.encode()).hexdigest()
 
 from src.config import (
@@ -377,7 +383,7 @@ def generate_answer(
     context = build_context_block(chunks)
     history_block = _format_history_block(chat_history)
 
-    cache_key = _get_cache_key(query, chunks)
+    cache_key = _get_cache_key(query, chunks, chat_history=chat_history)
     if cache_key in _semantic_cache:
         logger.info("Semantic Cache HIT for query: '%s'", query[:60])
         return _semantic_cache[cache_key]

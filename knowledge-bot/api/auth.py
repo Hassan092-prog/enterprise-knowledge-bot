@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
+from datetime import datetime
 import logging
 
 from src.models import User, AccessRequest, Tenant
@@ -79,7 +80,10 @@ def register(request: Request, user_data: UserCreate, db: Session = Depends(get_
                     name=company_clean,
                     slug=slug,
                     status="active",
-                    join_code=generate_join_code()
+                    join_code=generate_join_code(),
+                    monthly_token_budget=500000,
+                    current_month_tokens=0,
+                    budget_reset_at=datetime.utcnow()
                 )
                 db.add(tenant)
                 db.flush()
@@ -359,7 +363,10 @@ def oauth_callback(provider: str, request: OAuthCallbackRequest, db: Session = D
                     slug=slug,
                     status="active",
                     join_code=generate_join_code(),
-                    allowed_domains=email_domain if email_domain not in PUBLIC_EMAIL_DOMAINS else None
+                    allowed_domains=email_domain if email_domain not in PUBLIC_EMAIL_DOMAINS else None,
+                    monthly_token_budget=500000,
+                    current_month_tokens=0,
+                    budget_reset_at=datetime.utcnow()
                 )
                 db.add(tenant)
                 db.flush()

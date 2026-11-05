@@ -53,8 +53,8 @@ def run_tabular_query(query: str, filename: str, tenant_id: Optional[int] = None
             content_bytes = None
             if storage.object_exists(key_global):
                 content_bytes = storage.download_bytes(key_global)
-            else:
-                prefix = f"tenants/{tenant_id}/" if tenant_id else ""
+            elif tenant_id:
+                prefix = f"tenants/{tenant_id}/"
                 objs = storage.list_objects(prefix=prefix)
                 for obj in objs:
                     if obj.endswith(f"/{clean_name}") or obj == clean_name:
@@ -89,6 +89,7 @@ def run_tabular_query(query: str, filename: str, tenant_id: Optional[int] = None
 
     llm = get_llm(temperature=0, model=tabular_model)
 
+    engine = None
     try:
         # Load CSV into an in-memory SQLite database
         engine = create_engine("sqlite:///:memory:")
@@ -141,11 +142,7 @@ def run_tabular_query(query: str, filename: str, tenant_id: Optional[int] = None
             verbose=True,
             handle_parsing_errors=True
         )
-    except Exception as e:
-        logger.error(f"Error creating SQL agent: {e}")
-        return f"Error creating tabular agent: {str(e)}"
 
-    try:
         response = agent.invoke({"input": query})
         output = response.get("output", "No output generated.")
         if output.strip().lower().rstrip(".") == "i don't know":
@@ -158,7 +155,8 @@ def run_tabular_query(query: str, filename: str, tenant_id: Optional[int] = None
         logger.error(f"Tabular query error: {e}")
         return f"Error executing tabular query: {str(e)}"
     finally:
-        try:
-            engine.dispose()
-        except Exception:
-            pass
+        if engine is not None:
+            try:
+                engine.dispose()
+            except Exception:
+                pass
