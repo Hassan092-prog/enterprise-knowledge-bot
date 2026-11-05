@@ -187,7 +187,10 @@ def login(request: Request, user_data: UserCreate, db: Session = Depends(get_db)
         "role": user.role,
         "tenant_id": user.tenant_id,
         "tenant_name": tenant_name,
-        "is_platform_admin": bool(user.is_platform_admin)
+        "is_platform_admin": bool(user.is_platform_admin),
+        "username": user.username,
+        "email": getattr(user, "email", None),
+        "avatar_url": getattr(user, "avatar_url", None)
     }
 
 @router.get("/me")

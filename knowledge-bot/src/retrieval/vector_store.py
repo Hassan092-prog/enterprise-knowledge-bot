@@ -485,6 +485,24 @@ class VectorStore:
         logger.info("Purged %d chunks for tenant %d", count, tenant_id)
         return count
 
+    def delete_all_user_personal_chunks(self, user_id: int, tenant_id: int) -> int:
+        """Purge all personal (non-global) vector chunks for an offboarded user."""
+        where = {
+            "$and": [
+                {"tenant_id": tenant_id},
+                {"user_id": user_id},
+                {"is_global": 0}
+            ]
+        }
+        results = self._collection.get(where=where, include=[])
+        if not results or not results.get("ids"):
+            return 0
+        count = len(results["ids"])
+        self._collection.delete(ids=results["ids"])
+        self._build_bm25_for_tenant(tenant_id)
+        logger.info("Purged %d personal chunks for user %d (tenant %d)", count, user_id, tenant_id)
+        return count
+
     def get_stats(self, user_id: Optional[int] = None, tenant_id: Optional[int] = None) -> dict:
         """Return summary statistics strictly scoped to a tenant."""
         sources = self.list_sources(user_id=user_id, tenant_id=tenant_id)

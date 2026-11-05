@@ -62,9 +62,6 @@ retriever = None
 def get_retriever() -> Retriever:
     global retriever
     if retriever is None:
-        from src.config import validate_config
-        validate_config()
-        run_db_migrations()
         retriever = Retriever()
     return retriever
 
@@ -72,6 +69,9 @@ def get_retriever() -> Retriever:
 async def lifespan(app: FastAPI):
     # Application startup: validate configuration, run migrations, warm singleton
     try:
+        from src.config import validate_config
+        validate_config()
+        run_db_migrations()
         get_retriever()
     except Exception as e:
         api_logger.error(f"Application startup initialization warning: {e}", exc_info=True)
@@ -102,10 +102,12 @@ async def add_security_headers(request: Request, call_next):
     return response
 
 # Setup CORS to allow Next.js frontend to communicate securely
+cors_regex = None if ENVIRONMENT == "production" else r"^https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|.*\.nurexia\.co)(:\d+)?$"
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_allowed,
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|.*\.nurexia\.co)(:\d+)?$",
+    allow_origin_regex=cors_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

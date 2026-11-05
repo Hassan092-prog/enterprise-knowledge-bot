@@ -26,8 +26,10 @@ from src.config import (
 )
 from src.database import generate_join_code
 from src.activity import log_activity
+from src.logger import get_logger
 from api.limiter import limiter
 
+logger = get_logger(__name__)
 router = APIRouter()
 
 # ──────────────────────────────────────────────────────────────────
@@ -268,6 +270,19 @@ def remove_user(
     db.query(PendingTransfer).filter(
         (PendingTransfer.to_user_id == target_user.id) | (PendingTransfer.from_user_id == target_user.id)
     ).delete()
+
+    # Purge offboarded member's personal documents from ChromaDB and storage
+    try:
+        from src.retrieval.vector_store import VectorStore
+        from src.storage import get_storage_provider
+        vs = VectorStore()
+        vs.delete_all_user_personal_chunks(user_id=target_user.id, tenant_id=current_user.tenant_id)
+        storage = get_storage_provider()
+        prefix = f"tenants/{current_user.tenant_id}/personal/{target_user.id}/"
+        for obj_key in storage.list_objects(prefix=prefix):
+            storage.delete_object(obj_key)
+    except Exception as cleanup_err:
+        logger.warning(f"Notice purging personal documents for offboarded user {target_user.id}: {cleanup_err}")
 
     db.delete(target_user)
     db.commit()
@@ -704,7 +719,7 @@ def _parse_details_safe(details_raw: any):
 
 @router.get("/activity/export")
 def export_tenant_activity(
-    format: str = Query("csv", regex="^(csv|json)$"),
+    format: str = Query("csv", pattern="^(csv|json)$"),
     category: Optional[str] = None,
     user_id: Optional[int] = None,
     search: Optional[str] = None,

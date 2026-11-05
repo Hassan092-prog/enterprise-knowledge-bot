@@ -382,6 +382,8 @@ def run_diagnostics():
 
         # 2. Verify member offboarding and self-deletion defense
         with SessionLocal() as db:
+            db.query(User).filter(User.username.in_(["test_audit_admin", "test_audit_member"])).delete()
+            db.commit()
             admin_u = User(username="test_audit_admin", hashed_password="pw", role="superadmin", tenant_id=1)
             member_u = User(username="test_audit_member", hashed_password="pw", role="user", tenant_id=1)
             db.add(admin_u)

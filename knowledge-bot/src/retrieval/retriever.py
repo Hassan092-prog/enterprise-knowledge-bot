@@ -262,6 +262,10 @@ class Retriever:
         logger.info("Deleted document '%s' (tenant=%s, %d chunks)", source_filename, tenant_id, deleted)
         return deleted
 
+    def purge_user_personal_documents(self, user_id: int, tenant_id: int) -> int:
+        """Purge all personal vector chunks for an offboarded user."""
+        return self._store.delete_all_user_personal_chunks(user_id=user_id, tenant_id=tenant_id)
+
     # ──────────────────────────────────────────────────────────────────
     # RETRIEVAL WITH RE-RANKING
     # ──────────────────────────────────────────────────────────────────
