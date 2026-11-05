@@ -83,7 +83,12 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
-app = FastAPI(title="Enterprise Knowledge Bot API", lifespan=lifespan)
+app = FastAPI(
+    title="Enterprise Knowledge Bot API",
+    version="2.0.0",
+    description="Production-grade, multi-tenant RAG and Knowledge Graph API for enterprise document retrieval, tabular analytics, and multi-hop relationship reasoning.",
+    lifespan=lifespan,
+)
 
 # Mount rate limiting state & middleware
 app.state.limiter = limiter
