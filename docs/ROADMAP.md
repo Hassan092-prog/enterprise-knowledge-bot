@@ -17,11 +17,11 @@
 | **Phase 5** | **Relational Migration & Auth** | PostgreSQL 15, JWT authentication, sessions | ✅ **Completed** |
 | **Phase 6** | **Next.js 15 Streaming Frontend** | React 19, Markdown SSE streaming, mentions | ✅ **Completed** |
 | **Phase 7** | **Advanced Retrieval & Worker Scaling** | Standalone ChromaDB, Celery + Redis, RRF, CrossEncoder, MMR, 3-tier RBAC | ✅ **Completed** |
-| **Phase 8** | **Ingestion Transparency & Polling** | Real-time upload status & task polling | 🟡 **Next Up** |
-| **Phase 9** | **Distributed Object Storage (MinIO/S3)** | Decoupled cloud document storage | 📋 Planned |
-| **Phase 10** | **Graph RAG & Entity Relationships** | Knowledge Graph integration (Neo4j) | 📋 Planned |
-| **Phase 11** | **Enterprise SSO & SAML / OAuth2** | Corporate Identity Providers (Okta/Azure) | 📋 Planned |
-| **Phase 12** | **Observability & Cost Governance** | OpenTelemetry, Langfuse, rate limiting | 📋 Planned |
+| **Phase 8** | **Ingestion Transparency & Polling** | Real-time upload status & task polling | ✅ **Completed** |
+| **Phase 9** | **Distributed Object Storage (MinIO/S3)** | Decoupled cloud document storage & presigned URLs | ✅ **Completed** |
+| **Phase 10** | **Graph RAG & Knowledge Graph Engine** | Multi-tenant NetworkX/PostgreSQL Graph Store & Subgraph Fusion | ✅ **Completed** |
+| **Phase 11** | **Observability & Cost Governance** | OpenTelemetry spans, tenant token accounting & budget caps | ✅ **Completed** |
+| **Phase 12** | **Enterprise SSO & SAML / OAuth2** | Corporate Identity Providers (Okta / Azure AD / OIDC) | 🟡 **Next Up** |
 
 ---
 

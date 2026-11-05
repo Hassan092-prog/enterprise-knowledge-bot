@@ -118,3 +118,41 @@ class PendingTransfer(Base):
     tenant = relationship("Tenant", back_populates="transfers")
     from_user = relationship("User", foreign_keys=[from_user_id])
     to_user = relationship("User", foreign_keys=[to_user_id])
+
+
+class KnowledgeNode(Base):
+    __tablename__ = "knowledge_nodes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    entity_id = Column(String, nullable=False, index=True)      # Canonical / normalized ID (e.g. "acme_corporation")
+    name = Column(String, nullable=False)                       # Display label (e.g. "Acme Corporation")
+    entity_type = Column(String, nullable=False, index=True)    # ORGANIZATION, SYSTEM, POLICY, INCIDENT, DEPARTMENT, METRIC, PERSON
+    description = Column(Text, nullable=True)
+    source_documents = Column(Text, nullable=True)              # JSON-encoded list of source filenames
+    properties_json = Column(Text, nullable=True)               # Extra attributes/metadata in JSON
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_node_tenant_entity", "tenant_id", "entity_id", unique=True),
+    )
+
+
+class KnowledgeEdge(Base):
+    __tablename__ = "knowledge_edges"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_entity_id = Column(String, nullable=False, index=True)
+    target_entity_id = Column(String, nullable=False, index=True)
+    relation_type = Column(String, nullable=False, index=True)  # AFFECTS, GOVERNED_BY, RESPONSIBLE_FOR, DEPLOYED_ON, etc.
+    weight = Column(Integer, default=1)
+    context_snippet = Column(Text, nullable=True)
+    source_document = Column(String, nullable=True, index=True)
+    properties_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_edge_tenant_source_target", "tenant_id", "source_entity_id", "target_entity_id", "relation_type"),
+    )

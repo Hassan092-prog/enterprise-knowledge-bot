@@ -22,6 +22,7 @@ type SourceCitation = {
   content?: string;
   is_global?: boolean;
   relevance_rank?: number;
+  is_graph?: boolean;
 };
 
 type Message = {
@@ -1253,13 +1254,21 @@ export default function Home() {
                         key={sIdx}
                         type="button"
                         onClick={() => setSelectedCitation(src)}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-base bg-paper hover:bg-accent-subtle border border-rule hover:border-accent/40 text-xs font-mono text-ink hover:text-accent transition-all cursor-pointer group shadow-2xs"
-                        title="Click to inspect verified source excerpt"
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-base transition-all cursor-pointer group shadow-2xs text-xs font-mono ${
+                          src.is_graph
+                            ? "bg-purple-950/20 hover:bg-purple-900/30 border border-purple-500/30 text-purple-300 hover:text-purple-200"
+                            : "bg-paper hover:bg-accent-subtle border border-rule hover:border-accent/40 text-ink hover:text-accent"
+                        }`}
+                        title={src.is_graph ? "Knowledge Graph Entity relationship" : "Click to inspect verified source excerpt"}
                       >
-                        <span className="text-muted group-hover:text-accent text-[11px]">📄</span>
+                        <span className="text-[11px]">{src.is_graph ? "🌐" : "📄"}</span>
                         <span className="truncate max-w-[170px]">{src.source}</span>
                         {src.page && src.page !== "?" && (
-                          <span className="text-[10px] px-1 py-0.2 rounded bg-paper-3 text-muted border border-rule/60 group-hover:border-accent/30 group-hover:text-accent font-semibold">
+                          <span className={`text-[10px] px-1 py-0.2 rounded border font-semibold ${
+                            src.is_graph
+                              ? "bg-purple-500/20 text-purple-300 border-purple-500/40"
+                              : "bg-paper-3 text-muted border-rule/60 group-hover:border-accent/30 group-hover:text-accent"
+                          }`}>
                             {src.page}
                           </span>
                         )}

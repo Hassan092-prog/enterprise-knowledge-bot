@@ -47,6 +47,7 @@ from api.dependencies import get_current_user
 from api.auth import router as auth_router
 from api.admin import router as admin_router
 from api.platform import router as platform_router
+from api.graph import router as graph_router
 
 api_logger = logging.getLogger("api.main")
 
@@ -116,6 +117,7 @@ app.add_middleware(
 app.include_router(auth_router, prefix="/auth")
 app.include_router(admin_router, prefix="/admin")
 app.include_router(platform_router, prefix="/platform")
+app.include_router(graph_router)
 
 from fastapi.exceptions import RequestValidationError
 
@@ -830,7 +832,30 @@ def query_bot(
         trace=trace
     )
 
+    # Graph RAG fusion: retrieve multi-hop relational context
+    from src.config import GRAPH_ENABLED
+    graph_ctx = ""
+    graph_citations = []
+    if GRAPH_ENABLED and current_user.tenant_id:
+        try:
+            from src.graph.fusion import retrieve_graph_context
+            g_res = retrieve_graph_context(effective_query, tenant_id=current_user.tenant_id)
+            graph_ctx = g_res.get("context_block", "")
+            graph_citations = g_res.get("graph_citations", [])
+        except Exception as ge:
+            api_logger.warning("Graph context retrieval notice: %s", ge)
+
     citations = extract_citation_metadata(chunks)
+    for gc in graph_citations[:5]:
+        citations.append({
+            "source": f"Knowledge Graph: {gc['name']}",
+            "chunk_id": f"graph_{gc['id']}",
+            "page": f"Entity [{gc['type']}]",
+            "content": f"Connected entity with {gc['degree']} relationships across enterprise documents.",
+            "is_global": True,
+            "relevance_rank": 99,
+            "is_graph": True,
+        })
     sources_payload = json.dumps(citations)
 
     def generate():
@@ -839,7 +864,12 @@ def query_bot(
         ttft = None
         stream_start = time.perf_counter()
         try:
-            for chunk in stream_answer(effective_query, chunks, chat_history=chat_history):
+            for chunk in stream_answer(
+                effective_query,
+                chunks,
+                chat_history=chat_history,
+                graph_context=graph_ctx
+            ):
                 if ttft is None:
                     ttft = round((time.perf_counter() - stream_start) * 1000, 2)
                 full_response += chunk

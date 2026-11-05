@@ -266,4 +266,15 @@ LANGFUSE_PUBLIC_KEY: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")
 LANGFUSE_SECRET_KEY: str = os.getenv("LANGFUSE_SECRET_KEY", "")
 LANGFUSE_HOST: str = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
 
+# ── Knowledge Graph & Hybrid Graph RAG Settings (Phase 7) ─────────────────
+GRAPH_ENABLED: bool = os.getenv("GRAPH_ENABLED", "true").lower() in ("true", "1", "yes")
+GRAPH_BACKEND: str = os.getenv("GRAPH_BACKEND", "networkx").lower()  # 'networkx' | 'neo4j'
+GRAPH_EXTRACTION_MODE: str = os.getenv("GRAPH_EXTRACTION_MODE", "hybrid").lower()  # 'rule' | 'llm' | 'hybrid'
+GRAPH_MAX_HOPS: int = int(os.getenv("GRAPH_MAX_HOPS", "2"))
+GRAPH_MAX_SUBGRAPH_NODES: int = int(os.getenv("GRAPH_MAX_SUBGRAPH_NODES", "30"))
+NEO4J_URI: str = os.getenv("NEO4J_URI", "bolt://neo4j:7687")
+NEO4J_USER: str = os.getenv("NEO4J_USER", "neo4j")
+NEO4J_PASSWORD: str = os.getenv("NEO4J_PASSWORD", "password")
+
+
 

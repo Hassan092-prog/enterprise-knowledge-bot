@@ -1490,8 +1490,111 @@ def run_diagnostics():
     except Exception as e:
         print_check("Check 22 failed", False, str(e))
 
+    # ──────────────────────────────────────────────────────────────────
+    # CHECK 23: Pillar 10 — Knowledge Graph & Hybrid Graph RAG Engine
+    # ──────────────────────────────────────────────────────────────────
+    print("\n--- 23. Testing Knowledge Graph & Hybrid Graph RAG Engine ---")
+    try:
+        from src.graph.base import GraphNodeData, GraphEdgeData
+        from src.graph.networkx_store import NetworkXGraphStore, normalize_entity_id
+        from src.graph.extractor import GraphExtractor
+        from src.graph.fusion import retrieve_graph_context
+        from src.graph import get_graph_store
+        from src.auth import create_access_token
+
+        graph_store = get_graph_store()
+        t_diag1 = 9801
+        t_diag2 = 9802
+
+        with SessionLocal() as db:
+            for tid, tname in [(t_diag1, "Diag Graph Org 1"), (t_diag2, "Diag Graph Org 2")]:
+                if not db.query(Tenant).filter(Tenant.id == tid).first():
+                    db.add(Tenant(id=tid, name=tname, slug=slugify(tname), join_code=f"DG-{tid}"))
+            db.query(User).filter(User.username == "diag_graph_admin").delete()
+            db.add(User(username="diag_graph_admin", role="admin", tenant_id=t_diag1))
+            db.commit()
+
+        # 1. Clean previous runs
+        graph_store.delete_tenant_graph(t_diag1)
+        graph_store.delete_tenant_graph(t_diag2)
+
+        # 2. Multi-tenant Graph Isolation
+        n1 = GraphNodeData(id="payment_gw", name="Payment Gateway", entity_type="SYSTEM", source_documents=["inc104.txt"])
+        n2 = GraphNodeData(id="acme_robotics", name="Acme Robotics", entity_type="ORGANIZATION", source_documents=["corp.txt"])
+        graph_store.add_node(t_diag1, n1)
+        graph_store.add_node(t_diag2, n2)
+
+        assert graph_store.get_node(t_diag1, "payment_gw") is not None, "Tenant 1 failed to retrieve its node"
+        assert graph_store.get_node(t_diag1, "acme_robotics") is None, "Tenant 1 leaked Tenant 2 node"
+        assert graph_store.get_node(t_diag2, "acme_robotics") is not None, "Tenant 2 failed to retrieve its node"
+        assert graph_store.get_node(t_diag2, "payment_gw") is None, "Tenant 2 leaked Tenant 1 node"
+
+        # 3. Multi-Hop Graph Traversal
+        # Network: Incident 104 -> AFFECTS -> Payment Gateway <- GOVERNED_BY - Security Policy
+        nodes_t1 = [
+            GraphNodeData(id="incident_report_104", name="Incident Report 104", entity_type="INCIDENT", description="Payment outage", source_documents=["inc104.txt"]),
+            GraphNodeData(id="payment_gw", name="Payment Gateway", entity_type="SYSTEM", description="Card transactions", source_documents=["inc104.txt"]),
+            GraphNodeData(id="sec_policy", name="Enterprise Information Security Policy", entity_type="POLICY", description="Governance standard", source_documents=["policy.txt"]),
+        ]
+        edges_t1 = [
+            GraphEdgeData(source="incident_report_104", target="payment_gw", relation="AFFECTS", source_document="inc104.txt", context_snippet="Service degradation in payment pipeline"),
+            GraphEdgeData(source="sec_policy", target="payment_gw", relation="GOVERNS", source_document="policy.txt", context_snippet="Security policy compliance mandate"),
+        ]
+        graph_store.bulk_add(t_diag1, nodes_t1, edges_t1)
+
+        sub_2hop = graph_store.find_subgraph(t_diag1, ["incident_report_104"], depth=2)
+        sub_node_ids = {n["id"] for n in sub_2hop["nodes"]}
+        assert "incident_report_104" in sub_node_ids, "Missing seed node in subgraph"
+        assert "payment_gw" in sub_node_ids, "Missing 1-hop neighbor in subgraph"
+        assert "sec_policy" in sub_node_ids, "Missing 2-hop connected policy in subgraph"
+        assert len(sub_2hop["edges"]) >= 2, "Missing relationship edges in subgraph"
+
+        # 4. Hybrid Fusion Retrieval Context Block
+        fusion = retrieve_graph_context("What happened during Incident Report 104?", tenant_id=t_diag1)
+        assert "KNOWLEDGE GRAPH" in fusion["context_block"], "Fusion context block missing header"
+        assert "Incident Report 104" in fusion["context_block"], "Fusion context missing incident entity"
+        assert "Payment Gateway" in fusion["context_block"], "Fusion context missing affected system"
+        assert len(fusion["graph_citations"]) >= 2, "Fusion missing graph citations"
+
+        # 5. Graph API Endpoints Verification via TestClient
+        token_t1 = create_access_token(
+            data={"sub": "diag_graph_admin", "user_id": 9898, "tenant_id": t_diag1, "role": "admin"}
+        )
+        api_headers = {"Authorization": f"Bearer {token_t1}"}
+
+        # GET /graph/stats
+        resp_stats = client.get("/graph/stats", headers=api_headers)
+        assert resp_stats.status_code == 200, f"Graph stats failed: {resp_stats.text}"
+        stats_body = resp_stats.json()
+        assert stats_body["node_count"] >= 3, f"Unexpected node count: {stats_body}"
+        assert stats_body["edge_count"] >= 2, f"Unexpected edge count: {stats_body}"
+
+        # GET /graph/subgraph
+        resp_sub = client.get("/graph/subgraph?query=incident%20104&depth=2", headers=api_headers)
+        assert resp_sub.status_code == 200, f"Graph subgraph endpoint failed: {resp_sub.text}"
+        sub_body = resp_sub.json()
+        assert len(sub_body["nodes"]) >= 2, f"Subgraph nodes empty: {sub_body}"
+
+        # 6. Cascade Document Deletion
+        # Deleting inc104.txt should remove incident_report_104 edges, but sec_policy and payment_gw remain
+        graph_store.delete_document_entities(t_diag1, "inc104.txt")
+        assert graph_store.get_node(t_diag1, "incident_report_104") is None, "Failed to purge orphan incident node"
+        assert graph_store.get_node(t_diag1, "sec_policy") is not None, "Wrongfully pruned unrelated policy node"
+
+        # Clean up
+        graph_store.delete_tenant_graph(t_diag1)
+        graph_store.delete_tenant_graph(t_diag2)
+        with SessionLocal() as db:
+            db.query(User).filter(User.username == "diag_graph_admin").delete()
+            db.query(Tenant).filter(Tenant.id.in_([t_diag1, t_diag2])).delete()
+            db.commit()
+
+        print_check("Knowledge Graph, Multi-Tenant Graph Store, Multi-Hop Traversal & Hybrid Fusion verified", True)
+    except Exception as e:
+        print_check("Check 23 failed", False, str(e))
+
     print("\n" + "=" * 70)
-    print("ALL 22 DIAGNOSTIC CHECKS COMPLETED")
+    print("ALL 23 DIAGNOSTIC CHECKS COMPLETED")
     print("=" * 70)
 
 if __name__ == "__main__":

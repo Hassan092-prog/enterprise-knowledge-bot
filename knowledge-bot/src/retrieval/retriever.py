@@ -233,6 +233,23 @@ class Retriever:
             progress_callback=progress_callback,
         )
 
+        # ── Step 5: Knowledge Graph Extraction & Indexing ───────────
+        try:
+            from src.config import GRAPH_ENABLED
+            if GRAPH_ENABLED and tenant_id is not None:
+                if progress_callback:
+                    progress_callback("GRAPH_INDEXING", 90, f"Extracting entities & relations for Knowledge Graph...")
+                from src.graph.extractor import GraphExtractor
+                from src.graph import get_graph_store
+                full_text = "\n\n".join(d.page_content for d in documents)
+                extractor = GraphExtractor()
+                g_nodes, g_edges = extractor.extract_from_text(full_text, source_document=source_filename)
+                if g_nodes or g_edges:
+                    graph_store = get_graph_store()
+                    graph_store.bulk_add(tenant_id=tenant_id, nodes=g_nodes, edges=g_edges)
+        except Exception as graph_err:
+            logger.warning("Notice: Knowledge graph extraction for '%s' encountered non-fatal issue: %s", source_filename, graph_err)
+
         if progress_callback:
             progress_callback("COMPLETED", 100, f"Successfully indexed {chunks_added} chunks.")
 
@@ -256,9 +273,16 @@ class Retriever:
         tenant_id: Optional[int] = None,
     ) -> int:
         """
-        Remove all chunks for a document from the vector store scoped to tenant.
+        Remove all chunks for a document from the vector store scoped to tenant,
+        and cascade-purge corresponding entities from the knowledge graph.
         """
         deleted = self._store.delete_source(source_filename, user_id=user_id, tenant_id=tenant_id)
+        if tenant_id is not None:
+            try:
+                from src.graph import get_graph_store
+                get_graph_store().delete_document_entities(tenant_id=tenant_id, document_name=source_filename)
+            except Exception as ge:
+                logger.warning("Notice: Graph entity purge for '%s' notice: %s", source_filename, ge)
         logger.info("Deleted document '%s' (tenant=%s, %d chunks)", source_filename, tenant_id, deleted)
         return deleted
 

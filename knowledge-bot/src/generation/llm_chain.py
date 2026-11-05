@@ -427,15 +427,19 @@ def stream_answer(
     query: str,
     chunks: List[Document],
     chat_history: Optional[List[dict]] = None,
+    graph_context: Optional[str] = None,
 ) -> Generator[str, None, None]:
     """
-    Stream the LLM's answer token by token with conversational context.
+    Stream the LLM's answer token by token with conversational context and optional knowledge graph context.
     """
-    if not chunks:
+    if not chunks and not graph_context:
         yield "No relevant documents were found to answer your question."
         return
 
-    context = build_context_block(chunks)
+    context = build_context_block(chunks) if chunks else ""
+    if graph_context:
+        context = f"{graph_context}\n\n{context}" if context else graph_context
+
     history_block = _format_history_block(chat_history)
 
     logger.info(

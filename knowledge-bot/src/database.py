@@ -67,7 +67,10 @@ def run_db_migrations():
     Run table creation, schema evolution (adding columns if missing),
     and bootstrap initial tenant and platform superadmin.
     """
-    from src.models import Tenant, User, ChatSession, AccessRequest, ActivityLog, PendingTransfer
+    from src.models import (
+        Tenant, User, ChatSession, AccessRequest, ActivityLog, PendingTransfer,
+        KnowledgeNode, KnowledgeEdge
+    )
 
     logger.info("Initializing database tables and running schema migration...")
     Base.metadata.create_all(bind=engine)

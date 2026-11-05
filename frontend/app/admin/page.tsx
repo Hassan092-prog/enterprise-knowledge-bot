@@ -58,7 +58,7 @@ type PendingTransfer = {
 
 export default function AdminDashboard() {
   const API_URL = getApiUrl();
-  const [activeTab, setActiveTab] = useState<"roster" | "corpus" | "activity" | "settings">("roster");
+  const [activeTab, setActiveTab] = useState<"roster" | "corpus" | "graph" | "activity" | "settings">("roster");
   const [stats, setStats] = useState<Stats | null>(null);
   const [requests, setRequests] = useState<RoleRequest[]>([]);
   const [users, setUsers] = useState<UserData[]>([]);
@@ -77,6 +77,21 @@ export default function AdminDashboard() {
   const [isKeyCopied, setIsKeyCopied] = useState<boolean>(false);
   const [pendingTransfers, setPendingTransfers] = useState<PendingTransfer[]>([]);
   const [transferTargetUserId, setTransferTargetUserId] = useState<number | "">("");
+
+  // Knowledge Graph State (Phase 7)
+  const [graphStats, setGraphStats] = useState<{
+    node_count: number;
+    edge_count: number;
+    entity_types: Record<string, number>;
+    relation_types: Record<string, number>;
+    top_entities: any[];
+  } | null>(null);
+  const [graphSearchQuery, setGraphSearchQuery] = useState<string>("");
+  const [graphDepth, setGraphDepth] = useState<number>(2);
+  const [graphData, setGraphData] = useState<{ nodes: any[]; edges: any[] }>({ nodes: [], edges: [] });
+  const [isLoadingGraph, setIsLoadingGraph] = useState<boolean>(false);
+  const [isRebuildingGraph, setIsRebuildingGraph] = useState<boolean>(false);
+  const [selectedEntityId, setSelectedEntityId] = useState<string | null>(null);
 
   // Enterprise Corporate Domain & SSO Routing (Pillar 8)
   const [allowedDomains, setAllowedDomains] = useState<string>("");
@@ -302,6 +317,49 @@ export default function AdminDashboard() {
     }
   };
 
+  const fetchGraphData = useCallback(async (query = "") => {
+    setIsLoadingGraph(true);
+    try {
+      const statsRes = await authFetch(`${API_URL}/graph/stats`);
+      if (statsRes && statsRes.ok) {
+        const sData = await statsRes.json();
+        setGraphStats(sData);
+      }
+
+      const qParam = query.trim() ? `?query=${encodeURIComponent(query.trim())}&depth=${graphDepth}` : `?depth=${graphDepth}`;
+      const subRes = await authFetch(`${API_URL}/graph/subgraph${qParam}`);
+      if (subRes && subRes.ok) {
+        const gData = await subRes.json();
+        setGraphData({ nodes: gData.nodes || [], edges: gData.edges || [] });
+      }
+    } catch (err) {
+      console.error("Error loading graph data:", err);
+    } finally {
+      setIsLoadingGraph(false);
+    }
+  }, [API_URL, authFetch, graphDepth]);
+
+  const handleRebuildGraph = async () => {
+    if (!confirm("Rebuild Knowledge Graph from all existing corpus documents? This will re-extract entities and relationships.")) return;
+    setIsRebuildingGraph(true);
+    setError(null);
+    try {
+      const res = await authFetch(`${API_URL}/graph/rebuild`, { method: "POST" });
+      if (res && res.ok) {
+        const data = await res.json();
+        setSuccessMsg(data.message || "Knowledge Graph rebuilt successfully");
+        await fetchGraphData(graphSearchQuery);
+      } else {
+        const err = await res?.json();
+        setError(err?.detail || "Failed to rebuild graph");
+      }
+    } catch (err: any) {
+      setError(err?.message || "Failed to rebuild graph");
+    } finally {
+      setIsRebuildingGraph(false);
+    }
+  };
+
   useEffect(() => {
     fetchStatsAndData();
   }, [fetchStatsAndData]);
@@ -309,8 +367,10 @@ export default function AdminDashboard() {
   useEffect(() => {
     if (activeTab === "activity") {
       fetchActivity(activityCategory, activityUserId, activitySearch, activityTimeRange, activityOffset);
+    } else if (activeTab === "graph") {
+      fetchGraphData(graphSearchQuery);
     }
-  }, [activeTab, activityCategory, activityUserId, activitySearch, activityTimeRange, activityOffset, fetchActivity]);
+  }, [activeTab, activityCategory, activityUserId, activitySearch, activityTimeRange, activityOffset, fetchActivity, fetchGraphData, graphSearchQuery]);
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -788,6 +848,16 @@ export default function AdminDashboard() {
             Company Corpus ({stats?.documents?.length || 0})
           </button>
           <button
+            onClick={() => setActiveTab("graph")}
+            className={`py-2 px-4 text-xs font-mono uppercase tracking-wider border-b-2 font-semibold transition-colors cursor-pointer ${
+              activeTab === "graph"
+                ? "border-accent text-ink"
+                : "border-transparent text-muted hover:text-ink"
+            }`}
+          >
+            Knowledge Graph ({graphStats?.node_count || 0})
+          </button>
+          <button
             onClick={() => setActiveTab("activity")}
             className={`py-2 px-4 text-xs font-mono uppercase tracking-wider border-b-2 font-semibold transition-colors cursor-pointer ${
               activeTab === "activity"
@@ -1030,6 +1100,242 @@ export default function AdminDashboard() {
                   </li>
                 ))}
               </ul>
+            )}
+          </div>
+        )}
+
+        {/* TAB: KNOWLEDGE GRAPH EXPLORER (PHASE 7) */}
+        {activeTab === "graph" && (
+          <div className="space-y-6">
+            {/* GRAPH OVERVIEW BANNER */}
+            <div className="bg-paper-2 p-5 sm:p-6 rounded-card border border-rule">
+              <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 pb-4 border-b border-rule">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-base font-display font-semibold text-ink">
+                      Enterprise Knowledge Graph & Relational Entity Network
+                    </h2>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-purple-500/10 text-purple-400 border border-purple-500/30">
+                      HYBRID GRAPH RAG
+                    </span>
+                  </div>
+                  <p className="text-xs text-muted mt-1">
+                    Multi-hop relational network extracted from company corpus. Enables cross-document reasoning across policies, incidents, departments, and systems.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleRebuildGraph}
+                    disabled={isRebuildingGraph}
+                    className="flex items-center gap-2 px-3 py-1.5 bg-paper hover:bg-accent-subtle border border-rule hover:border-accent text-xs font-mono font-semibold text-ink hover:text-accent rounded-base transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    {isRebuildingGraph ? <CyberSpinner className="w-3.5 h-3.5" /> : "⚡"}
+                    <span>{isRebuildingGraph ? "Rebuilding Graph..." : "Rebuild Knowledge Graph"}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* STATS TILES */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-5">
+                <div className="p-3.5 bg-paper rounded-base border border-rule">
+                  <div className="text-[10px] font-mono uppercase text-muted">Indexed Entities</div>
+                  <div className="text-xl font-bold font-mono text-ink mt-0.5">{graphStats?.node_count || 0}</div>
+                  <div className="text-[10px] text-muted mt-1">Nodes in active graph</div>
+                </div>
+                <div className="p-3.5 bg-paper rounded-base border border-rule">
+                  <div className="text-[10px] font-mono uppercase text-muted">Directed Relations</div>
+                  <div className="text-xl font-bold font-mono text-purple-400 mt-0.5">{graphStats?.edge_count || 0}</div>
+                  <div className="text-[10px] text-muted mt-1">Cross-entity links</div>
+                </div>
+                <div className="p-3.5 bg-paper rounded-base border border-rule">
+                  <div className="text-[10px] font-mono uppercase text-muted">Entity Categories</div>
+                  <div className="text-xl font-bold font-mono text-emerald mt-0.5">
+                    {Object.keys(graphStats?.entity_types || {}).length}
+                  </div>
+                  <div className="text-[10px] text-muted mt-1">Policies, Incidents, Systems...</div>
+                </div>
+                <div className="p-3.5 bg-paper rounded-base border border-rule">
+                  <div className="text-[10px] font-mono uppercase text-muted">Relation Types</div>
+                  <div className="text-xl font-bold font-mono text-amber-400 mt-0.5">
+                    {Object.keys(graphStats?.relation_types || {}).length}
+                  </div>
+                  <div className="text-[10px] text-muted mt-1">AFFECTS, GOVERNS, RESOLVED...</div>
+                </div>
+              </div>
+
+              {/* ENTITY TYPE PILLS */}
+              {graphStats?.entity_types && Object.keys(graphStats.entity_types).length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5 mt-4 pt-3 border-t border-rule/60">
+                  <span className="text-[10px] font-mono uppercase text-muted font-semibold mr-1">Types:</span>
+                  {Object.entries(graphStats.entity_types).map(([type, count]) => (
+                    <span
+                      key={type}
+                      className="px-2 py-0.5 rounded text-[10px] font-mono border bg-paper-3 text-ink border-rule"
+                    >
+                      {type} <strong className="text-accent">({count})</strong>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* SEARCH & TRAVERSAL CONTROLS */}
+            <div className="bg-paper-2 p-4 rounded-card border border-rule flex flex-col md:flex-row items-center justify-between gap-3">
+              <div className="relative flex-1 w-full">
+                <input
+                  type="text"
+                  value={graphSearchQuery}
+                  onChange={(e) => setGraphSearchQuery(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && fetchGraphData(graphSearchQuery)}
+                  placeholder="Search entity (e.g. Incident Report 104, Payment Gateway, Security Policy)..."
+                  className="w-full bg-paper border border-rule rounded-base px-3 py-2 text-xs text-ink placeholder:text-muted focus:outline-none focus:border-accent font-mono"
+                />
+              </div>
+              <div className="flex items-center gap-2 w-full md:w-auto justify-end">
+                <span className="text-xs font-mono text-muted">Hops:</span>
+                <select
+                  value={graphDepth}
+                  onChange={(e) => setGraphDepth(Number(e.target.value))}
+                  className="bg-paper border border-rule rounded-base px-2.5 py-1.5 text-xs text-ink font-mono focus:outline-none focus:border-accent cursor-pointer"
+                >
+                  <option value={1}>1 Hop (Direct)</option>
+                  <option value={2}>2 Hops (Connected)</option>
+                  <option value={3}>3 Hops (Deep Subgraph)</option>
+                </select>
+                <button
+                  onClick={() => fetchGraphData(graphSearchQuery)}
+                  className="px-3 py-1.5 bg-accent hover:bg-accent/90 text-paper font-mono text-xs font-semibold rounded-base transition-colors cursor-pointer"
+                >
+                  Filter Graph
+                </button>
+              </div>
+            </div>
+
+            {/* GRAPH VIEW: NODES & RELATIONSHIPS SPLIT */}
+            {isLoadingGraph ? (
+              <div className="bg-paper-2 p-12 rounded-card border border-rule flex flex-col items-center justify-center">
+                <CyberSpinner className="w-8 h-8 mb-3" />
+                <span className="text-xs font-mono text-muted">Traversing knowledge graph and computing subgraphs...</span>
+              </div>
+            ) : graphData.nodes.length === 0 ? (
+              <div className="bg-paper-2 p-12 rounded-card border border-rule text-center">
+                <span className="text-3xl">🌐</span>
+                <h3 className="text-sm font-semibold text-ink mt-2">No Knowledge Graph Entities Yet</h3>
+                <p className="text-xs text-muted max-w-md mx-auto mt-1">
+                  Upload documents to the company corpus or click &quot;Rebuild Knowledge Graph&quot; to automatically extract entities and relationships.
+                </p>
+                <button
+                  onClick={handleRebuildGraph}
+                  disabled={isRebuildingGraph}
+                  className="mt-4 px-4 py-2 bg-accent text-paper font-mono text-xs font-semibold rounded-base hover:bg-accent/90 cursor-pointer"
+                >
+                  Extract &amp; Rebuild Graph Now
+                </button>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                {/* ENTITIES LIST */}
+                <div className="lg:col-span-5 bg-paper-2 p-5 rounded-card border border-rule space-y-3">
+                  <div className="flex items-center justify-between border-b border-rule pb-2.5">
+                    <h3 className="text-xs font-mono font-bold uppercase tracking-wider text-ink">
+                      Active Subgraph Entities ({graphData.nodes.length})
+                    </h3>
+                    <span className="text-[10px] font-mono text-muted">Click to inspect</span>
+                  </div>
+
+                  <div className="space-y-2 max-h-[500px] overflow-y-auto pr-1">
+                    {graphData.nodes.map((node) => {
+                      const isSelected = selectedEntityId === node.id;
+                      let badgeColor = "bg-blue-500/10 text-blue-400 border-blue-500/30";
+                      if (node.type === "INCIDENT") badgeColor = "bg-red-500/10 text-red-400 border-red-500/30";
+                      else if (node.type === "POLICY") badgeColor = "bg-purple-500/10 text-purple-400 border-purple-500/30";
+                      else if (node.type === "SYSTEM") badgeColor = "bg-cyan-500/10 text-cyan-400 border-cyan-500/30";
+                      else if (node.type === "DEPARTMENT") badgeColor = "bg-emerald-500/10 text-emerald-400 border-emerald-500/30";
+                      else if (node.type === "METRIC") badgeColor = "bg-amber-500/10 text-amber-400 border-amber-500/30";
+
+                      return (
+                        <div
+                          key={node.id}
+                          onClick={() => setSelectedEntityId(isSelected ? null : node.id)}
+                          className={`p-3 rounded-base border transition-all cursor-pointer ${
+                            isSelected
+                              ? "bg-accent-subtle/40 border-accent shadow-xs"
+                              : "bg-paper hover:bg-paper-3 border-rule"
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <span className="text-xs font-semibold text-ink">{node.label}</span>
+                            <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold border uppercase shrink-0 ${badgeColor}`}>
+                              {node.type}
+                            </span>
+                          </div>
+                          {node.description && (
+                            <p className="text-[11px] text-muted line-clamp-2 mt-1">
+                              {node.description}
+                            </p>
+                          )}
+                          <div className="flex items-center gap-2 mt-2 pt-2 border-t border-rule/40 text-[10px] font-mono text-muted">
+                            <span>Degree: <strong className="text-ink">{node.degree}</strong></span>
+                            {node.sources && node.sources.length > 0 && (
+                              <span className="truncate">Source: {node.sources[0]}</span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* RELATIONSHIP EDGES */}
+                <div className="lg:col-span-7 bg-paper-2 p-5 rounded-card border border-rule space-y-3">
+                  <div className="flex items-center justify-between border-b border-rule pb-2.5">
+                    <h3 className="text-xs font-mono font-bold uppercase tracking-wider text-ink">
+                      Directed Relationship Links ({graphData.edges.length})
+                    </h3>
+                    {selectedEntityId && (
+                      <button
+                        onClick={() => setSelectedEntityId(null)}
+                        className="text-[10px] font-mono text-accent hover:underline cursor-pointer"
+                      >
+                        Reset Filter
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="space-y-2 max-h-[500px] overflow-y-auto pr-1">
+                    {graphData.edges
+                      .filter((e) => !selectedEntityId || e.source === selectedEntityId || e.target === selectedEntityId)
+                      .map((edge, idx) => (
+                        <div
+                          key={idx}
+                          className="p-3 bg-paper rounded-base border border-rule hover:border-purple-500/40 transition-colors"
+                        >
+                          <div className="flex flex-wrap items-center gap-2 font-mono text-xs">
+                            <span className="font-semibold text-ink bg-paper-3 px-2 py-0.5 rounded border border-rule">
+                              {edge.source}
+                            </span>
+                            <span className="text-[11px] font-bold text-purple-400 bg-purple-500/10 px-2 py-0.5 rounded border border-purple-500/20">
+                              ── {edge.relation} ──▶
+                            </span>
+                            <span className="font-semibold text-ink bg-paper-3 px-2 py-0.5 rounded border border-rule">
+                              {edge.target}
+                            </span>
+                          </div>
+                          {edge.context && (
+                            <p className="text-[11px] text-muted mt-2 italic border-l-2 border-purple-500/30 pl-2">
+                              &ldquo;{edge.context}&rdquo;
+                            </p>
+                          )}
+                          {edge.source_document && (
+                            <div className="text-[10px] font-mono text-muted mt-2">
+                              Extracted from: <span className="text-ink">{edge.source_document}</span>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              </div>
             )}
           </div>
         )}

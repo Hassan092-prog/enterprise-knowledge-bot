@@ -83,7 +83,7 @@ def mock_session_local():
 @pytest.fixture
 def mock_stream_answer():
     """Prevent real LLM calls during streaming."""
-    def fake_stream(query, chunks, chat_history=None):
+    def fake_stream(query, chunks, chat_history=None, graph_context=None, *args, **kwargs):
         yield "This "
         yield "is "
         yield "a test answer."
