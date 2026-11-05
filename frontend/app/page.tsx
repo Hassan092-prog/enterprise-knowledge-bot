@@ -1534,14 +1534,19 @@ export default function Home() {
               <button
                 type="button"
                 onClick={() => {
-                  const prefix = selectedCitation.source.endsWith('.csv') ? '!' : '@';
-                  setInput((prev) => `${prev.trim()} ${prefix}${selectedCitation.source} `);
+                  if (selectedCitation.is_graph) {
+                    const cleanName = selectedCitation.source.replace(/^Knowledge Graph:\s*/i, '');
+                    setInput((prev) => `${prev.trim()} "${cleanName}" `);
+                  } else {
+                    const prefix = selectedCitation.source.endsWith('.csv') ? '!' : '@';
+                    setInput((prev) => `${prev.trim()} ${prefix}${selectedCitation.source} `);
+                  }
                   setSelectedCitation(null);
                   inputRef.current?.focus();
                 }}
                 className="px-3.5 py-2 rounded-base bg-paper hover:bg-paper-2 border border-rule hover:border-accent text-ink text-xs font-mono uppercase tracking-wider font-semibold transition-colors cursor-pointer flex items-center gap-1.5"
               >
-                <span>Target in Chat Prompt →</span>
+                <span>{selectedCitation.is_graph ? "Ask About Entity →" : "Target in Chat Prompt →"}</span>
               </button>
               <button
                 type="button"

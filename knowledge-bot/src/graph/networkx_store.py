@@ -7,6 +7,7 @@ ACID durability, cascade deletion, and multi-tenant isolation in PostgreSQL.
 
 import json
 import logging
+import threading
 from typing import List, Dict, Any, Optional, Set
 import networkx as nx
 
@@ -39,59 +40,61 @@ class NetworkXGraphStore(BaseGraphStore):
 
     def __init__(self) -> None:
         self._graphs: Dict[int, nx.MultiDiGraph] = {}
+        self._lock = threading.RLock()
 
     def _ensure_tenant_graph(self, tenant_id: int) -> nx.MultiDiGraph:
         """Load tenant graph from PostgreSQL if not already in memory."""
-        if tenant_id in self._graphs:
-            return self._graphs[tenant_id]
+        with self._lock:
+            if tenant_id in self._graphs:
+                return self._graphs[tenant_id]
 
-        g = nx.MultiDiGraph()
-        with SessionLocal() as db:
-            # 1. Load nodes
-            nodes = db.query(KnowledgeNode).filter(KnowledgeNode.tenant_id == tenant_id).all()
-            for n in nodes:
-                try:
-                    src_docs = set(json.loads(n.source_documents)) if n.source_documents else set()
-                except Exception:
-                    src_docs = set()
+            g = nx.MultiDiGraph()
+            with SessionLocal() as db:
+                # 1. Load nodes
+                nodes = db.query(KnowledgeNode).filter(KnowledgeNode.tenant_id == tenant_id).all()
+                for n in nodes:
+                    try:
+                        src_docs = set(json.loads(n.source_documents)) if n.source_documents else set()
+                    except Exception:
+                        src_docs = set()
 
-                try:
-                    props = json.loads(n.properties_json) if n.properties_json else {}
-                except Exception:
-                    props = {}
+                    try:
+                        props = json.loads(n.properties_json) if n.properties_json else {}
+                    except Exception:
+                        props = {}
 
-                g.add_node(
-                    n.entity_id,
-                    id=n.entity_id,
-                    name=n.name,
-                    entity_type=n.entity_type,
-                    description=n.description or "",
-                    source_documents=src_docs,
-                    properties=props,
-                )
+                    g.add_node(
+                        n.entity_id,
+                        id=n.entity_id,
+                        name=n.name,
+                        entity_type=n.entity_type,
+                        description=n.description or "",
+                        source_documents=src_docs,
+                        properties=props,
+                    )
 
-            # 2. Load edges
-            edges = db.query(KnowledgeEdge).filter(KnowledgeEdge.tenant_id == tenant_id).all()
-            for e in edges:
-                try:
-                    props = json.loads(e.properties_json) if e.properties_json else {}
-                except Exception:
-                    props = {}
+                # 2. Load edges
+                edges = db.query(KnowledgeEdge).filter(KnowledgeEdge.tenant_id == tenant_id).all()
+                for e in edges:
+                    try:
+                        props = json.loads(e.properties_json) if e.properties_json else {}
+                    except Exception:
+                        props = {}
 
-                g.add_edge(
-                    e.source_entity_id,
-                    e.target_entity_id,
-                    key=e.relation_type,
-                    relation=e.relation_type,
-                    weight=float(e.weight or 1.0),
-                    context_snippet=e.context_snippet or "",
-                    source_document=e.source_document or "",
-                    properties=props,
-                )
+                    g.add_edge(
+                        e.source_entity_id,
+                        e.target_entity_id,
+                        key=e.relation_type,
+                        relation=e.relation_type,
+                        weight=float(e.weight or 1.0),
+                        context_snippet=e.context_snippet or "",
+                        source_document=e.source_document or "",
+                        properties=props,
+                    )
 
-        self._graphs[tenant_id] = g
-        logger.info("Loaded graph for tenant %d: %d nodes, %d edges", tenant_id, g.number_of_nodes(), g.number_of_edges())
-        return g
+            self._graphs[tenant_id] = g
+            logger.info("Loaded graph for tenant %d: %d nodes, %d edges", tenant_id, g.number_of_nodes(), g.number_of_edges())
+            return g
 
     def add_node(self, tenant_id: int, node: GraphNodeData) -> None:
         """Upsert a single node in memory and PostgreSQL."""
@@ -110,7 +113,7 @@ class NetworkXGraphStore(BaseGraphStore):
         """Atomically upsert nodes and edges into memory and PostgreSQL."""
         g = self._ensure_tenant_graph(tenant_id)
 
-        with SessionLocal() as db:
+        with self._lock, SessionLocal() as db:
             # Upsert nodes
             for n in nodes:
                 entity_id = normalize_entity_id(n.id or n.name)
@@ -288,9 +291,10 @@ class NetworkXGraphStore(BaseGraphStore):
         Extract multi-hop ego-subgraph seeded by entity_ids.
         Returns D3 / ForceGraph compatible dict: {"nodes": [...], "edges": [...]}
         """
-        g = self._ensure_tenant_graph(tenant_id)
-        if g.number_of_nodes() == 0:
-            return {"nodes": [], "edges": []}
+        with self._lock:
+            g = self._ensure_tenant_graph(tenant_id)
+            if g.number_of_nodes() == 0:
+                return {"nodes": [], "edges": []}
 
         # Resolve seed nodes in the graph
         matched_seeds: Set[str] = set()
@@ -419,74 +423,79 @@ class NetworkXGraphStore(BaseGraphStore):
 
     def delete_document_entities(self, tenant_id: int, document_name: str) -> int:
         """Cascade-delete edges originating from document and prune orphan nodes."""
-        g = self._ensure_tenant_graph(tenant_id)
-        deleted_edges_count = 0
+        with self._lock:
+            g = self._ensure_tenant_graph(tenant_id)
+            deleted_edges_count = 0
 
-        with SessionLocal() as db:
-            # 1. Delete edges in DB
-            db_edges = db.query(KnowledgeEdge).filter(
-                KnowledgeEdge.tenant_id == tenant_id,
-                KnowledgeEdge.source_document == document_name
-            ).all()
-            deleted_edges_count = len(db_edges)
-            for e in db_edges:
-                db.delete(e)
+            with SessionLocal() as db:
+                # 1. Delete edges in DB
+                db_edges = db.query(KnowledgeEdge).filter(
+                    KnowledgeEdge.tenant_id == tenant_id,
+                    KnowledgeEdge.source_document == document_name
+                ).all()
+                deleted_edges_count = len(db_edges)
+                for e in db_edges:
+                    db.delete(e)
 
-            # 2. Update nodes in DB
-            nodes = db.query(KnowledgeNode).filter(KnowledgeNode.tenant_id == tenant_id).all()
-            for n in nodes:
-                try:
-                    src_docs = set(json.loads(n.source_documents)) if n.source_documents else set()
-                except Exception:
-                    src_docs = set()
-                if document_name in src_docs:
-                    src_docs.remove(document_name)
-                    n.source_documents = json.dumps(sorted(src_docs))
-                    # Prune orphan nodes with no remaining documents
-                    if not src_docs:
-                        has_edges = db.query(KnowledgeEdge).filter(
-                            KnowledgeEdge.tenant_id == tenant_id,
-                            (KnowledgeEdge.source_entity_id == n.entity_id) |
-                            (KnowledgeEdge.target_entity_id == n.entity_id)
-                        ).first()
-                        if not has_edges:
-                            db.delete(n)
+                # 2. Update nodes in DB
+                nodes = db.query(KnowledgeNode).filter(KnowledgeNode.tenant_id == tenant_id).all()
+                for n in nodes:
+                    try:
+                        src_docs = set(json.loads(n.source_documents)) if n.source_documents else set()
+                    except Exception:
+                        src_docs = set()
+                    if document_name in src_docs:
+                        src_docs.remove(document_name)
+                        n.source_documents = json.dumps(sorted(src_docs))
+                        # Prune orphan nodes with no remaining documents
+                        if not src_docs:
+                            has_edges = db.query(KnowledgeEdge).filter(
+                                KnowledgeEdge.tenant_id == tenant_id,
+                                (KnowledgeEdge.source_entity_id == n.entity_id) |
+                                (KnowledgeEdge.target_entity_id == n.entity_id)
+                            ).first()
+                            if not has_edges:
+                                db.delete(n)
 
-            db.commit()
+                db.commit()
 
-        # 3. Synchronize in-memory graph
-        edges_to_remove = [
-            (u, v, k)
-            for u, v, k, d in g.edges(keys=True, data=True)
-            if d.get("source_document") == document_name
-        ]
-        for u, v, k in edges_to_remove:
-            g.remove_edge(u, v, key=k)
+            # 3. Synchronize in-memory graph
+            edges_to_remove = [
+                (u, v, k)
+                for u, v, k, d in g.edges(keys=True, data=True)
+                if d.get("source_document") == document_name
+            ]
+            for u, v, k in edges_to_remove:
+                g.remove_edge(u, v, key=k)
 
-        nodes_to_remove = []
-        for n, d in g.nodes(data=True):
-            src_docs = d.get("source_documents", set())
-            src_docs.discard(document_name)
-            if not src_docs and g.degree(n) == 0:
-                nodes_to_remove.append(n)
+            nodes_to_remove = []
+            for n, d in g.nodes(data=True):
+                src_docs = d.get("source_documents", set())
+                if isinstance(src_docs, (list, tuple)):
+                    src_docs = set(src_docs)
+                    d["source_documents"] = src_docs
+                src_docs.discard(document_name)
+                if not src_docs and g.degree(n) == 0:
+                    nodes_to_remove.append(n)
 
-        for n in nodes_to_remove:
-            g.remove_node(n)
+            for n in nodes_to_remove:
+                g.remove_node(n)
 
-        logger.info(
-            "Purged document '%s' from tenant %d graph (removed %d edges, %d orphan nodes)",
-            document_name, tenant_id, deleted_edges_count, len(nodes_to_remove)
-        )
-        return deleted_edges_count
+            logger.info(
+                "Purged document '%s' from tenant %d graph (removed %d edges, %d orphan nodes)",
+                document_name, tenant_id, deleted_edges_count, len(nodes_to_remove)
+            )
+            return deleted_edges_count
 
     def delete_tenant_graph(self, tenant_id: int) -> int:
         """Purge entire graph for a tenant."""
-        with SessionLocal() as db:
-            e_count = db.query(KnowledgeEdge).filter(KnowledgeEdge.tenant_id == tenant_id).delete()
-            n_count = db.query(KnowledgeNode).filter(KnowledgeNode.tenant_id == tenant_id).delete()
-            db.commit()
+        with self._lock:
+            with SessionLocal() as db:
+                e_count = db.query(KnowledgeEdge).filter(KnowledgeEdge.tenant_id == tenant_id).delete()
+                n_count = db.query(KnowledgeNode).filter(KnowledgeNode.tenant_id == tenant_id).delete()
+                db.commit()
 
-        self._graphs.pop(tenant_id, None)
-        logger.info("Purged graph for tenant %d: %d nodes, %d edges deleted", tenant_id, n_count, e_count)
-        return e_count + n_count
+            self._graphs.pop(tenant_id, None)
+            logger.info("Purged graph for tenant %d: %d nodes, %d edges deleted", tenant_id, n_count, e_count)
+            return e_count + n_count
 

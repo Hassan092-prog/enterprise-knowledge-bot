@@ -27,6 +27,12 @@ def retrieve_graph_context(
     query_entities = extractor.extract_query_entities(query)
 
     if not query_entities:
+        from src.graph import normalize_entity_id
+        candidate = normalize_entity_id(query)
+        if candidate and len(candidate) >= 3:
+            query_entities = [candidate]
+
+    if not query_entities:
         return {
             "context_block": "",
             "subgraph": {"nodes": [], "edges": []},
@@ -76,7 +82,7 @@ def retrieve_graph_context(
             for edge in connected_edges[:5]:  # limit lines per node to prevent token bloat
                 tgt_label = node_name_map.get(edge["target"], edge["target"])
                 rel = edge["relation"]
-                snippet = edge.get("context", "")
+                snippet = edge.get("context", "").strip().replace("\n", " ")
                 if snippet:
                     lines.append(f"    └── {rel} ──> {tgt_label} (Context: {snippet[:120]})")
                 else:

@@ -145,6 +145,11 @@ def rebuild_tenant_graph(
     # Group chunk texts by source document
     doc_texts: Dict[str, List[str]] = {}
     for text, meta in zip(docs, metas):
+        if not meta or not text:
+            continue
+        # Skip executive summaries to prevent duplicate entity extraction
+        if meta.get("is_summary"):
+            continue
         src = meta.get("source", "unknown")
         doc_texts.setdefault(src, []).append(text)
 

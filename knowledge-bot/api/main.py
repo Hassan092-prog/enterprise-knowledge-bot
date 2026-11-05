@@ -891,7 +891,8 @@ def query_bot(
 
         # Telemetry & Cost Accounting
         context_text = build_context_block(chunks) if chunks else ""
-        prompt_tokens = count_tokens(effective_query + "\n" + context_text, LLM_MODEL)
+        full_prompt_text = effective_query + "\n" + context_text + ("\n" + graph_ctx if graph_ctx else "")
+        prompt_tokens = count_tokens(full_prompt_text, LLM_MODEL)
         completion_tokens = count_tokens(full_response, LLM_MODEL)
         total_tokens = prompt_tokens + completion_tokens
         cost_usd = estimate_token_cost(prompt_tokens, completion_tokens, LLM_MODEL)

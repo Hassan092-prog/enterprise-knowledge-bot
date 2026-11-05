@@ -232,7 +232,8 @@ class GraphExtractor:
                     source_document=source_document,
                 ))
 
-        return list(nodes_dict.values()), edges
+        # Limit maximum inferred edges per document to prevent quadratic blowup
+        return list(nodes_dict.values()), edges[:100]
 
     def _extract_llm_based(
         self,

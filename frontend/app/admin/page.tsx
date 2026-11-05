@@ -317,8 +317,9 @@ export default function AdminDashboard() {
     }
   };
 
-  const fetchGraphData = useCallback(async (query = "") => {
+  const fetchGraphData = useCallback(async (query = "", depth?: number) => {
     setIsLoadingGraph(true);
+    const effectiveDepth = depth !== undefined ? depth : graphDepth;
     try {
       const statsRes = await authFetch(`${API_URL}/graph/stats`);
       if (statsRes && statsRes.ok) {
@@ -326,7 +327,7 @@ export default function AdminDashboard() {
         setGraphStats(sData);
       }
 
-      const qParam = query.trim() ? `?query=${encodeURIComponent(query.trim())}&depth=${graphDepth}` : `?depth=${graphDepth}`;
+      const qParam = query.trim() ? `?query=${encodeURIComponent(query.trim())}&depth=${effectiveDepth}` : `?depth=${effectiveDepth}`;
       const subRes = await authFetch(`${API_URL}/graph/subgraph${qParam}`);
       if (subRes && subRes.ok) {
         const gData = await subRes.json();
@@ -368,9 +369,9 @@ export default function AdminDashboard() {
     if (activeTab === "activity") {
       fetchActivity(activityCategory, activityUserId, activitySearch, activityTimeRange, activityOffset);
     } else if (activeTab === "graph") {
-      fetchGraphData(graphSearchQuery);
+      fetchGraphData();
     }
-  }, [activeTab, activityCategory, activityUserId, activitySearch, activityTimeRange, activityOffset, fetchActivity, fetchGraphData, graphSearchQuery]);
+  }, [activeTab, activityCategory, activityUserId, activitySearch, activityTimeRange, activityOffset, fetchActivity, fetchGraphData]);
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -1195,7 +1196,11 @@ export default function AdminDashboard() {
                 <span className="text-xs font-mono text-muted">Hops:</span>
                 <select
                   value={graphDepth}
-                  onChange={(e) => setGraphDepth(Number(e.target.value))}
+                  onChange={(e) => {
+                    const newDepth = Number(e.target.value);
+                    setGraphDepth(newDepth);
+                    fetchGraphData(graphSearchQuery, newDepth);
+                  }}
                   className="bg-paper border border-rule rounded-base px-2.5 py-1.5 text-xs text-ink font-mono focus:outline-none focus:border-accent cursor-pointer"
                 >
                   <option value={1}>1 Hop (Direct)</option>
