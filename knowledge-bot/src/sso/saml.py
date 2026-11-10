@@ -167,14 +167,8 @@ def _verify_saml_signature(root: ET.Element, idp_cert_pem: str) -> bool:
         try:
             public_key.verify(signature, signed_info_bytes, padding.PKCS1v15(), hash_algo)
             return True
-        except Exception:
-            # Fallback: check embedded cert match if public keys correspond
-            embedded_cert_elem = sig_elem.find(".//{http://www.w3.org/2000/09/xmldsig#}X509Certificate")
-            if embedded_cert_elem is not None and embedded_cert_elem.text:
-                emb_clean = "".join(embedded_cert_elem.text.split())
-                cert_clean = "".join(clean_pem.replace("-----BEGIN CERTIFICATE-----", "").replace("-----END CERTIFICATE-----", "").split())
-                if emb_clean == cert_clean:
-                    return True
+        except Exception as verify_err:
+            logger.warning(f"SAML public key cryptographic verification failed: {verify_err}")
             return False
 
     except Exception as e:
@@ -211,14 +205,19 @@ def parse_saml_response(
             msg_text = status_msg.text if status_msg is not None else val
             raise ValueError(f"IdP returned error status: {msg_text}")
 
-    # 2. Extract Assertion
-    assertion = root.find(".//{urn:oasis:names:tc:SAML:2.0:assertion}Assertion")
-    if assertion is None:
-        # Check if root is already the assertion
+    # 2. Extract Assertion (strictly enforce single assertion to defend against XML Signature Wrapping attacks)
+    assertions = root.findall(".//{urn:oasis:names:tc:SAML:2.0:assertion}Assertion")
+    if not assertions:
         if root.tag.endswith("Assertion"):
             assertion = root
         else:
             raise ValueError("No SAML Assertion found in response.")
+    elif len(assertions) > 1:
+        raise ValueError("Multiple assertions found in SAML response (potential XML signature wrapping attack).")
+    else:
+        assertion = assertions[0]
+
+    assertion_id = assertion.attrib.get("ID") or root.attrib.get("ID") or ""
 
     # 3. Check Conditions (NotBefore, NotOnOrAfter)
     conditions = assertion.find("{urn:oasis:names:tc:SAML:2.0:assertion}Conditions")
@@ -339,5 +338,6 @@ def parse_saml_response(
         provider="saml",
         groups=list(dict.fromkeys(groups)),
         raw_attributes=attributes,
+        assertion_id=assertion_id,
     )
 

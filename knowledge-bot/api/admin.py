@@ -891,6 +891,30 @@ def upsert_tenant_sso_config(
     if not tenant:
         raise HTTPException(status_code=404, detail="Organization not found")
 
+    valid_idp_types = {"saml", "oidc", "okta", "google", "microsoft"}
+    clean_idp_type = (payload.idp_type or "saml").lower().strip()
+    if clean_idp_type not in valid_idp_types:
+        raise HTTPException(status_code=400, detail=f"Invalid idp_type '{payload.idp_type}'. Must be one of: {', '.join(valid_idp_types)}")
+
+    clean_default_role = (payload.default_role or "user").lower().strip()
+    if clean_default_role not in ("user", "editor", "admin"):
+        raise HTTPException(status_code=400, detail=f"Invalid default_role '{payload.default_role}'. Must be user, editor, or admin.")
+
+    # Validate allowed_domains against public mail providers and syntax
+    clean_domains_list = []
+    if payload.allowed_domains and payload.allowed_domains.strip():
+        from src.sso import PUBLIC_EMAIL_DOMAINS
+        for d in payload.allowed_domains.split(","):
+            cd = d.strip().lower().rstrip(".")
+            if not cd:
+                continue
+            if cd in PUBLIC_EMAIL_DOMAINS:
+                raise HTTPException(status_code=400, detail=f"Public domain '{cd}' cannot be configured for corporate SSO auto-routing.")
+            if not re.match(r"^[a-z0-9.-]+\.[a-z]{2,}$", cd):
+                raise HTTPException(status_code=400, detail=f"Invalid corporate domain format: '{cd}'")
+            clean_domains_list.append(cd)
+    clean_allowed_domains = ", ".join(clean_domains_list) if clean_domains_list else None
+
     # If raw metadata XML was supplied, parse fields automatically
     parsed_metadata = {}
     if payload.idp_metadata_xml and payload.idp_metadata_xml.strip():
@@ -919,7 +943,7 @@ def upsert_tenant_sso_config(
 
     cfg = db.query(TenantSSOConfig).filter(TenantSSOConfig.tenant_id == tenant_id).first()
     if cfg:
-        cfg.idp_type = payload.idp_type
+        cfg.idp_type = clean_idp_type
         cfg.is_enabled = payload.is_enabled
         cfg.enforce_sso = payload.enforce_sso
         cfg.idp_entity_id = idp_entity_id
@@ -932,14 +956,14 @@ def upsert_tenant_sso_config(
         if payload.oidc_client_secret:
             cfg.oidc_client_secret = payload.oidc_client_secret
         cfg.oidc_scopes = payload.oidc_scopes or "openid email profile groups"
-        cfg.allowed_domains = payload.allowed_domains
-        cfg.default_role = payload.default_role or "user"
+        cfg.allowed_domains = clean_allowed_domains
+        cfg.default_role = clean_default_role
         cfg.role_mapping_json = payload.role_mapping_json
         cfg.updated_at = datetime.utcnow()
     else:
         cfg = TenantSSOConfig(
             tenant_id=tenant_id,
-            idp_type=payload.idp_type,
+            idp_type=clean_idp_type,
             is_enabled=payload.is_enabled,
             enforce_sso=payload.enforce_sso,
             idp_entity_id=idp_entity_id,
@@ -950,15 +974,15 @@ def upsert_tenant_sso_config(
             oidc_client_id=payload.oidc_client_id,
             oidc_client_secret=payload.oidc_client_secret,
             oidc_scopes=payload.oidc_scopes or "openid email profile groups",
-            allowed_domains=payload.allowed_domains,
-            default_role=payload.default_role or "user",
+            allowed_domains=clean_allowed_domains,
+            default_role=clean_default_role,
             role_mapping_json=payload.role_mapping_json,
         )
         db.add(cfg)
 
     # Sync allowed_domains to Tenant model
-    if payload.allowed_domains:
-        tenant.allowed_domains = payload.allowed_domains
+    if clean_allowed_domains:
+        tenant.allowed_domains = clean_allowed_domains
 
     db.commit()
     db.refresh(cfg)

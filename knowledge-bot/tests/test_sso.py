@@ -25,6 +25,7 @@ from src.sso.revocation import (
     revoke_user_sessions,
     revoke_tenant_sessions,
     is_session_revoked,
+    check_and_record_assertion_id,
 )
 
 # Setup in-memory SQLite for testing SSO
@@ -356,4 +357,39 @@ def test_saml_audience_restriction_mismatch_rejected():
 
     with pytest.raises(ValueError, match="Audience restriction failed"):
         parse_saml_response(b64, expected_recipient="https://my-app.internal/auth/sso/saml/metadata")
+
+
+def test_saml_replay_attack_prevention():
+    import uuid
+    unique_assertion_id = f"ID_assert_{uuid.uuid4().hex}"
+    # First time processing assertion ID succeeds
+    assert check_and_record_assertion_id(unique_assertion_id, ttl_seconds=60) is True
+    # Second time with identical assertion ID is blocked as replay
+    assert check_and_record_assertion_id(unique_assertion_id, ttl_seconds=60) is False
+
+
+def test_saml_multiple_assertions_xsw_rejected():
+    xsw_xml = """<?xml version="1.0"?>
+    <samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
+                    xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"
+                    ID="resp_xsw" Version="2.0">
+        <samlp:Status>
+            <samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/>
+        </samlp:Status>
+        <saml:Assertion ID="asrt_legit" Version="2.0">
+            <saml:Subject>
+                <saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">bob@acme.com</saml:NameID>
+            </saml:Subject>
+        </saml:Assertion>
+        <saml:Assertion ID="asrt_injected" Version="2.0">
+            <saml:Subject>
+                <saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">evil@attacker.com</saml:NameID>
+            </saml:Subject>
+        </saml:Assertion>
+    </samlp:Response>"""
+    b64 = base64.b64encode(xsw_xml.encode("utf-8")).decode("ascii")
+
+    with pytest.raises(ValueError, match="Multiple assertions found"):
+        parse_saml_response(b64)
+
 

@@ -12,6 +12,7 @@ from src.sso.revocation import (
     blacklist_token,
     is_session_revoked,
     is_token_blacklisted,
+    check_and_record_assertion_id,
 )
 from src.sso.saml import (
     generate_sp_metadata,

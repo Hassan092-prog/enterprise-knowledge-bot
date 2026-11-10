@@ -62,7 +62,9 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         )
 
     token_iat = payload.get("iat")
-    if is_session_revoked(user_id=user.id, tenant_id=user.tenant_id, token_iat=token_iat):
+    # For platform admins, do not check tenant session revocation to avoid lockout by tenant actions
+    check_tenant_id = None if user.is_platform_admin else user.tenant_id
+    if is_session_revoked(user_id=user.id, tenant_id=check_tenant_id, token_iat=token_iat):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Session has been revoked by organization administrator.",

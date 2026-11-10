@@ -222,6 +222,9 @@ def get_me(current_user: User = Depends(get_current_user)):
     return {
         "id": current_user.id,
         "username": current_user.username,
+        "email": getattr(current_user, "email", None),
+        "avatar_url": getattr(current_user, "avatar_url", None),
+        "auth_provider": getattr(current_user, "auth_provider", "local"),
         "role": current_user.role,
         "tenant_id": current_user.tenant_id,
         "tenant_name": current_user.tenant.name if current_user.tenant else None,

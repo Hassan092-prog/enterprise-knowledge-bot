@@ -19,6 +19,7 @@ _redis_client: Optional[redis.Redis] = None
 _memory_revoked_users: dict = {}
 _memory_revoked_tenants: dict = {}
 _memory_revoked_tokens: set = set()
+_memory_assertions: dict = {}
 
 
 def get_redis_client() -> Optional[redis.Redis]:
@@ -137,4 +138,33 @@ def is_token_blacklisted(jti: str) -> bool:
         except Exception as e:
             logger.warning(f"Error checking token blacklist in Redis: {e}")
     return False
+
+
+def check_and_record_assertion_id(assertion_id: str, ttl_seconds: int = 600) -> bool:
+    """
+    Checks if a SAML Assertion ID has already been processed to prevent replay attacks (CWE-294).
+    Returns True if the assertion is fresh and was recorded; False if it was already used.
+    """
+    if not assertion_id:
+        return True
+
+    r = get_redis_client()
+    if r:
+        try:
+            res = r.set(f"sso:saml:assertion:{assertion_id}", "1", ex=ttl_seconds, nx=True)
+            return bool(res)
+        except Exception as e:
+            logger.error(f"Redis assertion replay check error: {e}")
+
+    # In-memory fallback
+    now = time.time()
+    expired = [k for k, exp in _memory_assertions.items() if exp < now]
+    for k in expired:
+        _memory_assertions.pop(k, None)
+
+    if assertion_id in _memory_assertions:
+        return False
+
+    _memory_assertions[assertion_id] = now + ttl_seconds
+    return True
 

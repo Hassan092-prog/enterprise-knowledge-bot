@@ -21,6 +21,7 @@ class SSOUserProfile:
     groups: List[str] = field(default_factory=list)
     raw_attributes: Dict[str, Any] = field(default_factory=dict)
     avatar_url: Optional[str] = None
+    assertion_id: Optional[str] = None
 
 
 class RoleMappingEngine:

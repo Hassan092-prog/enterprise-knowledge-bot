@@ -63,6 +63,9 @@ def discover_sso(email: str = Query(..., description="Corporate employee email a
     Auto-discovers the tenant organization and IdP provider for a corporate email address.
     Enables zero-friction enterprise logins (e.g. typing user@acme.com routes to Acme Okta/SAML).
     """
+    if not email or "@" not in email or len(email.strip()) > 320:
+        return SSODiscoverResponse(sso_enabled=False, message="Invalid employee email address format")
+
     if not SSO_ENABLED:
         return SSODiscoverResponse(sso_enabled=False, message="SSO is disabled on this platform")
 
@@ -169,6 +172,13 @@ def saml_acs(
     except Exception as e:
         logger.error(f"SAML assertion validation failed: {e}")
         raise HTTPException(status_code=400, detail=f"SAML authentication failed: {str(e)}")
+
+    # 3.1 Defend against SAML Assertion Replay Attacks (CWE-294)
+    if getattr(profile, "assertion_id", None):
+        from src.sso.revocation import check_and_record_assertion_id
+        if not check_and_record_assertion_id(profile.assertion_id):
+            logger.warning(f"SAML replay attack blocked for assertion_id={profile.assertion_id}")
+            raise HTTPException(status_code=400, detail="SAML assertion has already been processed (replay detected).")
 
     # If tenant_id not in RelayState, resolve via email domain
     if not tenant_id:
