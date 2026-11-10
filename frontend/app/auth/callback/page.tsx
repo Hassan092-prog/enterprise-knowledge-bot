@@ -48,8 +48,13 @@ function OAuthCallbackContent() {
         localStorage.removeItem("is_platform_admin");
       }
 
+      const returnTo = searchParams.get("return_to");
+      const safeReturnTo = (returnTo && returnTo.startsWith("/") && !returnTo.startsWith("//") && !returnTo.includes("\\"))
+        ? returnTo
+        : "/";
+
       setTimeout(() => {
-        router.push("/");
+        router.push(safeReturnTo);
       }, 500);
       return;
     }
@@ -78,10 +83,14 @@ function OAuthCallbackContent() {
           if (paramTenantId) {
             tenantIdNum = parseInt(paramTenantId, 10);
           } else if (state.startsWith("oidc_")) {
-            const parsed = parseInt(state.replace("oidc_", ""), 10);
-            if (!isNaN(parsed)) tenantIdNum = parsed;
+            const parts = state.split("_");
+            if (parts.length >= 2) {
+              const parsed = parseInt(parts[1], 10);
+              if (!isNaN(parsed)) tenantIdNum = parsed;
+            }
           }
           reqBody.tenant_id = tenantIdNum;
+          if (state) reqBody.state = state;
         }
 
         const res = await fetch(endpoint, {
@@ -112,8 +121,13 @@ function OAuthCallbackContent() {
           localStorage.removeItem("is_platform_admin");
         }
 
+        const returnTo = data.return_to || searchParams.get("return_to");
+        const safeReturnTo = (returnTo && returnTo.startsWith("/") && !returnTo.startsWith("//") && !returnTo.includes("\\"))
+          ? returnTo
+          : "/";
+
         setTimeout(() => {
-          router.push("/");
+          router.push(safeReturnTo);
         }, 600);
       } catch (err: unknown) {
         if (err instanceof Error) {

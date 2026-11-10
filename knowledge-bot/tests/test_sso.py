@@ -393,3 +393,112 @@ def test_saml_multiple_assertions_xsw_rejected():
         parse_saml_response(b64)
 
 
+def test_auth_logout_blacklists_token():
+    """Verify that /auth/logout adds JWT jti to blacklist and blacklisted tokens are blocked."""
+    from src.auth import create_access_token, SECRET_KEY, ALGORITHM
+    import jwt
+
+    test_token = create_access_token({"sub": "logout_tester", "tenant_id": 1, "role": "user"})
+    payload = jwt.decode(test_token, SECRET_KEY, algorithms=[ALGORITHM])
+    jti = payload["jti"]
+
+    assert not is_token_blacklisted(jti)
+
+    # Call logout
+    res = client.post("/auth/logout", headers={"Authorization": f"Bearer {test_token}"})
+    assert res.status_code == 200
+    assert res.json()["message"] == "Successfully logged out"
+
+    # Token must now be blacklisted
+    assert is_token_blacklisted(jti)
+
+
+def test_oidc_csrf_state_validation():
+    """Verify /auth/sso/oidc/callback strictly validates state parameter."""
+    # 1. Missing state is rejected
+    res_no_state = client.post(
+        "/auth/sso/oidc/callback",
+        json={"code": "auth_code_123", "redirect_uri": "http://localhost:3000/auth/callback", "tenant_id": 1}
+    )
+    assert res_no_state.status_code == 400
+    assert "state parameter is required" in res_no_state.json()["detail"]
+
+    # 2. Forged / invalid state is rejected
+    res_invalid_state = client.post(
+        "/auth/sso/oidc/callback",
+        json={"code": "auth_code_123", "redirect_uri": "http://localhost:3000/auth/callback", "tenant_id": 1, "state": "forged_state_xyz"}
+    )
+    assert res_invalid_state.status_code == 400
+    assert "OIDC state validation failed" in res_invalid_state.json()["detail"]
+
+
+def test_cross_tenant_sso_spoofing_prevented():
+    """Verify SAML ACS prevents cross-tenant identity spoofing if email belongs to another tenant."""
+    db = TestingSessionLocal()
+    # Create Tenant 2
+    t2 = Tenant(id=2, name="Victim Org", slug="victim-org", status="active", allowed_domains="victim.com")
+    db.add(t2)
+    # Create user in Tenant 2 with email alice@victim.com
+    victim_user = User(
+        id=200,
+        username="alice_victim",
+        email="alice@victim.com",
+        role="user",
+        tenant_id=2,
+        is_platform_admin=False
+    )
+    db.add(victim_user)
+    db.commit()
+    db.close()
+
+    # Now attempt SAML ACS on Tenant 1 asserting alice@victim.com
+    import uuid
+    future_time = "2099-01-01T00:00:00Z"
+    unique_assert_id = f"asrt_spoof_{uuid.uuid4().hex}"
+    spoof_xml = f"""<?xml version="1.0"?>
+    <samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
+                    xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"
+                    ID="resp_spoof_{uuid.uuid4().hex}" Version="2.0">
+        <samlp:Status>
+            <samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/>
+        </samlp:Status>
+        <saml:Assertion ID="{unique_assert_id}" Version="2.0">
+            <saml:Conditions NotBefore="2020-01-01T00:00:00Z" NotOnOrAfter="{future_time}">
+                <saml:AudienceRestriction>
+                    <saml:Audience>https://knowledge.alphalabs.nurexia.co/auth/sso/saml/metadata</saml:Audience>
+                </saml:AudienceRestriction>
+            </saml:Conditions>
+            <saml:Subject>
+                <saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">alice@victim.com</saml:NameID>
+            </saml:Subject>
+        </saml:Assertion>
+    </samlp:Response>"""
+    b64_spoof = base64.b64encode(spoof_xml.encode("utf-8")).decode("ascii")
+
+    with patch("src.sso.saml._verify_saml_signature", return_value=True):
+        res = client.post("/auth/sso/saml/acs", data={"SAMLResponse": b64_spoof, "RelayState": "tenant_1"})
+        assert res.status_code == 403
+        assert "belongs to another organization" in res.json()["detail"]
+
+
+def test_sso_revoke_endpoint():
+    """Verify /auth/sso/revoke enforces explicit targets and handles tenant-scoped revoking."""
+    # Seed tenant user in test DB
+    db = TestingSessionLocal()
+    u = User(id=1, username="tenant_superadmin", role="superadmin", tenant_id=1, is_platform_admin=False)
+    db.merge(u)
+    db.commit()
+    db.close()
+
+    # 1. Empty payload rejected with 400
+    res_empty = client.post("/auth/sso/revoke", json={})
+    assert res_empty.status_code == 400
+    assert "Explicit revocation target required" in res_empty.json()["detail"]
+
+    # 2. Targeted user revocation succeeds
+    res_user = client.post("/auth/sso/revoke", json={"user_id": 1, "reason": "Security rotation"})
+    assert res_user.status_code == 200
+    assert res_user.json()["status"] == "success"
+
+
+

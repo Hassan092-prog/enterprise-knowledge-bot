@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
@@ -323,9 +324,9 @@ def oauth_callback(provider: str, request: OAuthCallbackRequest, db: Session = D
     name = profile.get("name") or "User"
     avatar_url = profile.get("avatar_url")
 
-    # 1. Check if user already exists by email or provider sub
+    # 1. Check if user already exists by email (case-insensitive) or provider sub
     existing_user = db.query(User).filter(
-        (User.email == email) |
+        (func.lower(User.email) == (email or "").lower()) |
         ((User.auth_provider == provider) & (User.oauth_id == oauth_id))
     ).first()
 
@@ -557,7 +558,7 @@ def logout(request: Request, current_user: User = Depends(get_current_user)):
     from src.sso.revocation import blacklist_token
     import jwt
     import time
-    from src.config import SECRET_KEY, ALGORITHM
+    from src.auth import SECRET_KEY, ALGORITHM
 
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
@@ -572,7 +573,7 @@ def logout(request: Request, current_user: User = Depends(get_current_user)):
                     remaining = int(exp - time.time())
                     if remaining > 0:
                         ttl = remaining
-                blacklist_token(jti, ttl_seconds=ttl)
+                blacklist_token(jti, expires_in_seconds=ttl, ttl_seconds=ttl)
         except Exception as e:
             logger.warning(f"Error parsing token for logout blacklist: {e}")
 

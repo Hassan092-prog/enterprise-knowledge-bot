@@ -836,6 +836,7 @@ def get_tenant_sso_config(
         raise HTTPException(status_code=400, detail="Tenant context required")
 
     cfg = db.query(TenantSSOConfig).filter(TenantSSOConfig.tenant_id == tenant_id).first()
+    sp_meta_url = SSO_ENTITY_ID if "/auth/sso/saml/metadata" in SSO_ENTITY_ID else f"{SSO_ENTITY_ID.rstrip('/')}/auth/sso/saml/metadata"
     if not cfg:
         return {
             "configured": False,
@@ -846,7 +847,7 @@ def get_tenant_sso_config(
             "default_role": "user",
             "sp_entity_id": SSO_ENTITY_ID,
             "sp_acs_url": SSO_ACS_URL,
-            "sp_metadata_url": f"{SSO_ENTITY_ID}/auth/sso/saml/metadata",
+            "sp_metadata_url": sp_meta_url,
         }
 
     return {
@@ -868,7 +869,7 @@ def get_tenant_sso_config(
         "role_mapping_json": cfg.role_mapping_json,
         "sp_entity_id": SSO_ENTITY_ID,
         "sp_acs_url": SSO_ACS_URL,
-        "sp_metadata_url": f"{SSO_ENTITY_ID}/auth/sso/saml/metadata",
+        "sp_metadata_url": sp_meta_url,
         "updated_at": cfg.updated_at.isoformat() if cfg.updated_at else None,
     }
 
@@ -1022,7 +1023,7 @@ def upsert_tenant_sso_config(
         "role_mapping_json": cfg.role_mapping_json,
         "sp_entity_id": SSO_ENTITY_ID,
         "sp_acs_url": SSO_ACS_URL,
-        "sp_metadata_url": f"{SSO_ENTITY_ID}/auth/sso/saml/metadata",
+        "sp_metadata_url": SSO_ENTITY_ID if "/auth/sso/saml/metadata" in SSO_ENTITY_ID else f"{SSO_ENTITY_ID.rstrip('/')}/auth/sso/saml/metadata",
         "updated_at": cfg.updated_at.isoformat() if cfg.updated_at else None,
     }
 

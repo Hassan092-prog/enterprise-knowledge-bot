@@ -69,17 +69,19 @@ def revoke_tenant_sessions(tenant_id: int, ttl_seconds: int = 86400) -> bool:
     return True
 
 
-def blacklist_token(jti: str, expires_in_seconds: int = 86400) -> bool:
+def blacklist_token(jti: str, expires_in_seconds: int = 86400, ttl_seconds: Optional[int] = None) -> bool:
     """Add a specific JWT ID (jti) to the token blacklist."""
     if not jti:
         return False
     _memory_revoked_tokens.add(jti)
 
+    effective_ttl = ttl_seconds if ttl_seconds is not None else expires_in_seconds
+
     r = get_redis_client()
     if r:
         try:
-            r.set(f"sso:blacklist_token:{jti}", "1", ex=expires_in_seconds)
-            logger.info(f"Blacklisted token jti={jti}")
+            r.set(f"sso:blacklist_token:{jti}", "1", ex=effective_ttl)
+            logger.info(f"Blacklisted token jti={jti} (ttl={effective_ttl}s)")
             return True
         except Exception as e:
             logger.error(f"Failed to blacklist token in Redis: {e}")

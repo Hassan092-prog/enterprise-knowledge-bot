@@ -5,10 +5,12 @@ sso.py — Enterprise Single Sign-On (SSO), SAML 2.0, and OIDC API Endpoints.
 from fastapi import APIRouter, Depends, HTTPException, Query, Form, Request, status
 from fastapi.responses import Response, RedirectResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import logging
 import re
+import secrets
 from datetime import datetime
 
 from src.database import slugify, generate_join_code
@@ -28,10 +30,14 @@ from src.sso import (
     revoke_tenant_sessions,
 )
 from api.dependencies import get_db, get_current_user, get_current_admin_user
+from api.limiter import limiter, get_ip_rate_limit_key, get_user_rate_limit_key
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth/sso", tags=["Enterprise SSO"])
+
+# In-memory store for OIDC CSRF state validation fallback
+_memory_oidc_states: Dict[str, int] = {}
 
 
 class SSODiscoverResponse(BaseModel):
@@ -48,6 +54,7 @@ class OIDCCallbackRequest(BaseModel):
     code: str
     redirect_uri: str
     tenant_id: int
+    state: Optional[str] = None
 
 
 class RevocationRequest(BaseModel):
@@ -58,7 +65,12 @@ class RevocationRequest(BaseModel):
 
 
 @router.get("/discover", response_model=SSODiscoverResponse)
-def discover_sso(email: str = Query(..., description="Corporate employee email address"), db: Session = Depends(get_db)):
+@limiter.limit("30/minute", key_func=get_ip_rate_limit_key)
+def discover_sso(
+    request: Request,
+    email: str = Query(..., description="Corporate employee email address"),
+    db: Session = Depends(get_db)
+):
     """
     Auto-discovers the tenant organization and IdP provider for a corporate email address.
     Enables zero-friction enterprise logins (e.g. typing user@acme.com routes to Acme Okta/SAML).
@@ -107,6 +119,7 @@ def get_sp_metadata():
 
 
 @router.get("/saml/login")
+@limiter.limit("20/minute", key_func=get_ip_rate_limit_key)
 def saml_login(
     request: Request,
     tenant_id: int = Query(...),
@@ -141,6 +154,7 @@ def saml_login(
 
 
 @router.post("/saml/acs")
+@limiter.limit("30/minute", key_func=get_ip_rate_limit_key)
 def saml_acs(
     request: Request,
     SAMLResponse: str = Form(...),
@@ -201,11 +215,22 @@ def saml_acs(
 
     # 5. Provision or Update User
     user = db.query(User).filter(
-        (User.email == profile.email) |
+        (func.lower(User.email) == profile.email.lower()) |
         ((User.auth_provider == "saml") & (User.oauth_id == profile.oauth_id))
     ).first()
 
     if user:
+        # Cross-Tenant Security Boundary Check
+        if user.tenant_id != tenant.id and not user.is_platform_admin:
+            logger.warning(
+                f"Cross-tenant SAML login blocked: user '{user.username}' (tenant #{user.tenant_id}) "
+                f"attempted auth via tenant #{tenant.id} IdP"
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="Security violation: User account belongs to another organization."
+            )
+
         # Check suspended tenant
         if user.tenant and user.tenant.status == "suspended" and not user.is_platform_admin:
             raise HTTPException(status_code=403, detail="Organization is suspended.")
@@ -272,6 +297,15 @@ def saml_acs(
     # Issue Enterprise JWT Token
     token = create_user_token(user)
 
+    # Safe return_to parameter extracted from RelayState (Strict Open Redirect Prevention)
+    safe_return_to = None
+    if RelayState:
+        for part in RelayState.split("&"):
+            if part.startswith("return_to="):
+                candidate = part.split("return_to=")[-1].strip()
+                if candidate.startswith("/") and not candidate.startswith("//") and "\\" not in candidate:
+                    safe_return_to = candidate
+
     # If browser submitted directly via form, redirect to frontend callback
     accept_header = request.headers.get("accept", "")
     if "text/html" in accept_header or "application/xhtml+xml" in accept_header:
@@ -285,6 +319,8 @@ def saml_acs(
             "email": user.email or "",
             "is_platform_admin": "true" if user.is_platform_admin else "false",
         }
+        if safe_return_to:
+            params["return_to"] = safe_return_to
         redirect_target = f"{SSO_FRONTEND_URL}/auth/callback?{urlencode(params)}"
         return RedirectResponse(url=redirect_target, status_code=303)
 
@@ -297,10 +333,12 @@ def saml_acs(
         "is_platform_admin": bool(user.is_platform_admin),
         "username": user.username,
         "email": user.email,
+        "return_to": safe_return_to,
     }
 
 
 @router.get("/oidc/authorize")
+@limiter.limit("20/minute", key_func=get_ip_rate_limit_key)
 def oidc_authorize(
     request: Request,
     tenant_id: int = Query(...),
@@ -320,7 +358,19 @@ def oidc_authorize(
         )
 
     eff_redirect = redirect_uri or f"{SSO_FRONTEND_URL}/auth/callback"
-    state = f"oidc_{tenant_id}"
+    nonce = secrets.token_urlsafe(16)
+    state = f"oidc_{tenant_id}_{nonce}"
+
+    # Cache CSRF state token in Redis with 15m TTL (with in-memory fallback)
+    from src.sso.revocation import get_redis_client
+    r = get_redis_client()
+    if r:
+        try:
+            r.set(f"sso:oidc:state:{state}", str(tenant_id), ex=900)
+        except Exception as se:
+            logger.warning(f"OIDC state Redis cache notice: {se}")
+    _memory_oidc_states[state] = tenant_id
+
     auth_url = generate_oidc_authorization_url(
         issuer_url=cfg.oidc_issuer_url,
         client_id=cfg.oidc_client_id,
@@ -337,8 +387,41 @@ def oidc_authorize(
 
 
 @router.post("/oidc/callback")
-def oidc_callback(payload: OIDCCallbackRequest, db: Session = Depends(get_db)):
+@limiter.limit("30/minute", key_func=get_ip_rate_limit_key)
+def oidc_callback(
+    request: Request,
+    payload: OIDCCallbackRequest,
+    db: Session = Depends(get_db)
+):
     """Exchanges OIDC code for token, verifies claims, maps directory groups, and returns JWT."""
+    # CSRF State Validation
+    if not payload.state:
+        logger.warning("OIDC callback rejected: missing CSRF state parameter.")
+        raise HTTPException(
+            status_code=400,
+            detail="OIDC state parameter is required for CSRF protection."
+        )
+
+    from src.sso.revocation import get_redis_client
+    r = get_redis_client()
+    expected_tenant = None
+    if r:
+        try:
+            expected_tenant = r.get(f"sso:oidc:state:{payload.state}")
+            if expected_tenant:
+                r.delete(f"sso:oidc:state:{payload.state}")
+        except Exception:
+            pass
+    if not expected_tenant and payload.state in _memory_oidc_states:
+        expected_tenant = str(_memory_oidc_states.pop(payload.state, None))
+
+    if not expected_tenant or int(expected_tenant) != payload.tenant_id:
+        logger.warning(f"OIDC CSRF state mismatch or invalid: state={payload.state}, expected tenant={expected_tenant}, got #{payload.tenant_id}")
+        raise HTTPException(
+            status_code=400,
+            detail="OIDC state validation failed: invalid, expired, or tenant mismatch (possible CSRF attack)."
+        )
+
     cfg = db.query(TenantSSOConfig).filter(
         TenantSSOConfig.tenant_id == payload.tenant_id,
         TenantSSOConfig.is_enabled == True,
@@ -372,11 +455,26 @@ def oidc_callback(payload: OIDCCallbackRequest, db: Session = Depends(get_db)):
     )
 
     user = db.query(User).filter(
-        (User.email == profile.email) |
+        (func.lower(User.email) == profile.email.lower()) |
         ((User.auth_provider == "oidc") & (User.oauth_id == profile.oauth_id))
     ).first()
 
     if user:
+        # Cross-Tenant Security Boundary Check
+        if user.tenant_id != tenant.id and not user.is_platform_admin:
+            logger.warning(
+                f"Cross-tenant OIDC login blocked: user '{user.username}' (tenant #{user.tenant_id}) "
+                f"attempted auth via tenant #{tenant.id} IdP"
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="Security violation: User account belongs to another organization."
+            )
+
+        # Check suspended tenant
+        if user.tenant and user.tenant.status == "suspended" and not user.is_platform_admin:
+            raise HTTPException(status_code=403, detail="Organization is suspended.")
+
         if user.role != "superadmin":
             user.role = resolved_role
         user.auth_provider = "oidc"
@@ -452,7 +550,9 @@ def oidc_callback(payload: OIDCCallbackRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/revoke")
+@limiter.limit("15/minute", key_func=get_user_rate_limit_key)
 def revoke_sessions(
+    request: Request,
     payload: RevocationRequest,
     current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db)
@@ -480,12 +580,12 @@ def revoke_sessions(
     target_user_id = payload.user_id
     target_tenant_id = payload.tenant_id
 
-    # If neither user_id nor tenant_id was specified, default to caller's tenant
+    # Require explicit revocation target to prevent accidental organization-wide logout
     if target_user_id is None and target_tenant_id is None:
-        target_tenant_id = current_user.tenant_id
-
-    if target_user_id is None and target_tenant_id is None:
-        raise HTTPException(status_code=400, detail="Tenant context required: specify tenant_id, user_id, or all_tenants=True")
+        raise HTTPException(
+            status_code=400,
+            detail="Explicit revocation target required: specify 'user_id', 'tenant_id', or 'all_tenants=True'."
+        )
 
     # Tenant admins can only revoke sessions within their own tenant
     if not current_user.is_platform_admin:

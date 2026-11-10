@@ -690,7 +690,7 @@ def query_bot(
         tenant = db.query(Tenant).filter(Tenant.id == current_user.tenant_id).first()
         if tenant:
             check_and_reset_tenant_budget(tenant, db)
-            if tenant.monthly_token_budget is not None and (tenant.current_month_tokens or 0) >= tenant.monthly_token_budget:
+            if not current_user.is_platform_admin and tenant.monthly_token_budget is not None and (tenant.current_month_tokens or 0) >= tenant.monthly_token_budget:
                 raise HTTPException(
                     status_code=402,
                     detail="Monthly token budget exceeded. Contact your organization admin."
