@@ -48,6 +48,7 @@ from api.auth import router as auth_router
 from api.admin import router as admin_router
 from api.platform import router as platform_router
 from api.graph import router as graph_router
+from api.sso import router as sso_router
 
 api_logger = logging.getLogger("api.main")
 
@@ -123,6 +124,7 @@ app.include_router(auth_router, prefix="/auth")
 app.include_router(admin_router, prefix="/admin")
 app.include_router(platform_router, prefix="/platform")
 app.include_router(graph_router)
+app.include_router(sso_router)
 
 from fastapi.exceptions import RequestValidationError
 

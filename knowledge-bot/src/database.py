@@ -69,7 +69,7 @@ def run_db_migrations():
     """
     from src.models import (
         Tenant, User, ChatSession, AccessRequest, ActivityLog, PendingTransfer,
-        KnowledgeNode, KnowledgeEdge
+        KnowledgeNode, KnowledgeEdge, TenantSSOConfig
     )
 
     logger.info("Initializing database tables and running schema migration...")
@@ -170,6 +170,7 @@ def run_db_migrations():
                 try:
                     conn.execute(text("SELECT setval(pg_get_serial_sequence('tenants', 'id'), COALESCE((SELECT MAX(id) FROM tenants), 1));"))
                     conn.execute(text("SELECT setval(pg_get_serial_sequence('users', 'id'), COALESCE((SELECT MAX(id) FROM users), 1));"))
+                    conn.execute(text("SELECT setval(pg_get_serial_sequence('tenant_sso_configs', 'id'), COALESCE((SELECT MAX(id) FROM tenant_sso_configs), 1));"))
                     conn.commit()
                     logger.info("Synchronized PostgreSQL auto-increment sequences.")
                 except Exception as seq_err:

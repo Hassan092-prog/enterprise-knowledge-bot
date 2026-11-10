@@ -10,6 +10,10 @@ export default function Login() {
   const API_URL = getApiUrl();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [authMethod, setAuthMethod] = useState<"credentials" | "sso">("credentials");
+  const [ssoEmail, setSsoEmail] = useState("");
+  const [isDiscoveringSso, setIsDiscoveringSso] = useState(false);
+  const [ssoStatus, setSsoStatus] = useState("");
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const router = useRouter();
@@ -78,6 +82,40 @@ export default function Login() {
         setError("Failed to connect to identity provider.");
       }
       setIsLoading(false);
+    }
+  };
+
+  const handleSSOLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!ssoEmail || !ssoEmail.includes("@")) {
+      setError("Please provide a valid corporate work email address (e.g. user@company.com).");
+      return;
+    }
+    setError("");
+    setSsoStatus("");
+    setIsDiscoveringSso(true);
+    try {
+      const res = await fetch(`${API_URL}/auth/sso/discover?email=${encodeURIComponent(ssoEmail.trim())}`);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || "Unable to discover Single Sign-On configuration");
+      }
+      const data = await res.json();
+      if (data.sso_enabled && data.login_url) {
+        setSsoStatus(`Connecting to ${data.tenant_name || "corporate"} ${data.idp_type?.toUpperCase()} IdP...`);
+        window.location.href = data.login_url;
+      } else {
+        const domain = ssoEmail.split("@")[1] || "";
+        setError(`No active Single Sign-On configuration found for corporate domain '@${domain}'. Please log in using credentials.`);
+      }
+    } catch (err: unknown) {
+      if (err instanceof Error) {
+        setError(err.message);
+      } else {
+        setError("Failed to discover enterprise identity provider.");
+      }
+    } finally {
+      setIsDiscoveringSso(false);
     }
   };
 
@@ -163,51 +201,115 @@ export default function Login() {
             <div className="w-full border-t border-rule" />
           </div>
           <div className="relative flex justify-center text-[10px] uppercase font-mono tracking-wider">
-            <span className="bg-paper-2 px-2 text-muted">Or credentials</span>
+            <span className="bg-paper-2 px-2 text-muted">Or sign in with</span>
           </div>
         </div>
 
-        <form onSubmit={handleLogin} className="space-y-4">
-          <div>
-            <label className="block font-mono text-[11px] uppercase tracking-wider text-muted mb-1.5">
-              Username
-            </label>
-            <input
-              type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              className="w-full bg-paper border border-rule focus:border-accent focus:outline-none rounded-base py-2 px-3 text-sm text-ink placeholder:text-muted transition-colors font-body"
-              placeholder="e.g. analyst"
-              required
-            />
-          </div>
-          <div>
-            <div className="flex justify-between items-center mb-1.5">
-              <label className="block font-mono text-[11px] uppercase tracking-wider text-muted">
-                Password
-              </label>
-            </div>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full bg-paper border border-rule focus:border-accent focus:outline-none rounded-base py-2 px-3 text-sm text-ink placeholder:text-muted transition-colors font-body"
-              placeholder="••••••••"
-              required
-            />
-          </div>
+        {/* Auth Method Selector */}
+        <div className="flex border border-rule rounded-base p-0.5 bg-paper mb-4">
           <button
-            type="submit"
-            disabled={isLoading}
-            className="w-full py-2.5 px-4 rounded-base bg-accent hover:bg-accent-hover active:scale-[0.99] text-accent-ink text-xs font-mono uppercase tracking-wider font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed mt-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus cursor-pointer flex items-center justify-center gap-2"
+            type="button"
+            onClick={() => { setAuthMethod("credentials"); setError(""); }}
+            className={`flex-1 py-1.5 text-center text-xs font-mono uppercase tracking-wider rounded transition-all cursor-pointer ${
+              authMethod === "credentials"
+                ? "bg-paper-3 text-ink font-semibold shadow-xs"
+                : "text-muted hover:text-ink"
+            }`}
           >
-            {isLoading ? (
-              <CyberSpinner size="sm" variant="ink" label="Authenticating Identity..." />
-            ) : (
-              "Authorize Access →"
-            )}
+            Password
           </button>
-        </form>
+          <button
+            type="button"
+            onClick={() => { setAuthMethod("sso"); setError(""); }}
+            className={`flex-1 py-1.5 text-center text-xs font-mono uppercase tracking-wider rounded transition-all cursor-pointer ${
+              authMethod === "sso"
+                ? "bg-paper-3 text-ink font-semibold shadow-xs"
+                : "text-muted hover:text-ink"
+            }`}
+          >
+            Enterprise SSO
+          </button>
+        </div>
+
+        {authMethod === "credentials" ? (
+          <form onSubmit={handleLogin} className="space-y-4">
+            <div>
+              <label className="block font-mono text-[11px] uppercase tracking-wider text-muted mb-1.5">
+                Username
+              </label>
+              <input
+                type="text"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                className="w-full bg-paper border border-rule focus:border-accent focus:outline-none rounded-base py-2 px-3 text-sm text-ink placeholder:text-muted transition-colors font-body"
+                placeholder="e.g. analyst"
+                required
+              />
+            </div>
+            <div>
+              <div className="flex justify-between items-center mb-1.5">
+                <label className="block font-mono text-[11px] uppercase tracking-wider text-muted">
+                  Password
+                </label>
+              </div>
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full bg-paper border border-rule focus:border-accent focus:outline-none rounded-base py-2 px-3 text-sm text-ink placeholder:text-muted transition-colors font-body"
+                placeholder="••••••••"
+                required
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={isLoading}
+              className="w-full py-2.5 px-4 rounded-base bg-accent hover:bg-accent-hover active:scale-[0.99] text-accent-ink text-xs font-mono uppercase tracking-wider font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed mt-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus cursor-pointer flex items-center justify-center gap-2"
+            >
+              {isLoading ? (
+                <CyberSpinner size="sm" variant="ink" label="Authenticating Identity..." />
+              ) : (
+                "Authorize Access →"
+              )}
+            </button>
+          </form>
+        ) : (
+          <form onSubmit={handleSSOLogin} className="space-y-4">
+            <div>
+              <label className="block font-mono text-[11px] uppercase tracking-wider text-muted mb-1.5">
+                Corporate Work Email
+              </label>
+              <input
+                type="email"
+                value={ssoEmail}
+                onChange={(e) => setSsoEmail(e.target.value)}
+                className="w-full bg-paper border border-rule focus:border-accent focus:outline-none rounded-base py-2 px-3 text-sm text-ink placeholder:text-muted transition-colors font-body"
+                placeholder="e.g. employee@company.com"
+                required
+              />
+              <p className="text-[11px] text-muted font-mono mt-1.5">
+                Auto-discovers your organization's SAML 2.0 or OIDC Identity Provider (Okta, Entra ID, Ping).
+              </p>
+            </div>
+            {ssoStatus && (
+              <div className="p-2.5 bg-paper border border-rule rounded-base text-xs font-mono text-muted flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-accent animate-ping" />
+                <span>{ssoStatus}</span>
+              </div>
+            )}
+            <button
+              type="submit"
+              disabled={isDiscoveringSso}
+              className="w-full py-2.5 px-4 rounded-base bg-accent hover:bg-accent-hover active:scale-[0.99] text-accent-ink text-xs font-mono uppercase tracking-wider font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed mt-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus cursor-pointer flex items-center justify-center gap-2"
+            >
+              {isDiscoveringSso ? (
+                <CyberSpinner size="sm" variant="ink" label="Resolving Corporate IdP..." />
+              ) : (
+                "Continue with Enterprise SSO →"
+              )}
+            </button>
+          </form>
+        )}
 
         <div className="mt-6 pt-4 border-t border-rule text-center">
           <p className="text-xs text-muted">

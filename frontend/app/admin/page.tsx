@@ -58,7 +58,7 @@ type PendingTransfer = {
 
 export default function AdminDashboard() {
   const API_URL = getApiUrl();
-  const [activeTab, setActiveTab] = useState<"roster" | "corpus" | "graph" | "activity" | "settings">("roster");
+  const [activeTab, setActiveTab] = useState<"roster" | "corpus" | "graph" | "activity" | "settings" | "sso">("roster");
   const [stats, setStats] = useState<Stats | null>(null);
   const [requests, setRequests] = useState<RoleRequest[]>([]);
   const [users, setUsers] = useState<UserData[]>([]);
@@ -77,6 +77,51 @@ export default function AdminDashboard() {
   const [isKeyCopied, setIsKeyCopied] = useState<boolean>(false);
   const [pendingTransfers, setPendingTransfers] = useState<PendingTransfer[]>([]);
   const [transferTargetUserId, setTransferTargetUserId] = useState<number | "">("");
+
+  // Enterprise Single Sign-On (SSO) & SAML/OIDC (Phase 12)
+  const [ssoConfig, setSsoConfig] = useState<{
+    configured: boolean;
+    id?: number;
+    tenant_id?: number;
+    idp_type: string;
+    is_enabled: boolean;
+    enforce_sso: boolean;
+    idp_entity_id: string;
+    idp_sso_url: string;
+    idp_x509_cert: string;
+    idp_metadata_xml: string;
+    oidc_issuer_url: string;
+    oidc_client_id: string;
+    oidc_client_secret: string;
+    oidc_scopes: string;
+    allowed_domains: string;
+    default_role: string;
+    role_mapping_json: string;
+    sp_metadata_url?: string;
+    sp_acs_url?: string;
+    sp_entity_id?: string;
+  }>({
+    configured: false,
+    idp_type: "saml",
+    is_enabled: true,
+    enforce_sso: false,
+    idp_entity_id: "",
+    idp_sso_url: "",
+    idp_x509_cert: "",
+    idp_metadata_xml: "",
+    oidc_issuer_url: "",
+    oidc_client_id: "",
+    oidc_client_secret: "",
+    oidc_scopes: "openid email profile groups",
+    allowed_domains: "",
+    default_role: "user",
+    role_mapping_json: '{\n  "Admins": "admin",\n  "Editors": "editor"\n}',
+  });
+  const [isLoadingSso, setIsLoadingSso] = useState<boolean>(false);
+  const [isSavingSso, setIsSavingSso] = useState<boolean>(false);
+  const [isRevokingSessions, setIsRevokingSessions] = useState<boolean>(false);
+  const [ssoFeedback, setSsoFeedback] = useState<{ type: "success" | "error"; msg: string } | null>(null);
+  const [ssoCopiedItem, setSsoCopiedItem] = useState<string | null>(null);
 
   // Knowledge Graph State (Phase 7)
   const [graphStats, setGraphStats] = useState<{
@@ -361,6 +406,43 @@ export default function AdminDashboard() {
     }
   };
 
+  const fetchSSOConfig = useCallback(async () => {
+    setIsLoadingSso(true);
+    setSsoFeedback(null);
+    try {
+      const res = await authFetch(`${API_URL}/admin/sso/config`);
+      if (res.ok) {
+        const data = await res.json();
+        setSsoConfig({
+          configured: data.configured ?? !!data.id,
+          id: data.id,
+          tenant_id: data.tenant_id,
+          idp_type: data.idp_type || "saml",
+          is_enabled: data.is_enabled ?? true,
+          enforce_sso: data.enforce_sso ?? false,
+          idp_entity_id: data.idp_entity_id || "",
+          idp_sso_url: data.idp_sso_url || "",
+          idp_x509_cert: data.idp_x509_cert || "",
+          idp_metadata_xml: data.idp_metadata_xml || "",
+          oidc_issuer_url: data.oidc_issuer_url || "",
+          oidc_client_id: data.oidc_client_id || "",
+          oidc_client_secret: data.oidc_client_secret || "",
+          oidc_scopes: data.oidc_scopes || "openid email profile groups",
+          allowed_domains: data.allowed_domains || "",
+          default_role: data.default_role || "user",
+          role_mapping_json: data.role_mapping_json || '{\n  "Admins": "admin",\n  "Editors": "editor"\n}',
+          sp_metadata_url: data.sp_metadata_url,
+          sp_acs_url: data.sp_acs_url,
+          sp_entity_id: data.sp_entity_id,
+        });
+      }
+    } catch (err: any) {
+      console.error("Failed to load SSO configuration:", err);
+    } finally {
+      setIsLoadingSso(false);
+    }
+  }, [API_URL, authFetch]);
+
   useEffect(() => {
     fetchStatsAndData();
   }, [fetchStatsAndData]);
@@ -370,8 +452,10 @@ export default function AdminDashboard() {
       fetchActivity(activityCategory, activityUserId, activitySearch, activityTimeRange, activityOffset);
     } else if (activeTab === "graph") {
       fetchGraphData();
+    } else if (activeTab === "sso") {
+      fetchSSOConfig();
     }
-  }, [activeTab, activityCategory, activityUserId, activitySearch, activityTimeRange, activityOffset, fetchActivity, fetchGraphData]);
+  }, [activeTab, activityCategory, activityUserId, activitySearch, activityTimeRange, activityOffset, fetchActivity, fetchGraphData, fetchSSOConfig]);
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -687,6 +771,102 @@ export default function AdminDashboard() {
     }
   };
 
+  const copyToClipboard = (text: string, label: string) => {
+    navigator.clipboard.writeText(text);
+    setSsoCopiedItem(label);
+    setTimeout(() => setSsoCopiedItem(null), 2000);
+  };
+
+  const handleSaveSSOConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSavingSso(true);
+    setSsoFeedback(null);
+    try {
+      const res = await authFetch(`${API_URL}/admin/sso/config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(ssoConfig),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || "Failed to save SSO configuration");
+      }
+      const saved = await res.json();
+      setSsoConfig((prev) => ({
+        ...prev,
+        ...saved,
+        configured: true,
+      }));
+      setSsoFeedback({ type: "success", msg: "SSO configuration saved successfully and active!" });
+    } catch (err: any) {
+      setSsoFeedback({ type: "error", msg: err.message || "Failed to save SSO configuration" });
+    } finally {
+      setIsSavingSso(false);
+    }
+  };
+
+  const handleDeleteSSOConfig = async () => {
+    if (!window.confirm("Disable Single Sign-On and delete this configuration? Corporate users will revert to standard credentials.")) {
+      return;
+    }
+    setIsSavingSso(true);
+    setSsoFeedback(null);
+    try {
+      const res = await authFetch(`${API_URL}/admin/sso/config`, { method: "DELETE" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || "Failed to delete SSO configuration");
+      }
+      setSsoConfig({
+        configured: false,
+        idp_type: "saml",
+        is_enabled: false,
+        enforce_sso: false,
+        idp_entity_id: "",
+        idp_sso_url: "",
+        idp_x509_cert: "",
+        idp_metadata_xml: "",
+        oidc_issuer_url: "",
+        oidc_client_id: "",
+        oidc_client_secret: "",
+        oidc_scopes: "openid email profile groups",
+        allowed_domains: "",
+        default_role: "user",
+        role_mapping_json: '{\n  "Admins": "admin",\n  "Editors": "editor"\n}',
+      });
+      setSsoFeedback({ type: "success", msg: "Single Sign-On configuration removed." });
+    } catch (err: any) {
+      setSsoFeedback({ type: "error", msg: err.message || "Failed to delete SSO configuration" });
+    } finally {
+      setIsSavingSso(false);
+    }
+  };
+
+  const handleRevokeAllSessions = async () => {
+    if (!window.confirm("EMERGENCY REVOCATION:\n\nRevoke all active sessions for your organization? This will instantly invalidate all active JWT tokens in Redis. Everyone (including you) will be logged out.")) {
+      return;
+    }
+    setIsRevokingSessions(true);
+    setSsoFeedback(null);
+    try {
+      const res = await authFetch(`${API_URL}/auth/sso/revoke`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ all_tenants: false }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || "Session revocation failed");
+      }
+      alert("All organization sessions have been revoked. Please sign in again.");
+      localStorage.removeItem("token");
+      router.push("/login");
+    } catch (err: any) {
+      setSsoFeedback({ type: "error", msg: err.message || "Failed to revoke active sessions" });
+      setIsRevokingSessions(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-paper text-ink p-4 sm:p-8">
       <div className="max-w-5xl mx-auto space-y-6">
@@ -877,6 +1057,19 @@ export default function AdminDashboard() {
             }`}
           >
             Organization Settings
+          </button>
+          <button
+            onClick={() => setActiveTab("sso")}
+            className={`py-2 px-4 text-xs font-mono uppercase tracking-wider border-b-2 font-semibold transition-colors cursor-pointer flex items-center gap-1.5 ${
+              activeTab === "sso"
+                ? "border-accent text-ink"
+                : "border-transparent text-muted hover:text-ink"
+            }`}
+          >
+            <span>SSO & Directory Sync</span>
+            {ssoConfig.configured && (
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+            )}
           </button>
         </div>
 
@@ -1898,6 +2091,429 @@ export default function AdminDashboard() {
                   </div>
                 ))}
               </div>
+            )}
+          </div>
+        )}
+
+        {/* TAB 6: SSO & DIRECTORY SYNC (PHASE 12) */}
+        {activeTab === "sso" && (
+          <div className="space-y-6">
+            {/* Header Landmark */}
+            <div className="bg-paper-2 p-5 sm:p-6 rounded-card border border-rule">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 pb-4 mb-4 border-b border-rule">
+                <div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="w-2 h-2 rounded-full bg-accent animate-pulse" />
+                    <span className="font-mono text-xs uppercase tracking-wider text-muted font-medium">
+                      Enterprise Identity & Single Sign-On
+                    </span>
+                  </div>
+                  <h2 className="text-base sm:text-lg font-display font-semibold text-ink">
+                    SAML 2.0 & OIDC Directory Sync
+                  </h2>
+                </div>
+                <div className="flex items-center gap-2">
+                  {ssoConfig.configured ? (
+                    <span className={`font-mono text-[11px] px-2.5 py-1 rounded border uppercase font-semibold ${
+                      ssoConfig.is_enabled
+                        ? "bg-emerald-500/10 border-emerald-500/40 text-emerald-500"
+                        : "bg-amber-500/10 border-amber-500/40 text-amber-500"
+                    }`}>
+                      {ssoConfig.is_enabled ? "● SSO Active" : "○ SSO Disabled"}
+                    </span>
+                  ) : (
+                    <span className="font-mono text-[11px] px-2.5 py-1 rounded border border-rule bg-paper text-muted uppercase">
+                      Not Configured
+                    </span>
+                  )}
+                  {ssoConfig.enforce_sso && (
+                    <span className="font-mono text-[11px] px-2.5 py-1 rounded border border-accent/40 bg-accent-subtle text-accent uppercase font-semibold">
+                      Enforced
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <p className="text-xs text-muted leading-relaxed">
+                Federate authentication with your corporate Identity Provider (Okta, Microsoft Entra ID, Google Workspace, PingFederate).
+                Users can authenticate seamlessly via work email auto-discovery and automatically inherit RBAC roles from corporate directory group claims.
+              </p>
+
+              {ssoFeedback && (
+                <div className={`mt-4 p-3 rounded-base text-xs font-mono border ${
+                  ssoFeedback.type === "success"
+                    ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-500"
+                    : "bg-ruby-subtle border-ruby/30 text-ruby"
+                }`}>
+                  [{ssoFeedback.type.toUpperCase()}] {ssoFeedback.msg}
+                </div>
+              )}
+            </div>
+
+            {isLoadingSso ? (
+              <div className="bg-paper-2 p-8 rounded-card border border-rule flex flex-col items-center justify-center">
+                <CyberSpinner size="lg" variant="accent" label="Loading Single Sign-On configuration..." />
+              </div>
+            ) : (
+              <form onSubmit={handleSaveSSOConfig} className="space-y-6">
+                {/* Protocol & Enforcement Settings */}
+                <div className="bg-paper-2 p-5 sm:p-6 rounded-card border border-rule space-y-4">
+                  <h3 className="text-xs font-mono uppercase tracking-wider text-muted font-semibold pb-2 border-b border-rule">
+                    1. Identity Provider Protocol & Enforcement
+                  </h3>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block font-mono text-[11px] uppercase tracking-wider text-muted mb-1.5">
+                        Protocol Architecture
+                      </label>
+                      <select
+                        value={ssoConfig.idp_type}
+                        onChange={(e) => setSsoConfig({ ...ssoConfig, idp_type: e.target.value })}
+                        className="w-full bg-paper border border-rule focus:border-accent focus:outline-none rounded-base py-2 px-3 text-xs text-ink font-body"
+                      >
+                        <option value="saml">SAML 2.0 (Okta, Entra ID, PingFederate, Shibboleth)</option>
+                        <option value="oidc">Enterprise OIDC (Okta, Google Workspace, Keycloak, Auth0)</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block font-mono text-[11px] uppercase tracking-wider text-muted mb-1.5">
+                        Corporate Domains (Routing)
+                      </label>
+                      <input
+                        type="text"
+                        value={ssoConfig.allowed_domains}
+                        onChange={(e) => setSsoConfig({ ...ssoConfig, allowed_domains: e.target.value })}
+                        placeholder="e.g. acme.com, corp.acme.com"
+                        className="w-full bg-paper border border-rule focus:border-accent focus:outline-none rounded-base py-2 px-3 text-xs text-ink font-mono"
+                      />
+                      <span className="text-[10px] text-muted font-mono mt-1 block">
+                        Work emails matching these domains route directly to your IdP.
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
+                    <label className="flex items-start gap-3 p-3 bg-paper rounded-base border border-rule cursor-pointer hover:border-rule-strong">
+                      <input
+                        type="checkbox"
+                        checked={ssoConfig.is_enabled}
+                        onChange={(e) => setSsoConfig({ ...ssoConfig, is_enabled: e.target.checked })}
+                        className="mt-0.5 accent-accent"
+                      />
+                      <div>
+                        <span className="font-mono text-xs uppercase tracking-wider font-semibold text-ink block">
+                          Enable Single Sign-On
+                        </span>
+                        <span className="text-[11px] text-muted block mt-0.5">
+                          Allows members to authenticate using enterprise SSO credentials.
+                        </span>
+                      </div>
+                    </label>
+
+                    <label className="flex items-start gap-3 p-3 bg-paper rounded-base border border-rule cursor-pointer hover:border-rule-strong">
+                      <input
+                        type="checkbox"
+                        checked={ssoConfig.enforce_sso}
+                        onChange={(e) => setSsoConfig({ ...ssoConfig, enforce_sso: e.target.checked })}
+                        className="mt-0.5 accent-accent"
+                      />
+                      <div>
+                        <span className="font-mono text-xs uppercase tracking-wider font-semibold text-ink block">
+                          Enforce SSO (Strict Mode)
+                        </span>
+                        <span className="text-[11px] text-muted block mt-0.5">
+                          Disables standard password login for users in your organization.
+                        </span>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+
+                {/* Service Provider (SP) Metadata Box (Always shown for reference) */}
+                <div className="bg-paper-2 p-5 sm:p-6 rounded-card border border-rule space-y-4">
+                  <div className="flex justify-between items-center pb-2 border-b border-rule">
+                    <h3 className="text-xs font-mono uppercase tracking-wider text-muted font-semibold">
+                      2. Service Provider (SP) Metadata
+                    </h3>
+                    <span className="text-[10px] font-mono text-muted uppercase">Copy into your IdP</span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 font-mono text-xs">
+                    <div>
+                      <span className="text-[10px] uppercase text-muted block mb-1">Entity ID / Audience URI</span>
+                      <div className="flex items-center gap-2 bg-paper p-2 rounded-base border border-rule">
+                        <span className="truncate text-ink">{ssoConfig.sp_entity_id || `${API_URL}/auth/sso/saml/metadata`}</span>
+                        <button
+                          type="button"
+                          onClick={() => copyToClipboard(ssoConfig.sp_entity_id || `${API_URL}/auth/sso/saml/metadata`, "entity_id")}
+                          className="shrink-0 text-[10px] text-accent uppercase font-bold hover:underline cursor-pointer"
+                        >
+                          {ssoCopiedItem === "entity_id" ? "Copied!" : "Copy"}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div>
+                      <span className="text-[10px] uppercase text-muted block mb-1">
+                        {ssoConfig.idp_type === "saml" ? "ACS URL (Assertion Consumer)" : "OIDC Redirect Callback URI"}
+                      </span>
+                      <div className="flex items-center gap-2 bg-paper p-2 rounded-base border border-rule">
+                        <span className="truncate text-ink">
+                          {ssoConfig.idp_type === "saml"
+                            ? (ssoConfig.sp_acs_url || `${API_URL}/auth/sso/saml/acs`)
+                            : (typeof window !== "undefined" ? `${window.location.origin}/auth/callback?provider=oidc` : "")}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => copyToClipboard(
+                            ssoConfig.idp_type === "saml"
+                              ? (ssoConfig.sp_acs_url || `${API_URL}/auth/sso/saml/acs`)
+                              : `${window.location.origin}/auth/callback?provider=oidc`,
+                            "acs_url"
+                          )}
+                          className="shrink-0 text-[10px] text-accent uppercase font-bold hover:underline cursor-pointer"
+                        >
+                          {ssoCopiedItem === "acs_url" ? "Copied!" : "Copy"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {ssoConfig.idp_type === "saml" && (
+                    <div className="pt-2 flex items-center justify-between text-xs font-mono">
+                      <span className="text-muted">Direct SP Metadata XML Endpoint:</span>
+                      <a
+                        href={`${API_URL}/auth/sso/saml/metadata`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-accent hover:underline flex items-center gap-1 font-semibold"
+                      >
+                        <span>View / Download SP Metadata XML →</span>
+                      </a>
+                    </div>
+                  )}
+                </div>
+
+                {/* Identity Provider Details */}
+                {ssoConfig.idp_type === "saml" ? (
+                  <div className="bg-paper-2 p-5 sm:p-6 rounded-card border border-rule space-y-4">
+                    <h3 className="text-xs font-mono uppercase tracking-wider text-muted font-semibold pb-2 border-b border-rule">
+                      3. SAML 2.0 Identity Provider (IdP) Configuration
+                    </h3>
+
+                    {/* Quick Metadata XML Parser */}
+                    <div>
+                      <div className="flex justify-between items-center mb-1.5">
+                        <label className="block font-mono text-[11px] uppercase tracking-wider text-muted">
+                          Fast Track: Paste IdP Metadata XML
+                        </label>
+                        <span className="text-[10px] font-mono text-emerald-500 uppercase">Auto-extracts certificates & endpoints</span>
+                      </div>
+                      <textarea
+                        value={ssoConfig.idp_metadata_xml}
+                        onChange={(e) => setSsoConfig({ ...ssoConfig, idp_metadata_xml: e.target.value })}
+                        rows={4}
+                        placeholder='<EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://idp.example.com">...'
+                        className="w-full bg-paper border border-rule focus:border-accent focus:outline-none rounded-base py-2 px-3 text-xs text-ink font-mono"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block font-mono text-[11px] uppercase tracking-wider text-muted mb-1.5">
+                          IdP Entity ID (Issuer URI)
+                        </label>
+                        <input
+                          type="text"
+                          value={ssoConfig.idp_entity_id}
+                          onChange={(e) => setSsoConfig({ ...ssoConfig, idp_entity_id: e.target.value })}
+                          placeholder="https://www.okta.com/exk123456"
+                          className="w-full bg-paper border border-rule focus:border-accent focus:outline-none rounded-base py-2 px-3 text-xs text-ink font-mono"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block font-mono text-[11px] uppercase tracking-wider text-muted mb-1.5">
+                          IdP SingleSignOnService URL
+                        </label>
+                        <input
+                          type="text"
+                          value={ssoConfig.idp_sso_url}
+                          onChange={(e) => setSsoConfig({ ...ssoConfig, idp_sso_url: e.target.value })}
+                          placeholder="https://dev-123.okta.com/app/app_name/sso/saml"
+                          className="w-full bg-paper border border-rule focus:border-accent focus:outline-none rounded-base py-2 px-3 text-xs text-ink font-mono"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block font-mono text-[11px] uppercase tracking-wider text-muted mb-1.5">
+                        IdP Public X.509 Certificate (PEM)
+                      </label>
+                      <textarea
+                        value={ssoConfig.idp_x509_cert}
+                        onChange={(e) => setSsoConfig({ ...ssoConfig, idp_x509_cert: e.target.value })}
+                        rows={4}
+                        placeholder="-----BEGIN CERTIFICATE-----&#10;MIIDpDCCAoygAwIBAgIGAX...&#10;-----END CERTIFICATE-----"
+                        className="w-full bg-paper border border-rule focus:border-accent focus:outline-none rounded-base py-2 px-3 text-xs text-ink font-mono"
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="bg-paper-2 p-5 sm:p-6 rounded-card border border-rule space-y-4">
+                    <h3 className="text-xs font-mono uppercase tracking-wider text-muted font-semibold pb-2 border-b border-rule">
+                      3. Enterprise OIDC Configuration
+                    </h3>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block font-mono text-[11px] uppercase tracking-wider text-muted mb-1.5">
+                          OIDC Issuer URL (Discovery)
+                        </label>
+                        <input
+                          type="text"
+                          value={ssoConfig.oidc_issuer_url}
+                          onChange={(e) => setSsoConfig({ ...ssoConfig, oidc_issuer_url: e.target.value })}
+                          placeholder="https://dev-123.okta.com or https://accounts.google.com"
+                          className="w-full bg-paper border border-rule focus:border-accent focus:outline-none rounded-base py-2 px-3 text-xs text-ink font-mono"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block font-mono text-[11px] uppercase tracking-wider text-muted mb-1.5">
+                          OIDC Scopes
+                        </label>
+                        <input
+                          type="text"
+                          value={ssoConfig.oidc_scopes}
+                          onChange={(e) => setSsoConfig({ ...ssoConfig, oidc_scopes: e.target.value })}
+                          placeholder="openid email profile groups"
+                          className="w-full bg-paper border border-rule focus:border-accent focus:outline-none rounded-base py-2 px-3 text-xs text-ink font-mono"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block font-mono text-[11px] uppercase tracking-wider text-muted mb-1.5">
+                          Client ID
+                        </label>
+                        <input
+                          type="text"
+                          value={ssoConfig.oidc_client_id}
+                          onChange={(e) => setSsoConfig({ ...ssoConfig, oidc_client_id: e.target.value })}
+                          placeholder="0oa1234567890abcdef"
+                          className="w-full bg-paper border border-rule focus:border-accent focus:outline-none rounded-base py-2 px-3 text-xs text-ink font-mono"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block font-mono text-[11px] uppercase tracking-wider text-muted mb-1.5">
+                          Client Secret
+                        </label>
+                        <input
+                          type="password"
+                          value={ssoConfig.oidc_client_secret}
+                          onChange={(e) => setSsoConfig({ ...ssoConfig, oidc_client_secret: e.target.value })}
+                          placeholder="••••••••••••••••"
+                          className="w-full bg-paper border border-rule focus:border-accent focus:outline-none rounded-base py-2 px-3 text-xs text-ink font-mono"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Directory Role Mapping & Provisioning */}
+                <div className="bg-paper-2 p-5 sm:p-6 rounded-card border border-rule space-y-4">
+                  <h3 className="text-xs font-mono uppercase tracking-wider text-muted font-semibold pb-2 border-b border-rule">
+                    4. Directory Group to RBAC Role Sync
+                  </h3>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div>
+                      <label className="block font-mono text-[11px] uppercase tracking-wider text-muted mb-1.5">
+                        Default Fallback Role
+                      </label>
+                      <select
+                        value={ssoConfig.default_role}
+                        onChange={(e) => setSsoConfig({ ...ssoConfig, default_role: e.target.value })}
+                        className="w-full bg-paper border border-rule focus:border-accent focus:outline-none rounded-base py-2 px-3 text-xs text-ink font-body"
+                      >
+                        <option value="user">User (Read-only + Chat)</option>
+                        <option value="editor">Editor (Upload + Knowledge Corpus)</option>
+                        <option value="admin">Admin (Corpus + Tenant Settings)</option>
+                      </select>
+                      <span className="text-[10px] text-muted font-mono mt-1 block">
+                        Assigned when no directory group match is resolved.
+                      </span>
+                    </div>
+
+                    <div className="sm:col-span-2">
+                      <div className="flex justify-between items-center mb-1.5">
+                        <label className="block font-mono text-[11px] uppercase tracking-wider text-muted">
+                          Corporate Group Mapping (JSON)
+                        </label>
+                        <span className="text-[10px] font-mono text-muted">IdP Group Claim → Role</span>
+                      </div>
+                      <textarea
+                        value={ssoConfig.role_mapping_json}
+                        onChange={(e) => setSsoConfig({ ...ssoConfig, role_mapping_json: e.target.value })}
+                        rows={4}
+                        placeholder='{"Security-Engineers": "admin", "Technical-Writers": "editor"}'
+                        className="w-full bg-paper border border-rule focus:border-accent focus:outline-none rounded-base py-2 px-3 text-xs text-ink font-mono"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Session Security & Emergency Revocation */}
+                <div className="bg-paper-2 p-5 sm:p-6 rounded-card border border-ruby/30 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-ruby animate-pulse" />
+                    <h3 className="text-xs font-mono uppercase tracking-wider text-ruby font-semibold">
+                      5. Emergency Session Invalidation & Token Revocation
+                    </h3>
+                  </div>
+                  <p className="text-xs text-muted">
+                    If an employee leaves or credentials are compromised, immediately invalidate all active JWT tokens in Redis.
+                    All users in your organization will be logged out on their next request.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleRevokeAllSessions}
+                    disabled={isRevokingSessions}
+                    className="py-2 px-4 rounded-base bg-ruby-subtle border border-ruby/40 text-ruby hover:bg-ruby hover:text-white text-xs font-mono uppercase tracking-wider font-semibold transition-all cursor-pointer disabled:opacity-50"
+                  >
+                    {isRevokingSessions ? "Revoking Active Sessions..." : "⚠️ Revoke All Active Organization Sessions"}
+                  </button>
+                </div>
+
+                {/* Form Actions */}
+                <div className="flex flex-col sm:flex-row justify-between items-center gap-3 pt-4 border-t border-rule">
+                  {ssoConfig.configured ? (
+                    <button
+                      type="button"
+                      onClick={handleDeleteSSOConfig}
+                      disabled={isSavingSso}
+                      className="w-full sm:w-auto py-2.5 px-4 rounded-base border border-ruby/40 text-ruby hover:bg-ruby-subtle text-xs font-mono uppercase tracking-wider font-semibold transition-all cursor-pointer disabled:opacity-50"
+                    >
+                      Delete SSO Configuration
+                    </button>
+                  ) : <div />}
+
+                  <button
+                    type="submit"
+                    disabled={isSavingSso}
+                    className="w-full sm:w-auto py-2.5 px-6 rounded-base bg-accent hover:bg-accent-hover text-accent-ink text-xs font-mono uppercase tracking-wider font-semibold transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2 shadow-sm"
+                  >
+                    {isSavingSso ? (
+                      <CyberSpinner size="sm" variant="ink" label="Saving..." />
+                    ) : (
+                      "Save SSO Configuration →"
+                    )}
+                  </button>
+                </div>
+              </form>
             )}
           </div>
         )}

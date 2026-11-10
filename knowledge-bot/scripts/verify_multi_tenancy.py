@@ -1593,8 +1593,131 @@ def run_diagnostics():
     except Exception as e:
         print_check("Check 23 failed", False, str(e))
 
+    # ---------------------------------------------------------
+    # Check 24: Enterprise Single Sign-On (SSO), SAML 2.0 SP Engine, Directory Role Mapping, and Redis Session Revocation
+    # ---------------------------------------------------------
+    print("\n--- Check 24: Enterprise SSO, SAML 2.0 / OIDC & Redis Session Revocation ---")
+    try:
+        from src.models import TenantSSOConfig
+        from src.sso.base import RoleMappingEngine, SSOUserProfile
+        from src.sso.saml import generate_sp_metadata, generate_authn_request, parse_idp_metadata_xml
+        from src.sso.revocation import (
+            blacklist_token, is_token_blacklisted,
+            revoke_tenant_sessions, revoke_user_sessions, is_session_revoked
+        )
+        import json
+        import time
+
+        # 1. Verify Pure-Python SAML SP Metadata generation
+        sp_xml = generate_sp_metadata(
+            entity_id="https://test.internal/auth/sso/saml/metadata",
+            acs_url="https://test.internal/auth/sso/saml/acs"
+        )
+        assert "<md:EntityDescriptor" in sp_xml, "Missing EntityDescriptor in SP metadata"
+        assert 'Location="https://test.internal/auth/sso/saml/acs"' in sp_xml, "Missing ACS in SP metadata"
+
+        # 2. Verify AuthnRequest generation
+        authn_url, req_id = generate_authn_request(
+            idp_sso_url="https://idp.okta.com/app/sso",
+            sp_entity_id="https://test.internal/auth/sso/saml/metadata",
+            acs_url="https://test.internal/auth/sso/saml/acs"
+        )
+        assert authn_url.startswith("https://idp.okta.com/app/sso?SAMLRequest="), "Invalid AuthnRequest redirect URL"
+        assert req_id.startswith("ID_"), "Invalid AuthnRequest ID"
+
+        # 3. Verify Directory Group Role Mapping Engine
+        role_map_str = json.dumps({"Security-Team": "admin", "Tech-Writers": "editor"})
+        assert RoleMappingEngine.resolve_role(["Employees", "Security-Team"], role_map_str) == "admin"
+        assert RoleMappingEngine.resolve_role(["Employees", "Tech-Writers"], role_map_str) == "editor"
+        assert RoleMappingEngine.resolve_role(["Security-Team", "Tech-Writers"], role_map_str) == "admin" # Highest role precedence
+        assert RoleMappingEngine.resolve_role(["Employees"], role_map_str) == "user" # Fallback
+
+        # 4. Verify Redis Session Revocation & Token Blacklist
+        import uuid
+        test_jti = f"diag-jti-{uuid.uuid4().hex}"
+        assert not is_token_blacklisted(test_jti)
+        blacklist_token(test_jti, expires_in_seconds=60)
+        assert is_token_blacklisted(test_jti)
+
+        now_ts = int(time.time())
+        diag_user_id = int(time.time() * 1000) % 900000 + 50000
+        assert not is_session_revoked(user_id=diag_user_id, token_iat=now_ts - 10)
+        revoke_user_sessions(diag_user_id)
+        assert is_session_revoked(user_id=diag_user_id, token_iat=now_ts - 10)
+        assert not is_session_revoked(user_id=diag_user_id, token_iat=now_ts + 20)
+
+        # 5. Database Tenant SSO Configuration & API Flow
+        with SessionLocal() as db:
+            sso_tenant = Tenant(
+                name="SSO Diag Enterprise",
+                slug="sso-diag-ent",
+                status="active",
+                allowed_domains="sso-diag.com"
+            )
+            db.add(sso_tenant)
+            db.flush()
+
+            sso_cfg = TenantSSOConfig(
+                tenant_id=sso_tenant.id,
+                idp_type="saml",
+                is_enabled=True,
+                enforce_sso=False,
+                idp_entity_id="https://idp.sso-diag.com",
+                idp_sso_url="https://idp.sso-diag.com/sso",
+                allowed_domains="sso-diag.com",
+                default_role="user",
+                role_mapping_json=json.dumps({"IT-Admins": "admin"})
+            )
+            db.add(sso_cfg)
+
+            from src.auth import get_password_hash
+            sso_user = User(
+                username="sso_diag_employee",
+                email="alice@sso-diag.com",
+                hashed_password=get_password_hash("password123"),
+                role="user",
+                tenant_id=sso_tenant.id
+            )
+            db.add(sso_user)
+            db.commit()
+            sso_tid = sso_tenant.id
+
+        # Test Domain Discovery Endpoint
+        res_disc = client.get("/auth/sso/discover?email=alice@sso-diag.com")
+        assert res_disc.status_code == 200, f"Discovery endpoint failed: {res_disc.text}"
+        disc_data = res_disc.json()
+        assert disc_data["sso_enabled"] is True
+        assert disc_data["tenant_id"] == sso_tid
+        assert f"tenant_id={sso_tid}" in disc_data["login_url"]
+
+        # Test SP Metadata HTTP Endpoint
+        res_meta = client.get("/auth/sso/saml/metadata")
+        assert res_meta.status_code == 200
+        assert "EntityDescriptor" in res_meta.text
+
+        # Test Enforce SSO Gate
+        with SessionLocal() as db:
+            cfg = db.query(TenantSSOConfig).filter(TenantSSOConfig.tenant_id == sso_tid).first()
+            cfg.enforce_sso = True
+            db.commit()
+
+        login_res = client.post("/auth/login", json={"username": "sso_diag_employee", "password": "password123"})
+        assert login_res.status_code == 403, f"Expected 403 when enforce_sso is active, got: {login_res.status_code}"
+        assert "Single Sign-On (SSO) is enforced" in login_res.json()["detail"]
+
+        # Clean up
+        with SessionLocal() as db:
+            db.query(User).filter(User.username == "sso_diag_employee").delete()
+            db.query(TenantSSOConfig).filter(TenantSSOConfig.tenant_id == sso_tid).delete()
+            db.query(Tenant).filter(Tenant.id == sso_tid).delete()
+            db.commit()
+
+        print_check("Enterprise Single Sign-On (SSO), SAML 2.0 SP Engine, Directory Role Mapping, and Redis Session Revocation verified", True)
+    except Exception as e:
+        print_check("Check 24 failed", False, str(e))
+
     print("\n" + "=" * 70)
-    print("ALL 23 DIAGNOSTIC CHECKS COMPLETED")
+    print("ALL 24 DIAGNOSTIC CHECKS COMPLETED")
     print("=" * 70)
 
 if __name__ == "__main__":

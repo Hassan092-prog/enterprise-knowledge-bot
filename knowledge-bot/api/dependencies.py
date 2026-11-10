@@ -51,6 +51,24 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
             detail="Your organization has been suspended. Please contact platform administrator.",
         )
 
+    # Check session revocation / blacklist (Phase 12 Enterprise SSO)
+    from src.sso.revocation import is_session_revoked, is_token_blacklisted
+    jti = payload.get("jti")
+    if jti and is_token_blacklisted(jti):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session token has been revoked.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token_iat = payload.get("iat")
+    if is_session_revoked(user_id=user.id, tenant_id=user.tenant_id, token_iat=token_iat):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session has been revoked by organization administrator.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     return user
 
 def get_current_editor_user(current_user: User = Depends(get_current_user)) -> User:

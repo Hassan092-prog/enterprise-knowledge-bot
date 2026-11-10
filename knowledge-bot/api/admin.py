@@ -10,7 +10,10 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from pathlib import Path
 
-from src.models import User, ChatSession, ChatMessage, AccessRequest, Tenant, ActivityLog, PendingTransfer
+from src.models import (
+    User, ChatSession, ChatMessage, AccessRequest, Tenant, ActivityLog, PendingTransfer,
+    TenantSSOConfig
+)
 from api.dependencies import (
     get_db,
     get_current_user,
@@ -797,3 +800,198 @@ def export_tenant_activity(
             media_type="application/json",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'}
         )
+
+
+# ──────────────────────────────────────────────────────────────────
+# ENTERPRISE SSO & DIRECTORY SYNC CONFIGURATION (PHASE 12)
+# ──────────────────────────────────────────────────────────────────
+
+class TenantSSOConfigRequest(BaseModel):
+    idp_type: str = "saml"  # 'saml', 'oidc', 'okta', 'google', 'microsoft'
+    is_enabled: bool = True
+    enforce_sso: bool = False
+    idp_entity_id: Optional[str] = None
+    idp_sso_url: Optional[str] = None
+    idp_x509_cert: Optional[str] = None
+    idp_metadata_xml: Optional[str] = None
+    oidc_issuer_url: Optional[str] = None
+    oidc_client_id: Optional[str] = None
+    oidc_client_secret: Optional[str] = None
+    oidc_scopes: Optional[str] = "openid email profile groups"
+    allowed_domains: Optional[str] = None
+    default_role: str = "user"
+    role_mapping_json: Optional[str] = None
+
+
+@router.get("/sso/config")
+def get_tenant_sso_config(
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Returns SSO & Directory Sync settings for the current tenant organization."""
+    tenant_id = current_user.tenant_id
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="Tenant context required")
+
+    cfg = db.query(TenantSSOConfig).filter(TenantSSOConfig.tenant_id == tenant_id).first()
+    if not cfg:
+        return {
+            "configured": False,
+            "tenant_id": tenant_id,
+            "idp_type": "saml",
+            "is_enabled": False,
+            "enforce_sso": False,
+            "default_role": "user",
+        }
+
+    return {
+        "configured": True,
+        "tenant_id": cfg.tenant_id,
+        "idp_type": cfg.idp_type,
+        "is_enabled": cfg.is_enabled,
+        "enforce_sso": cfg.enforce_sso,
+        "idp_entity_id": cfg.idp_entity_id,
+        "idp_sso_url": cfg.idp_sso_url,
+        "idp_x509_cert": cfg.idp_x509_cert,
+        "has_metadata_xml": bool(cfg.idp_metadata_xml),
+        "oidc_issuer_url": cfg.oidc_issuer_url,
+        "oidc_client_id": cfg.oidc_client_id,
+        "oidc_has_secret": bool(cfg.oidc_client_secret),
+        "oidc_scopes": cfg.oidc_scopes,
+        "allowed_domains": cfg.allowed_domains,
+        "default_role": cfg.default_role,
+        "role_mapping_json": cfg.role_mapping_json,
+        "updated_at": cfg.updated_at.isoformat() if cfg.updated_at else None,
+    }
+
+
+@router.post("/sso/config")
+def upsert_tenant_sso_config(
+    payload: TenantSSOConfigRequest,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Configures or updates enterprise SAML 2.0 or OIDC Identity Provider parameters.
+    Auto-parses raw metadata XML if provided.
+    """
+    tenant_id = current_user.tenant_id
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="Tenant context required")
+
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    # If raw metadata XML was supplied, parse fields automatically
+    parsed_metadata = {}
+    if payload.idp_metadata_xml and payload.idp_metadata_xml.strip():
+        from src.sso.saml import parse_idp_metadata_xml
+        try:
+            parsed_metadata = parse_idp_metadata_xml(payload.idp_metadata_xml)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to parse IdP metadata XML: {str(e)}")
+
+    idp_entity_id = parsed_metadata.get("idp_entity_id") or payload.idp_entity_id
+    idp_sso_url = parsed_metadata.get("idp_sso_url") or payload.idp_sso_url
+    idp_x509_cert = parsed_metadata.get("idp_x509_cert") or payload.idp_x509_cert
+
+    # Validate role mapping JSON if given
+    if payload.role_mapping_json and payload.role_mapping_json.strip():
+        try:
+            parsed_rm = json.loads(payload.role_mapping_json)
+            if not isinstance(parsed_rm, dict):
+                raise ValueError("Role mapping must be a JSON object mapping group names to roles")
+            valid_roles = {"user", "editor", "admin"}
+            for g, r in parsed_rm.items():
+                if r not in valid_roles:
+                    raise ValueError(f"Invalid target role '{r}' for group '{g}'. Must be user, editor, or admin.")
+        except Exception as err:
+            raise HTTPException(status_code=400, detail=f"Invalid role_mapping_json: {str(err)}")
+
+    cfg = db.query(TenantSSOConfig).filter(TenantSSOConfig.tenant_id == tenant_id).first()
+    if cfg:
+        cfg.idp_type = payload.idp_type
+        cfg.is_enabled = payload.is_enabled
+        cfg.enforce_sso = payload.enforce_sso
+        cfg.idp_entity_id = idp_entity_id
+        cfg.idp_sso_url = idp_sso_url
+        cfg.idp_x509_cert = idp_x509_cert
+        if payload.idp_metadata_xml:
+            cfg.idp_metadata_xml = payload.idp_metadata_xml
+        cfg.oidc_issuer_url = payload.oidc_issuer_url
+        cfg.oidc_client_id = payload.oidc_client_id
+        if payload.oidc_client_secret:
+            cfg.oidc_client_secret = payload.oidc_client_secret
+        cfg.oidc_scopes = payload.oidc_scopes or "openid email profile groups"
+        cfg.allowed_domains = payload.allowed_domains
+        cfg.default_role = payload.default_role or "user"
+        cfg.role_mapping_json = payload.role_mapping_json
+        cfg.updated_at = datetime.utcnow()
+    else:
+        cfg = TenantSSOConfig(
+            tenant_id=tenant_id,
+            idp_type=payload.idp_type,
+            is_enabled=payload.is_enabled,
+            enforce_sso=payload.enforce_sso,
+            idp_entity_id=idp_entity_id,
+            idp_sso_url=idp_sso_url,
+            idp_x509_cert=idp_x509_cert,
+            idp_metadata_xml=payload.idp_metadata_xml,
+            oidc_issuer_url=payload.oidc_issuer_url,
+            oidc_client_id=payload.oidc_client_id,
+            oidc_client_secret=payload.oidc_client_secret,
+            oidc_scopes=payload.oidc_scopes or "openid email profile groups",
+            allowed_domains=payload.allowed_domains,
+            default_role=payload.default_role or "user",
+            role_mapping_json=payload.role_mapping_json,
+        )
+        db.add(cfg)
+
+    # Sync allowed_domains to Tenant model
+    if payload.allowed_domains:
+        tenant.allowed_domains = payload.allowed_domains
+
+    db.commit()
+    db.refresh(cfg)
+
+    log_activity(
+        tenant_id=tenant_id,
+        user_id=current_user.id,
+        action="SSO_CONFIG_UPDATED",
+        category="GOVERNANCE",
+        description=f"Updated Enterprise SSO configuration ({cfg.idp_type.upper()}, enabled={cfg.is_enabled})",
+        details={
+            "idp_type": cfg.idp_type,
+            "is_enabled": cfg.is_enabled,
+            "enforce_sso": cfg.enforce_sso,
+            "allowed_domains": cfg.allowed_domains
+        }
+    )
+
+    return {"status": "success", "message": "Enterprise SSO configuration saved."}
+
+
+@router.delete("/sso/config")
+def delete_tenant_sso_config(
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Disables and removes Enterprise SSO configuration for the current tenant."""
+    tenant_id = current_user.tenant_id
+    cfg = db.query(TenantSSOConfig).filter(TenantSSOConfig.tenant_id == tenant_id).first()
+    if not cfg:
+        raise HTTPException(status_code=404, detail="No SSO configuration found for this organization")
+
+    db.delete(cfg)
+    db.commit()
+
+    log_activity(
+        tenant_id=tenant_id,
+        user_id=current_user.id,
+        action="SSO_CONFIG_DELETED",
+        category="GOVERNANCE",
+        description="Removed Enterprise SSO configuration",
+    )
+
+    return {"status": "success", "message": "Enterprise SSO configuration removed."}

@@ -22,6 +22,7 @@ class Tenant(Base):
     activity_logs = relationship("ActivityLog", back_populates="tenant", cascade="all, delete-orphan")
     transfers = relationship("PendingTransfer", back_populates="tenant", cascade="all, delete-orphan")
     access_requests = relationship("AccessRequest", back_populates="tenant", cascade="all, delete-orphan")
+    sso_config = relationship("TenantSSOConfig", back_populates="tenant", uselist=False, cascade="all, delete-orphan")
 
 
 class User(Base):
@@ -156,3 +157,35 @@ class KnowledgeEdge(Base):
     __table_args__ = (
         Index("ix_edge_tenant_source_target", "tenant_id", "source_entity_id", "target_entity_id", "relation_type"),
     )
+
+
+class TenantSSOConfig(Base):
+    __tablename__ = "tenant_sso_configs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    idp_type = Column(String(32), default="oidc")  # 'oidc', 'saml', 'okta', 'google', 'microsoft'
+    is_enabled = Column(Boolean, default=True)
+    enforce_sso = Column(Boolean, default=False)   # If True, password login disabled for users with tenant domain
+
+    # SAML 2.0 Configuration
+    idp_entity_id = Column(String(512), nullable=True)  # IdP Issuer / EntityID
+    idp_sso_url = Column(String(1024), nullable=True)   # IdP SingleSignOnService URL
+    idp_x509_cert = Column(Text, nullable=True)         # Public X.509 certificate PEM for signature verification
+    idp_metadata_xml = Column(Text, nullable=True)      # Raw uploaded IdP metadata XML
+
+    # Enterprise OIDC Configuration (Okta, Entra ID, PingFederate, Keycloak)
+    oidc_issuer_url = Column(String(1024), nullable=True) # e.g. https://company.okta.com
+    oidc_client_id = Column(String(256), nullable=True)
+    oidc_client_secret = Column(String(512), nullable=True)
+    oidc_scopes = Column(String(256), default="openid email profile groups")
+
+    # Domain Restriction & Role Sync
+    allowed_domains = Column(String(512), nullable=True) # e.g. "company.com, company-intl.com"
+    default_role = Column(String(32), default="user")    # 'user', 'editor', 'admin'
+    role_mapping_json = Column(Text, nullable=True)      # JSON mapping: e.g. {"IT-Admins": "admin", "Editors": "editor"}
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    tenant = relationship("Tenant", back_populates="sso_config")

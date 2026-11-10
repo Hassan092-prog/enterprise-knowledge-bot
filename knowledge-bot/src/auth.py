@@ -11,6 +11,9 @@ from passlib.context import CryptContext
 import jwt
 import os
 
+import os
+import secrets
+
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "super-secret-key-change-me")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
@@ -24,10 +27,15 @@ def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
 def create_access_token(data: dict) -> str:
-    """Encode JWT access token with expiration."""
+    """Encode JWT access token with expiration, issued-at (iat), and unique ID (jti)."""
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
+    now = datetime.utcnow()
+    expire = now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({
+        "exp": expire,
+        "iat": int(now.timestamp()),
+        "jti": secrets.token_hex(16),
+    })
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 

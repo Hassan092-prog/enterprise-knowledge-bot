@@ -168,6 +168,20 @@ def login(request: Request, user_data: UserCreate, db: Session = Depends(get_db)
             detail="Your organization has been suspended. Please contact platform administrator.",
         )
 
+    # Check if SSO is enforced for this tenant (Phase 12 Enterprise SSO)
+    if user.tenant_id and not user.is_platform_admin:
+        from src.models import TenantSSOConfig
+        sso_cfg = db.query(TenantSSOConfig).filter(
+            TenantSSOConfig.tenant_id == user.tenant_id,
+            TenantSSOConfig.is_enabled == True,
+            TenantSSOConfig.enforce_sso == True
+        ).first()
+        if sso_cfg:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Single Sign-On (SSO) is enforced for your organization. Please sign in via your corporate Identity Provider."
+            )
+
     tenant_name = user.tenant.name if user.tenant else None
 
     # Log successful login
@@ -520,4 +534,35 @@ def update_tenant_domains(update: TenantDomainUpdate, db: Session = Depends(get_
         description=f"Configured allowed corporate domains: '{tenant.allowed_domains}'"
     )
     return {"status": "success", "allowed_domains": tenant.allowed_domains}
+
+
+@router.post("/logout")
+def logout(request: Request, current_user: User = Depends(get_current_user)):
+    """
+    Revokes the current JWT session token by adding its jti claim to the Redis blacklist.
+    """
+    from src.sso.revocation import blacklist_token
+    import jwt
+    import time
+    from src.config import SECRET_KEY, ALGORITHM
+
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:].strip()
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], options={"verify_exp": False})
+            jti = payload.get("jti")
+            exp = payload.get("exp")
+            if jti:
+                ttl = 86400
+                if exp:
+                    remaining = int(exp - time.time())
+                    if remaining > 0:
+                        ttl = remaining
+                blacklist_token(jti, ttl_seconds=ttl)
+        except Exception as e:
+            logger.warning(f"Error parsing token for logout blacklist: {e}")
+
+    return {"message": "Successfully logged out"}
+
 

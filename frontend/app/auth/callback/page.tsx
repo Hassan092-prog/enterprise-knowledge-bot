@@ -24,8 +24,37 @@ function OAuthCallbackContent() {
       return;
     }
 
+    // Direct JWT token returned from Enterprise SSO (SAML ACS or OIDC callback)
+    const directToken = searchParams.get("token");
+    if (directToken) {
+      setStatusText("Enterprise SSO authenticated! Launching workspace...");
+      localStorage.setItem("token", directToken);
+      const role = searchParams.get("role");
+      const tenantId = searchParams.get("tenant_id");
+      const tenantName = searchParams.get("tenant_name");
+      const username = searchParams.get("username");
+      const email = searchParams.get("email");
+      const isPlatformAdmin = searchParams.get("is_platform_admin");
+
+      if (role) localStorage.setItem("role", role);
+      if (tenantId) localStorage.setItem("tenant_id", tenantId);
+      if (tenantName) localStorage.setItem("tenant_name", tenantName);
+      if (username) localStorage.setItem("username", username);
+      if (email) localStorage.setItem("email", email);
+      if (isPlatformAdmin === "true") {
+        localStorage.setItem("is_platform_admin", "true");
+      } else {
+        localStorage.removeItem("is_platform_admin");
+      }
+
+      setTimeout(() => {
+        router.push("/");
+      }, 500);
+      return;
+    }
+
     if (!code) {
-      setError("No authorization code was found in the provider callback.");
+      setError("No authorization code or token was found in the provider callback.");
       return;
     }
 

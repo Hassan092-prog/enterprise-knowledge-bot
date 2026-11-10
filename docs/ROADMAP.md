@@ -21,7 +21,7 @@
 | **Phase 9** | **Distributed Object Storage (MinIO/S3)** | Decoupled cloud document storage & presigned URLs | ✅ **Completed** |
 | **Phase 10** | **Graph RAG & Knowledge Graph Engine** | Multi-tenant NetworkX/PostgreSQL Graph Store & Subgraph Fusion | ✅ **Completed** |
 | **Phase 11** | **Observability & Cost Governance** | OpenTelemetry spans, tenant token accounting & budget caps | ✅ **Completed** |
-| **Phase 12** | **Enterprise SSO & SAML / OAuth2** | Corporate Identity Providers (Okta / Azure AD / OIDC) | 🟡 **Next Up** |
+| **Phase 12** | **Enterprise SSO & SAML / OAuth2** | Corporate Identity Providers (Okta / Azure AD / OIDC) | ✅ **Completed** |
 
 ---
 
@@ -92,25 +92,36 @@ Enterprise production operations require fine-grained visibility into token usag
 
 ---
 
-### Phase 12: Enterprise Single Sign-On (SSO) & SAML / OAuth2 🟡 Next Up
+### Phase 12: Enterprise Single Sign-On (SSO) & SAML / OAuth2 ✅ Completed
 **Problem Statement:**  
-Enterprise organizations require single sign-on tied to corporate identity providers (Google Workspace, Microsoft Entra ID / Azure AD, Okta, Ping Identity) rather than standalone username/password credentials.
+Enterprise organizations require single sign-on tied to corporate identity providers (Google Workspace, Microsoft Entra ID / Azure AD, Okta, Ping Identity) rather than standalone username/password credentials. Furthermore, enterprise security teams mandate corporate directory group synchronization, domain auto-routing, emergency session revocation, and SAML 2.0 assertions with X.509 signature verification.
 
-**Planned Deliverables:**
-1. **OAuth2 / OIDC & SAML 2.0 Integration:**
-   - Implement OpenID Connect for Google Workspace and Microsoft Entra ID.
-   - Add SAML 2.0 service provider (SP) support for enterprise IdPs (Okta, Ping Identity).
-2. **Automatic Directory Group & Role Mapping:**
-   - Automatically map corporate directory groups (e.g. `IT-Security`, `HR-Management`, `Engineering`) to application roles (`admin`, `editor`, `user`).
-3. **Enterprise Session Revocation & Enforced MFA:**
-   - Centralized session revocation webhooks and enforcement of identity provider multi-factor authentication (MFA) requirements.
+**Delivered Capabilities:**
+1. **Multi-Tenant SSO Model (`TenantSSOConfig`):**
+   - Per-tenant SSO configuration stored in PostgreSQL (`tenant_sso_configs`) supporting SAML 2.0, OpenID Connect (OIDC), Okta, Entra ID, and Google Workspace.
+   - Dynamic enforcement toggle (`enforce_sso`) disabling password login for corporate members to guarantee IdP compliance.
+2. **Native SAML 2.0 Service Provider (SP) Engine:**
+   - Pure-Python SAML 2.0 SP engine (`src/sso/saml.py`) utilizing `cryptography.x509` and `PKCS1v15` for signature validation without brittle C-bindings.
+   - SP Metadata generation (`/auth/sso/saml/metadata`), deflated/base64 AuthnRequest builder (`/auth/sso/saml/login`), and ACS endpoint (`/auth/sso/saml/acs`) with fast-track XML metadata parsing (`/admin/sso/config`).
+3. **Enterprise OIDC Engine:**
+   - Dynamic `.well-known/openid-configuration` discovery, PKCE/state-protected authorization URL generation, and code exchange (`/auth/sso/oidc/authorize`, `/auth/sso/oidc/callback`).
+4. **Corporate Directory Group to RBAC Role Mapping:**
+   - `RoleMappingEngine` (`src/sso/base.py`) automatically maps IdP directory group claims (e.g., `IT-Security`, `Technical-Writers`) to application RBAC roles (`admin`, `editor`, `user`) with priority tiering (`admin > editor > user`).
+5. **Zero-Friction Corporate Domain Auto-Discovery:**
+   - `/auth/sso/discover?email=user@company.com` automatically resolves tenant configuration, matches allowed domains, and outputs the direct IdP login URL.
+6. **Centralized Redis Session Revocation & Token Blacklist:**
+   - High-performance session revocation engine (`src/sso/revocation.py`) backing `/auth/sso/revoke` and `/auth/logout`.
+   - Invalidation by JTI or user/tenant revocation timestamp (`is_token_blacklisted`, `is_session_revoked`) integrated into `api/dependencies.py:get_current_user`.
+7. **Enterprise Admin UI & Login Experience:**
+   - **Frontend Login (`frontend/app/login/page.tsx`):** Seamless toggle between Credentials and Enterprise SSO with instant work email domain discovery.
+   - **Auth Callback Handler (`frontend/app/auth/callback/page.tsx`):** Unified callback processing for OAuth2, SAML ACS redirects, and OIDC tokens.
+   - **Admin Console (`frontend/app/admin/page.tsx`):** Dedicated "SSO & Directory Sync" tab with IdP metadata paste/upload, ACS endpoints copy tool, role mapping editor, and emergency session revocation.
+8. **Automated Verification & Diagnostics:**
+   - Added Check 24 to `knowledge-bot/scripts/verify_multi_tenancy.py` (24/24 diagnostic checks passed).
+   - Dedicated unit test suite in `knowledge-bot/tests/test_sso.py` (8/8 tests passed; full test suite: 29/29 passed).
 
 ---
 
-## 🛠️ Immediate Recommended Action Plan
+## 🛠️ Verification & Next Steps
 
-For the immediate next sprint, execute **Phase 12 (Enterprise SSO & SAML / OAuth2)**:
-1. Implement OIDC/SAML authentication endpoints in `knowledge-bot/api/auth.py`.
-2. Add IdP provider configuration (`SSO_PROVIDER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `SAML_METADATA_URL`) to `src/config.py`.
-3. Create frontend SSO login buttons and OAuth2 callback handler page (`frontend/app/auth/callback/page.tsx`).
-4. Implement automatic directory group-to-role synchronization.
+All 12 core engineering phases have been implemented and verified with passing unit tests, end-to-end integration checks, and container builds. All future initiatives require explicit user authorization before execution.

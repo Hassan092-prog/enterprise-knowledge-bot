@@ -276,5 +276,12 @@ NEO4J_URI: str = os.getenv("NEO4J_URI", "bolt://neo4j:7687")
 NEO4J_USER: str = os.getenv("NEO4J_USER", "neo4j")
 NEO4J_PASSWORD: str = os.getenv("NEO4J_PASSWORD", "password")
 
+# ── Enterprise SSO & SAML 2.0 / OIDC Settings (Phase 12) ───────────────────
+SSO_ENABLED: bool = os.getenv("SSO_ENABLED", "true").lower() in ("true", "1", "yes")
+SSO_ENTITY_ID: str = os.getenv("SSO_ENTITY_ID", "https://knowledge.alphalabs.nurexia.co/auth/sso/saml/metadata")
+SSO_ACS_URL: str = os.getenv("SSO_ACS_URL", "https://knowledge.alphalabs.nurexia.co/auth/sso/saml/acs")
+SSO_FRONTEND_URL: str = os.getenv("SSO_FRONTEND_URL", "http://localhost:3000").rstrip("/")
+
+
 
 
