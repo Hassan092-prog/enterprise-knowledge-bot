@@ -44,7 +44,7 @@ def find_tenant_sso_by_email(email: str, db: Session) -> Optional[Tuple[Tenant, 
     if not email or "@" not in email:
         return None
 
-    domain = email.split("@")[-1].lower().strip()
+    domain = email.split("@")[-1].lower().strip().rstrip(".")
     if domain in PUBLIC_EMAIL_DOMAINS:
         return None
 

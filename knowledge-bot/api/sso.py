@@ -53,6 +53,7 @@ class OIDCCallbackRequest(BaseModel):
 class RevocationRequest(BaseModel):
     user_id: Optional[int] = None
     tenant_id: Optional[int] = None
+    all_tenants: bool = False
     reason: Optional[str] = None
 
 
@@ -81,9 +82,9 @@ def discover_sso(email: str = Query(..., description="Corporate employee email a
     # Determine login URL based on IdP type
     login_url = None
     if cfg.idp_type == "saml":
-        login_url = f"/auth/sso/saml/login?tenant_id={tenant.id}"
+        login_url = f"/auth/sso/saml/login?tenant_id={tenant.id}&redirect=true"
     elif cfg.idp_type in ("oidc", "okta", "microsoft", "google"):
-        login_url = f"/auth/sso/oidc/authorize?tenant_id={tenant.id}"
+        login_url = f"/auth/sso/oidc/authorize?tenant_id={tenant.id}&redirect=true"
 
     return SSODiscoverResponse(
         sso_enabled=True,
@@ -103,7 +104,11 @@ def get_sp_metadata():
 
 
 @router.get("/saml/login")
-def saml_login(tenant_id: int = Query(...), db: Session = Depends(get_db)):
+def saml_login(
+    request: Request,
+    tenant_id: int = Query(...),
+    db: Session = Depends(get_db)
+):
     """Initiates SAML AuthnRequest and returns redirection URL to IdP SingleSignOnService."""
     cfg = db.query(TenantSSOConfig).filter(
         TenantSSOConfig.tenant_id == tenant_id,
@@ -124,6 +129,10 @@ def saml_login(tenant_id: int = Query(...), db: Session = Depends(get_db)):
         acs_url=SSO_ACS_URL,
         relay_state=relay_state
     )
+
+    accept_header = request.headers.get("accept", "")
+    if "text/html" in accept_header or request.query_params.get("redirect") == "true":
+        return RedirectResponse(url=redirect_url, status_code=303)
 
     return {"redirect_url": redirect_url, "request_id": request_id}
 
@@ -156,7 +165,7 @@ def saml_acs(
     # 3. Parse SAML assertion
     idp_cert = cfg.idp_x509_cert if cfg else None
     try:
-        profile = parse_saml_response(SAMLResponse, idp_cert_pem=idp_cert)
+        profile = parse_saml_response(SAMLResponse, expected_recipient=SSO_ENTITY_ID, idp_cert_pem=idp_cert)
     except Exception as e:
         logger.error(f"SAML assertion validation failed: {e}")
         raise HTTPException(status_code=400, detail=f"SAML authentication failed: {str(e)}")
@@ -220,6 +229,15 @@ def saml_acs(
             unique_username = f"{base_user}_{counter}"
             counter += 1
 
+        # Synchronize PostgreSQL auto-increment sequence before insertion
+        from src.database import engine
+        from sqlalchemy import text
+        if engine.dialect.name == "postgresql":
+            try:
+                db.execute(text("SELECT setval(pg_get_serial_sequence('users', 'id'), COALESCE((SELECT MAX(id) FROM users), 1));"))
+            except Exception as seq_err:
+                logger.warning(f"SAML sequence sync notice: {seq_err}")
+
         user = User(
             username=unique_username,
             email=profile.email,
@@ -247,11 +265,17 @@ def saml_acs(
     # If browser submitted directly via form, redirect to frontend callback
     accept_header = request.headers.get("accept", "")
     if "text/html" in accept_header or "application/xhtml+xml" in accept_header:
-        redirect_target = (
-            f"{SSO_FRONTEND_URL}/auth/callback?"
-            f"token={token}&role={user.role}&tenant_id={user.tenant_id}&"
-            f"username={user.username}&tenant_name={tenant.name}"
-        )
+        from urllib.parse import urlencode
+        params = {
+            "token": token,
+            "role": user.role,
+            "tenant_id": str(user.tenant_id),
+            "username": user.username,
+            "tenant_name": tenant.name,
+            "email": user.email or "",
+            "is_platform_admin": "true" if user.is_platform_admin else "false",
+        }
+        redirect_target = f"{SSO_FRONTEND_URL}/auth/callback?{urlencode(params)}"
         return RedirectResponse(url=redirect_target, status_code=303)
 
     return {
@@ -268,6 +292,7 @@ def saml_acs(
 
 @router.get("/oidc/authorize")
 def oidc_authorize(
+    request: Request,
     tenant_id: int = Query(...),
     redirect_uri: Optional[str] = None,
     db: Session = Depends(get_db)
@@ -293,6 +318,10 @@ def oidc_authorize(
         state=state,
         scopes=cfg.oidc_scopes or "openid email profile groups"
     )
+
+    accept_header = request.headers.get("accept", "")
+    if "text/html" in accept_header or request.query_params.get("redirect") == "true":
+        return RedirectResponse(url=auth_url, status_code=303)
 
     return {"redirect_url": auth_url, "state": state}
 
@@ -366,6 +395,15 @@ def oidc_callback(payload: OIDCCallbackRequest, db: Session = Depends(get_db)):
             unique_username = f"{base_user}_{counter}"
             counter += 1
 
+        # Synchronize PostgreSQL auto-increment sequence before insertion
+        from src.database import engine
+        from sqlalchemy import text
+        if engine.dialect.name == "postgresql":
+            try:
+                db.execute(text("SELECT setval(pg_get_serial_sequence('users', 'id'), COALESCE((SELECT MAX(id) FROM users), 1));"))
+            except Exception as seq_err:
+                logger.warning(f"OIDC sequence sync notice: {seq_err}")
+
         user = User(
             username=unique_username,
             email=profile.email,
@@ -413,8 +451,31 @@ def revoke_sessions(
     Enterprise Session Revocation Webhook.
     Immediately invalidates active JWT sessions for a user or tenant across all workers.
     """
+    if payload.all_tenants:
+        if not current_user.is_platform_admin:
+            raise HTTPException(status_code=403, detail="Platform admin privileges required for global revocation.")
+        tenants = db.query(Tenant).all()
+        for t in tenants:
+            revoke_tenant_sessions(t.id)
+        log_activity(
+            tenant_id=current_user.tenant_id or 1,
+            user_id=current_user.id,
+            action="SESSION_REVOKED",
+            category="AUTH",
+            description="Revoked all enterprise sessions globally across all tenants",
+            details={"all_tenants": True, "reason": payload.reason}
+        )
+        return {"status": "success", "message": "All enterprise sessions globally revoked."}
+
     target_user_id = payload.user_id
     target_tenant_id = payload.tenant_id
+
+    # If neither user_id nor tenant_id was specified, default to caller's tenant
+    if target_user_id is None and target_tenant_id is None:
+        target_tenant_id = current_user.tenant_id
+
+    if target_user_id is None and target_tenant_id is None:
+        raise HTTPException(status_code=400, detail="Tenant context required: specify tenant_id, user_id, or all_tenants=True")
 
     # Tenant admins can only revoke sessions within their own tenant
     if not current_user.is_platform_admin:

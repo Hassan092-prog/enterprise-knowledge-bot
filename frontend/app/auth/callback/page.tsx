@@ -16,7 +16,8 @@ function OAuthCallbackContent() {
 
   useEffect(() => {
     const code = searchParams.get("code");
-    const provider = searchParams.get("provider") || "google";
+    const state = searchParams.get("state") || "";
+    const provider = searchParams.get("provider") || (state.startsWith("oidc_") ? "oidc" : "google");
     const errorParam = searchParams.get("error") || searchParams.get("error_description");
 
     if (errorParam) {
@@ -24,7 +25,7 @@ function OAuthCallbackContent() {
       return;
     }
 
-    // Direct JWT token returned from Enterprise SSO (SAML ACS or OIDC callback)
+    // Direct JWT token returned from Enterprise SSO (SAML ACS or direct redirect)
     const directToken = searchParams.get("token");
     if (directToken) {
       setStatusText("Enterprise SSO authenticated! Launching workspace...");
@@ -60,16 +61,33 @@ function OAuthCallbackContent() {
 
     const processCallback = async () => {
       try {
-        setStatusText(`Exchanging token with ${provider.toUpperCase()}...`);
+        const isOidc = provider === "oidc" || state.startsWith("oidc_");
+        setStatusText(isOidc ? "Exchanging token with Enterprise OIDC..." : `Exchanging token with ${provider.toUpperCase()}...`);
         const redirectUri = `${window.location.origin}/auth/callback?provider=${provider}`;
 
-        const res = await fetch(`${API_URL}/auth/oauth/${provider}/callback`, {
+        let endpoint = `${API_URL}/auth/oauth/${provider}/callback`;
+        let reqBody: any = {
+          code,
+          redirect_uri: redirectUri,
+        };
+
+        if (isOidc) {
+          endpoint = `${API_URL}/auth/sso/oidc/callback`;
+          let tenantIdNum = 1;
+          const paramTenantId = searchParams.get("tenant_id");
+          if (paramTenantId) {
+            tenantIdNum = parseInt(paramTenantId, 10);
+          } else if (state.startsWith("oidc_")) {
+            const parsed = parseInt(state.replace("oidc_", ""), 10);
+            if (!isNaN(parsed)) tenantIdNum = parsed;
+          }
+          reqBody.tenant_id = tenantIdNum;
+        }
+
+        const res = await fetch(endpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            code,
-            redirect_uri: redirectUri,
-          }),
+          body: JSON.stringify(reqBody),
         });
 
         if (!res.ok) {

@@ -103,7 +103,10 @@ export default function Login() {
       const data = await res.json();
       if (data.sso_enabled && data.login_url) {
         setSsoStatus(`Connecting to ${data.tenant_name || "corporate"} ${data.idp_type?.toUpperCase()} IdP...`);
-        window.location.href = data.login_url;
+        const targetUrl = data.login_url.startsWith("http")
+          ? data.login_url
+          : `${API_URL}${data.login_url}`;
+        window.location.href = targetUrl;
       } else {
         const domain = ssoEmail.split("@")[1] || "";
         setError(`No active Single Sign-On configuration found for corporate domain '@${domain}'. Please log in using credentials.`);

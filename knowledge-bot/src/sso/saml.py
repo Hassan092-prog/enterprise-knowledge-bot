@@ -80,6 +80,8 @@ def parse_idp_metadata_xml(metadata_xml: str) -> Dict[str, Any]:
     """
     Parses raw IdP metadata XML and extracts entityID, SSO URL, and public X.509 certificate.
     """
+    if "<!ENTITY" in metadata_xml.upper() or "<!DOCTYPE" in metadata_xml.upper():
+        raise ValueError("XXE security violation: DTD and Entity declarations are prohibited in IdP metadata.")
     try:
         root = ET.fromstring(metadata_xml)
     except Exception as e:
@@ -192,7 +194,11 @@ def parse_saml_response(
     """
     try:
         xml_bytes = base64.b64decode(saml_response_b64)
+        if b"<!ENTITY" in xml_bytes.upper() or b"<!DOCTYPE" in xml_bytes.upper():
+            raise ValueError("XXE security violation: DTD and Entity declarations are prohibited in SAML responses.")
         root = ET.fromstring(xml_bytes)
+    except ValueError:
+        raise
     except Exception as e:
         raise ValueError(f"Failed to parse SAMLResponse XML: {e}")
 
@@ -222,26 +228,36 @@ def parse_saml_response(
         not_on_or_after_str = conditions.attrib.get("NotOnOrAfter")
 
         if not_before_str:
+            nb = None
             try:
                 nb = datetime.fromisoformat(not_before_str.replace("Z", "+00:00"))
-                if now < nb - timedelta(seconds=clock_skew_sec):
-                    raise ValueError(f"SAML Assertion is not yet valid (NotBefore: {not_before_str})")
             except Exception as e:
                 logger.warning(f"NotBefore parse warning: {e}")
+            if nb and now < nb - timedelta(seconds=clock_skew_sec):
+                raise ValueError(f"SAML Assertion is not yet valid (NotBefore: {not_before_str})")
 
         if not_on_or_after_str:
+            noa = None
             try:
                 noa = datetime.fromisoformat(not_on_or_after_str.replace("Z", "+00:00"))
-                if now >= noa + timedelta(seconds=clock_skew_sec):
-                    raise ValueError(f"SAML Assertion has expired (NotOnOrAfter: {not_on_or_after_str})")
             except Exception as e:
                 logger.warning(f"NotOnOrAfter parse warning: {e}")
+            if noa and now >= noa + timedelta(seconds=clock_skew_sec):
+                raise ValueError(f"SAML Assertion has expired (NotOnOrAfter: {not_on_or_after_str})")
 
-    # 4. Optional Signature Validation
+        # Audience Restriction Check
+        if expected_recipient:
+            audience_elems = conditions.findall(".//{urn:oasis:names:tc:SAML:2.0:assertion}Audience")
+            if audience_elems:
+                audiences = [(a.text or "").strip() for a in audience_elems if a.text]
+                if audiences and expected_recipient not in audiences:
+                    raise ValueError(f"SAML Assertion Audience restriction failed: expected '{expected_recipient}', found {audiences}")
+
+    # 4. Mandatory Signature Validation if Certificate Configured
     if idp_cert_pem and idp_cert_pem.strip():
         is_valid = _verify_saml_signature(root, idp_cert_pem)
         if not is_valid:
-            logger.warning("SAML signature verification failed or cert mismatched. Proceeding with caution.")
+            raise ValueError("SAML cryptographic signature verification failed: invalid signature or untrusted IdP certificate.")
 
     # 5. Extract Subject NameID
     name_id_elem = assertion.find(".//{urn:oasis:names:tc:SAML:2.0:assertion}NameID")

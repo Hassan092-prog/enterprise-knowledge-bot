@@ -26,6 +26,8 @@ from src.config import (
     SUPPORTED_EXTENSIONS,
     sanitize_filename,
     get_tenant_upload_dir,
+    SSO_ENTITY_ID,
+    SSO_ACS_URL,
 )
 from src.database import generate_join_code
 from src.activity import log_activity
@@ -842,6 +844,9 @@ def get_tenant_sso_config(
             "is_enabled": False,
             "enforce_sso": False,
             "default_role": "user",
+            "sp_entity_id": SSO_ENTITY_ID,
+            "sp_acs_url": SSO_ACS_URL,
+            "sp_metadata_url": f"{SSO_ENTITY_ID}/auth/sso/saml/metadata",
         }
 
     return {
@@ -861,6 +866,9 @@ def get_tenant_sso_config(
         "allowed_domains": cfg.allowed_domains,
         "default_role": cfg.default_role,
         "role_mapping_json": cfg.role_mapping_json,
+        "sp_entity_id": SSO_ENTITY_ID,
+        "sp_acs_url": SSO_ACS_URL,
+        "sp_metadata_url": f"{SSO_ENTITY_ID}/auth/sso/saml/metadata",
         "updated_at": cfg.updated_at.isoformat() if cfg.updated_at else None,
     }
 
@@ -969,7 +977,30 @@ def upsert_tenant_sso_config(
         }
     )
 
-    return {"status": "success", "message": "Enterprise SSO configuration saved."}
+    return {
+        "status": "success",
+        "message": "Enterprise SSO configuration saved.",
+        "configured": True,
+        "tenant_id": cfg.tenant_id,
+        "idp_type": cfg.idp_type,
+        "is_enabled": cfg.is_enabled,
+        "enforce_sso": cfg.enforce_sso,
+        "idp_entity_id": cfg.idp_entity_id,
+        "idp_sso_url": cfg.idp_sso_url,
+        "idp_x509_cert": cfg.idp_x509_cert,
+        "has_metadata_xml": bool(cfg.idp_metadata_xml),
+        "oidc_issuer_url": cfg.oidc_issuer_url,
+        "oidc_client_id": cfg.oidc_client_id,
+        "oidc_has_secret": bool(cfg.oidc_client_secret),
+        "oidc_scopes": cfg.oidc_scopes,
+        "allowed_domains": cfg.allowed_domains,
+        "default_role": cfg.default_role,
+        "role_mapping_json": cfg.role_mapping_json,
+        "sp_entity_id": SSO_ENTITY_ID,
+        "sp_acs_url": SSO_ACS_URL,
+        "sp_metadata_url": f"{SSO_ENTITY_ID}/auth/sso/saml/metadata",
+        "updated_at": cfg.updated_at.isoformat() if cfg.updated_at else None,
+    }
 
 
 @router.delete("/sso/config")

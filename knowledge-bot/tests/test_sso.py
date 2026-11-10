@@ -1,5 +1,6 @@
 import pytest
 import json
+import base64
 import time
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
@@ -291,3 +292,68 @@ def test_enforce_sso_login_gate():
     blocked_res = client.post("/auth/login", json={"username": "acme_employee", "password": "password123"})
     assert blocked_res.status_code == 403
     assert "Single Sign-On (SSO) is enforced" in blocked_res.json()["detail"]
+
+    # Verify Break-Glass Access for Tenant SuperAdmin
+    db = TestingSessionLocal()
+    sa = User(
+        username="acme_superadmin",
+        hashed_password=get_password_hash("breakglasspass"),
+        role="superadmin",
+        tenant_id=1,
+        is_platform_admin=False
+    )
+    db.add(sa)
+    db.commit()
+    db.close()
+
+    sa_res = client.post("/auth/login", json={"username": "acme_superadmin", "password": "breakglasspass"})
+    assert sa_res.status_code == 200, f"SuperAdmin break-glass failed: {sa_res.text}"
+    assert sa_res.json()["role"] == "superadmin"
+
+
+def test_saml_assertion_expired_rejected():
+    expired_xml = """<?xml version="1.0"?>
+    <samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
+                    xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"
+                    ID="resp_exp" Version="2.0">
+        <samlp:Status>
+            <samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/>
+        </samlp:Status>
+        <saml:Assertion ID="asrt_exp" Version="2.0">
+            <saml:Conditions NotBefore="2020-01-01T00:00:00Z" NotOnOrAfter="2020-01-02T00:00:00Z"/>
+            <saml:Subject>
+                <saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">bob@acme.com</saml:NameID>
+            </saml:Subject>
+        </saml:Assertion>
+    </samlp:Response>"""
+    b64 = base64.b64encode(expired_xml.encode("utf-8")).decode("ascii")
+
+    with pytest.raises(ValueError, match="expired"):
+        parse_saml_response(b64)
+
+
+def test_saml_audience_restriction_mismatch_rejected():
+    future_time = "2099-01-01T00:00:00Z"
+    sample_xml = f"""<?xml version="1.0"?>
+    <samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
+                    xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"
+                    ID="resp_aud" Version="2.0">
+        <samlp:Status>
+            <samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/>
+        </samlp:Status>
+        <saml:Assertion ID="asrt_aud" Version="2.0">
+            <saml:Conditions NotBefore="2020-01-01T00:00:00Z" NotOnOrAfter="{future_time}">
+                <saml:AudienceRestriction>
+                    <saml:Audience>https://attacker-sp.internal/metadata</saml:Audience>
+                </saml:AudienceRestriction>
+            </saml:Conditions>
+            <saml:Subject>
+                <saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">bob@acme.com</saml:NameID>
+            </saml:Subject>
+        </saml:Assertion>
+    </samlp:Response>"""
+    b64 = base64.b64encode(sample_xml.encode("utf-8")).decode("ascii")
+
+    with pytest.raises(ValueError, match="Audience restriction failed"):
+        parse_saml_response(b64, expected_recipient="https://my-app.internal/auth/sso/saml/metadata")
+

@@ -169,7 +169,10 @@ def login(request: Request, user_data: UserCreate, db: Session = Depends(get_db)
         )
 
     # Check if SSO is enforced for this tenant (Phase 12 Enterprise SSO)
-    if user.tenant_id and not user.is_platform_admin:
+    # Organization SuperAdmins and Platform Admins retain break-glass password login
+    # access to prevent lockout during IdP outages or certificate expirations.
+    is_break_glass = False
+    if user.tenant_id:
         from src.models import TenantSSOConfig
         sso_cfg = db.query(TenantSSOConfig).filter(
             TenantSSOConfig.tenant_id == user.tenant_id,
@@ -177,21 +180,28 @@ def login(request: Request, user_data: UserCreate, db: Session = Depends(get_db)
             TenantSSOConfig.enforce_sso == True
         ).first()
         if sso_cfg:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Single Sign-On (SSO) is enforced for your organization. Please sign in via your corporate Identity Provider."
-            )
+            if not user.is_platform_admin and user.role != "superadmin":
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Single Sign-On (SSO) is enforced for your organization. Please sign in via your corporate Identity Provider."
+                )
+            is_break_glass = True
 
     tenant_name = user.tenant.name if user.tenant else None
 
     # Log successful login
     if user.tenant_id:
+        login_desc = (
+            f"User '{user.username}' logged in via password (SSO break-glass access)"
+            if is_break_glass
+            else f"User '{user.username}' logged in"
+        )
         log_activity(
             tenant_id=user.tenant_id,
             user_id=user.id,
             action="USER_LOGIN",
             category="AUTH",
-            description=f"User '{user.username}' logged in"
+            description=login_desc
         )
 
     access_token = create_user_token(user)

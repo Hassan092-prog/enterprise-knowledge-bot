@@ -10,6 +10,7 @@ import json
 import base64
 import urllib.request
 import urllib.parse
+import urllib.error
 from typing import Dict, Any, Optional, List
 import logging
 
@@ -129,6 +130,14 @@ def exchange_oidc_code(
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             token_res = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as he:
+        body = ""
+        try:
+            body = he.read().decode("utf-8")
+        except Exception:
+            pass
+        logger.error(f"OIDC token exchange HTTPError {he.code}: {body}")
+        raise ValueError(f"OIDC token exchange error ({he.code}): {body or str(he)}")
     except Exception as e:
         logger.error(f"OIDC token exchange request failed: {e}")
         raise ValueError(f"Failed to exchange OIDC authorization code: {str(e)}")
