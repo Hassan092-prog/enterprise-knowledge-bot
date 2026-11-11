@@ -141,8 +141,12 @@ export default function PlatformAdminDashboard() {
   }, [authFetch, selectedCategory]);
 
   useEffect(() => {
+    if (localStorage.getItem("is_platform_admin") !== "true") {
+      router.push("/login");
+      return;
+    }
     loadData();
-  }, [loadData]);
+  }, [loadData, router]);
 
   const inspectTenant = async (tenantId: number) => {
     try {

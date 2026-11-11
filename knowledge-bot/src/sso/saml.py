@@ -464,11 +464,12 @@ def parse_saml_response(
     saml_response_b64: str,
     expected_recipient: Optional[str] = None,
     idp_cert_pem: Optional[str] = None,
-    clock_skew_sec: int = 180
+    clock_skew_sec: int = 180,
+    expected_acs_url: Optional[str] = None,
 ) -> SSOUserProfile:
     """
     Parses a base64-encoded SAML 2.0 Response POSTed from an IdP, validates
-    status, conditions, and optional signature, and extracts user attributes.
+    status, conditions, and mandatory cryptographic signature, and extracts user attributes.
     """
     try:
         xml_bytes = base64.b64decode(saml_response_b64)
@@ -541,11 +542,31 @@ def parse_saml_response(
                 if audiences and expected_recipient not in audiences:
                     raise ValueError(f"SAML Assertion Audience restriction failed: expected '{expected_recipient}', found {audiences}")
 
-    # 4. Mandatory Signature Validation if Certificate Configured
-    if idp_cert_pem and idp_cert_pem.strip():
-        is_valid = _verify_saml_signature(root, idp_cert_pem, raw_xml_bytes=xml_bytes)
-        if not is_valid:
-            raise ValueError("SAML cryptographic signature verification failed: invalid signature or untrusted IdP certificate.")
+    # 4. Mandatory Signature Validation — UNCONDITIONAL (C-1 fix: unsigned assertions never accepted)
+    if not idp_cert_pem or not idp_cert_pem.strip():
+        raise ValueError("SAML signature verification requires an IdP X.509 certificate. Configure the IdP certificate in SSO settings.")
+    is_valid = _verify_saml_signature(root, idp_cert_pem, raw_xml_bytes=xml_bytes)
+    if not is_valid:
+        raise ValueError("SAML cryptographic signature verification failed: invalid signature or untrusted IdP certificate.")
+
+    # 4b. Validate SubjectConfirmationData Recipient (C-2 fix: prevent cross-SP assertion replay)
+    SAML_A = "urn:oasis:names:tc:SAML:2.0:assertion"
+    subj_conf_data = assertion.find(f".//{{{SAML_A}}}SubjectConfirmationData")
+    if subj_conf_data is not None:
+        recipient = subj_conf_data.attrib.get("Recipient", "").strip()
+        allowed_recipients = {u.strip().rstrip("/") for u in (expected_acs_url, expected_recipient) if u and u.strip()}
+        if allowed_recipients and recipient and recipient.rstrip("/") not in allowed_recipients:
+            expected_display = expected_acs_url or expected_recipient
+            raise ValueError(
+                f"SAML SubjectConfirmationData Recipient mismatch: "
+                f"expected '{expected_display}', got '{recipient}'"
+            )
+        # Also enforce SubjectConfirmationData/@NotOnOrAfter separately
+        scd_noa = subj_conf_data.attrib.get("NotOnOrAfter")
+        if scd_noa:
+            scd_noa_dt = _parse_saml_timestamp(scd_noa, "SubjectConfirmationData/@NotOnOrAfter")
+            if datetime.now(timezone.utc) >= scd_noa_dt + timedelta(seconds=clock_skew_sec):
+                raise ValueError(f"SAML SubjectConfirmationData has expired (NotOnOrAfter: {scd_noa})")
 
     # 5. Extract Subject NameID
     name_id_elem = assertion.find(".//{urn:oasis:names:tc:SAML:2.0:assertion}NameID")

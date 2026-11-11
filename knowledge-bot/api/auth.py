@@ -1,18 +1,20 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
 import logging
 import secrets
+import threading
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
 from src.models import User, AccessRequest, Tenant, TenantSSOConfig
 from api.dependencies import get_db, get_current_user
 from src.auth import verify_password, get_password_hash, create_user_token
 from src.activity import log_activity
-from api.limiter import limiter, get_ip_rate_limit_key
+from api.limiter import limiter, get_ip_rate_limit_key, get_user_rate_limit_key
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -44,7 +46,10 @@ class OAuthCallbackRequest(BaseModel):
     company_name: Optional[str] = None
     join_code: Optional[str] = None
 
-_memory_oauth_states: dict[str, str] = {}
+from cachetools import TTLCache
+
+_oauth_state_lock = threading.Lock()
+_memory_oauth_states: TTLCache = TTLCache(maxsize=500, ttl=900)  # H-3/H-11 fix: bounded TTL eviction & lock, no unbounded growth
 
 class TenantDomainUpdate(BaseModel):
     allowed_domains: str
@@ -151,10 +156,19 @@ def register(request: Request, user_data: UserCreate, db: Session = Depends(get_
     except HTTPException:
         db.rollback()
         raise
+    except IntegrityError as ie:
+        db.rollback()
+        logger.warning(f"Registration conflict (L-4 atomic race guard): {ie}")
+        raise HTTPException(
+            status_code=409,
+            detail="Username or organization name is already taken. If joining an existing organization, please provide its join code."
+        )
     except Exception as e:
         db.rollback()
         logger.error(f"Registration error: {e}")
-        raise HTTPException(status_code=400, detail=f"Registration failed: {str(e)}")
+        from src.config import ENVIRONMENT
+        safe_detail = "Registration failed. Please try again." if ENVIRONMENT == "production" else f"Registration failed: {str(e)}"
+        raise HTTPException(status_code=400, detail=safe_detail)
 
 @router.post("/login", response_model=Token)
 @limiter.limit("10/minute", key_func=get_ip_rate_limit_key)
@@ -234,6 +248,8 @@ def login(request: Request, user_data: UserCreate, db: Session = Depends(get_db)
 
 @router.get("/me")
 def get_me(current_user: User = Depends(get_current_user)):
+    # H-2 fix: Removed token re-issue from /me response — prevents JWT revocation bypass.
+    # Fresh tokens are only issued at login/OAuth/SSO/register endpoints.
     return {
         "id": current_user.id,
         "username": current_user.username,
@@ -246,7 +262,6 @@ def get_me(current_user: User = Depends(get_current_user)):
         "tenant_slug": current_user.tenant.slug if current_user.tenant else None,
         "allowed_domains": current_user.tenant.allowed_domains if current_user.tenant else None,
         "is_platform_admin": bool(current_user.is_platform_admin),
-        "access_token": create_user_token(current_user)
     }
 
 @router.post("/request_role")
@@ -304,7 +319,8 @@ def get_oauth_providers():
     return get_available_oauth_providers()
 
 @router.get("/oauth/{provider}/authorize")
-def oauth_authorize(provider: str, redirect_uri: str):
+@limiter.limit("30/minute", key_func=get_ip_rate_limit_key)
+def oauth_authorize(request: Request, provider: str, redirect_uri: str):
     """Generates the provider authorization URL with a single-use CSRF state token."""
     from src.oauth import generate_oauth_authorization_url
     from src.sso.revocation import get_redis_client
@@ -324,7 +340,8 @@ def oauth_authorize(provider: str, redirect_uri: str):
                 r.set(f"oauth:state:{nonce_state}", clean_provider, ex=900)
             except Exception as se:
                 logger.warning(f"OAuth state Redis cache notice: {se}")
-        _memory_oauth_states[nonce_state] = clean_provider
+        with _oauth_state_lock:
+            _memory_oauth_states[nonce_state] = clean_provider
 
         return {"authorization_url": final_url, "state": nonce_state}
     except ValueError as e:
@@ -348,8 +365,10 @@ def _validate_and_consume_oauth_state(provider: str, state: Optional[str]) -> No
                 r.delete(f"oauth:state:{state}")
         except Exception:
             pass
-    if not expected_provider and state in _memory_oauth_states:
-        expected_provider = _memory_oauth_states.pop(state, None)
+    if not expected_provider:
+        with _oauth_state_lock:
+            if state in _memory_oauth_states:
+                expected_provider = _memory_oauth_states.pop(state, None)
 
     if isinstance(expected_provider, bytes):
         expected_provider = expected_provider.decode("utf-8", errors="ignore")
@@ -395,7 +414,8 @@ def _is_domain_claimed(db: Session, domain: str) -> bool:
 
 
 @router.post("/oauth/{provider}/callback", response_model=Token)
-def oauth_callback(provider: str, request: OAuthCallbackRequest, db: Session = Depends(get_db)):
+@limiter.limit("20/minute", key_func=get_ip_rate_limit_key)
+def oauth_callback(request: Request, provider: str, request_body: OAuthCallbackRequest, db: Session = Depends(get_db)):
     """
     Exchanges code for verified identity, matches corporate domain or provisions account,
     and returns enterprise multi-tenant JWT token.
@@ -405,17 +425,20 @@ def oauth_callback(provider: str, request: OAuthCallbackRequest, db: Session = D
     from src.sso import find_tenant_sso_by_email
     import re
 
-    _validate_and_consume_oauth_state(provider=provider, state=request.state)
+    _validate_and_consume_oauth_state(provider=provider, state=request_body.state)
 
     try:
         profile = exchange_oauth_code(
             provider=provider,
-            code=request.code,
-            redirect_uri=request.redirect_uri
+            code=request_body.code,
+            redirect_uri=request_body.redirect_uri
         )
     except Exception as e:
         logger.error(f"OAuth code exchange failed: {e}")
-        raise HTTPException(status_code=400, detail=f"OAuth verification failed: {str(e)}")
+        # M-9 fix: Never expose raw OAuth provider exception details to callers in production
+        from src.config import ENVIRONMENT
+        safe_detail = "OAuth verification failed. Please try again." if ENVIRONMENT == "production" else f"OAuth verification failed: {str(e)}"
+        raise HTTPException(status_code=400, detail=safe_detail)
 
     email = (profile.get("email") or "").strip()
     if not email or "@" not in email:
@@ -486,10 +509,10 @@ def oauth_callback(provider: str, request: OAuthCallbackRequest, db: Session = D
             tenant, _ = sso_match
             assigned_role = "user"
 
-    # 2b. Explicit company_name or join_code from request
+    # 2b. Explicit company_name or join_code from request_body
     if not tenant:
-        if request.company_name and request.company_name.strip():
-            company_clean = request.company_name.strip()
+        if request_body.company_name and request_body.company_name.strip():
+            company_clean = request_body.company_name.strip()
             slug = slugify(company_clean)
             tenant = db.query(Tenant).filter(Tenant.slug == slug).first()
             if tenant is None:
@@ -514,11 +537,11 @@ def oauth_callback(provider: str, request: OAuthCallbackRequest, db: Session = D
             else:
                 if tenant.status == "suspended":
                     raise HTTPException(status_code=403, detail="Cannot register into a suspended organization")
-                if not request.join_code or request.join_code.strip() != (tenant.join_code or "").strip():
+                if not request_body.join_code or request_body.join_code.strip() != (tenant.join_code or "").strip():
                     raise HTTPException(status_code=403, detail="Invalid or missing join code for this organization")
                 assigned_role = "user"
-        elif request.join_code and request.join_code.strip():
-            target_tenant = db.query(Tenant).filter(Tenant.join_code == request.join_code.strip()).first()
+        elif request_body.join_code and request_body.join_code.strip():
+            target_tenant = db.query(Tenant).filter(Tenant.join_code == request_body.join_code.strip()).first()
             if not target_tenant:
                 raise HTTPException(status_code=400, detail="Invalid organization join code")
             if target_tenant.status == "suspended":
@@ -569,14 +592,22 @@ def oauth_callback(provider: str, request: OAuthCallbackRequest, db: Session = D
         tenant_id=tenant.id if tenant else None,
         is_platform_admin=False
     )
-    db.add(new_user)
-    db.flush()
+    try:
+        db.add(new_user)
+        db.flush()
 
-    if tenant and assigned_role == "superadmin" and tenant.superadmin_user_id is None:
-        tenant.superadmin_user_id = new_user.id
+        if tenant and assigned_role == "superadmin" and tenant.superadmin_user_id is None:
+            tenant.superadmin_user_id = new_user.id
 
-    db.commit()
-    db.refresh(new_user)
+        db.commit()
+        db.refresh(new_user)
+    except IntegrityError as ie:
+        db.rollback()
+        logger.warning(f"OAuth provisioning conflict: {ie}")
+        raise HTTPException(
+            status_code=409,
+            detail="Account or organization already exists. Please sign in or verify your organization join code."
+        )
 
     if tenant:
         log_activity(
@@ -610,7 +641,8 @@ def get_tenant_domains(db: Session = Depends(get_db), current_user: User = Depen
     return {"allowed_domains": tenant.allowed_domains}
 
 @router.patch("/tenant/domains")
-def update_tenant_domains(update: TenantDomainUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+@limiter.limit("10/minute", key_func=get_user_rate_limit_key)
+def update_tenant_domains(request: Request, update: TenantDomainUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Allows SuperAdmins and Admins to configure allowed email domains for 1-click corporate onboarding."""
     if current_user.role not in ["superadmin", "admin"]:
         raise HTTPException(status_code=403, detail="Admin privileges required")

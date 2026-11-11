@@ -1460,11 +1460,11 @@ def run_diagnostics():
         assert checks["chromadb"]["status"] == "ok", f"ChromaDB check failed: {checks['chromadb']}"
         assert checks["storage"]["status"] == "ok", f"Storage check failed: {checks['storage']}"
 
-        # Test alias endpoints
+        # Test alias endpoint & verify L-1 hardening (/health ignores ?detailed=true)
         resp_hr = client.get("/health/ready")
         assert resp_hr.status_code == 200 and resp_hr.json()["status"] == "ready"
         resp_hd = client.get("/health?detailed=true")
-        assert resp_hd.status_code == 200 and resp_hd.json()["status"] == "ready"
+        assert resp_hd.status_code == 200 and resp_hd.json() == {"status": "ok"}
 
         # 2. Security Headers Verification
         headers = resp_health.headers

@@ -84,7 +84,8 @@ def generate_oidc_authorization_url(
     client_id: str,
     redirect_uri: str,
     state: str,
-    scopes: str = "openid email profile groups"
+    scopes: str = "openid email profile groups",
+    nonce: Optional[str] = None
 ) -> str:
     """Constructs the OIDC authorization redirection URL."""
     endpoints = discover_oidc_endpoints(issuer_url)
@@ -97,6 +98,8 @@ def generate_oidc_authorization_url(
         "scope": scopes,
         "state": state,
     }
+    if nonce:
+        params["nonce"] = nonce
     separator = "&" if "?" in auth_endpoint else "?"
     return f"{auth_endpoint}{separator}{urllib.parse.urlencode(params)}"
 
@@ -166,9 +169,8 @@ def exchange_oidc_code(
     access_token = token_res.get("access_token")
     id_token = token_res.get("id_token")
 
-    claims: Dict[str, Any] = {}
-    if id_token:
-        claims.update(_decode_jwt_payload_unverified(id_token))
+    id_token_claims: Dict[str, Any] = _decode_jwt_payload_unverified(id_token) if id_token else {}
+    claims: Dict[str, Any] = dict(id_token_claims)
 
     # Fetch UserInfo if available
     userinfo_endpoint = endpoints.get("userinfo_endpoint")
@@ -224,5 +226,6 @@ def exchange_oidc_code(
         groups=list(dict.fromkeys(groups)),
         raw_attributes=claims,
         avatar_url=claims.get("picture"),
+        nonce=str(id_token_claims["nonce"]) if id_token_claims.get("nonce") is not None else None,
     )
 

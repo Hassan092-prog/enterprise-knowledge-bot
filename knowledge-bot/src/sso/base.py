@@ -22,6 +22,7 @@ class SSOUserProfile:
     raw_attributes: Dict[str, Any] = field(default_factory=dict)
     avatar_url: Optional[str] = None
     assertion_id: Optional[str] = None
+    nonce: Optional[str] = None
 
 
 class RoleMappingEngine:

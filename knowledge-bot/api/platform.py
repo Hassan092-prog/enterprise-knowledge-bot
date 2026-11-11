@@ -3,7 +3,7 @@ import io
 import csv
 from datetime import datetime
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, Request
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
@@ -11,6 +11,7 @@ from src.models import Tenant, User, ChatSession, ActivityLog
 from api.dependencies import get_db, get_current_platform_admin
 from src.config import get_tenant_upload_dir, UPLOAD_DIR
 from src.logger import get_logger
+from api.limiter import limiter, get_user_rate_limit_key
 
 logger = get_logger(__name__)
 
@@ -21,7 +22,9 @@ router = APIRouter()
 # ──────────────────────────────────────────────────────────────────
 
 @router.get("/stats")
+@limiter.limit("60/minute", key_func=get_user_rate_limit_key)
 def get_platform_global_stats(
+    request: Request,
     db: Session = Depends(get_db),
     current_admin: User = Depends(get_current_platform_admin),
 ):
@@ -50,7 +53,9 @@ def get_platform_global_stats(
 # ──────────────────────────────────────────────────────────────────
 
 @router.get("/tenants")
+@limiter.limit("60/minute", key_func=get_user_rate_limit_key)
 def list_all_tenants(
+    request: Request,
     db: Session = Depends(get_db),
     current_admin: User = Depends(get_current_platform_admin),
 ):
@@ -90,7 +95,9 @@ def list_all_tenants(
     return results
 
 @router.get("/tenants/{tenant_id}")
+@limiter.limit("60/minute", key_func=get_user_rate_limit_key)
 def inspect_tenant(
+    request: Request,
     tenant_id: int,
     db: Session = Depends(get_db),
     current_admin: User = Depends(get_current_platform_admin),
@@ -145,7 +152,9 @@ class TenantBudgetUpdate(BaseModel):
     reset_usage: bool = False
 
 @router.patch("/tenants/{tenant_id}/budget")
+@limiter.limit("10/minute", key_func=get_user_rate_limit_key)
 def update_tenant_budget(
+    request: Request,
     tenant_id: int,
     budget_data: TenantBudgetUpdate,
     db: Session = Depends(get_db),
@@ -176,7 +185,9 @@ def update_tenant_budget(
     }
 
 @router.get("/export/csv")
+@limiter.limit("60/minute", key_func=get_user_rate_limit_key)
 def export_tenants_csv(
+    request: Request,
     db: Session = Depends(get_db),
     current_admin: User = Depends(get_current_platform_admin),
 ):
@@ -226,7 +237,9 @@ class TenantStatusUpdate(BaseModel):
     status: str
 
 @router.post("/tenants/{tenant_id}/status")
+@limiter.limit("10/minute", key_func=get_user_rate_limit_key)
 def update_tenant_status(
+    request: Request,
     tenant_id: int,
     status_data: TenantStatusUpdate,
     db: Session = Depends(get_db),
@@ -253,7 +266,9 @@ def update_tenant_status(
     return {"status": "success", "message": f"Tenant '{tenant.name}' status changed from '{old_status}' to '{tenant.status}'"}
 
 @router.delete("/tenants/{tenant_id}")
+@limiter.limit("10/minute", key_func=get_user_rate_limit_key)
 def delete_tenant_organization(
+    request: Request,
     tenant_id: int,
     db: Session = Depends(get_db),
     current_admin: User = Depends(get_current_platform_admin),
@@ -324,7 +339,9 @@ def delete_tenant_organization(
 # ──────────────────────────────────────────────────────────────────
 
 @router.get("/activity")
+@limiter.limit("60/minute", key_func=get_user_rate_limit_key)
 def get_global_activity_feed(
+    request: Request,
     limit: int = Query(100, ge=1, le=500),
     category: Optional[str] = None,
     db: Session = Depends(get_db),

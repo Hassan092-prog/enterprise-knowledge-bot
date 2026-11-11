@@ -102,10 +102,30 @@ export default function Login() {
       }
       const data = await res.json();
       if (data.sso_enabled && data.login_url) {
+        let targetUrl: string;
+        try {
+          const rawUrl = String(data.login_url).trim();
+          if (rawUrl.startsWith("/") && !rawUrl.startsWith("//") && !rawUrl.includes("\\")) {
+            targetUrl = `${API_URL}${rawUrl}`;
+          } else {
+            const parsed = new URL(rawUrl);
+            if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+              throw new Error("Unsupported protocol");
+            }
+            const allowedOrigins = [
+              new URL(API_URL, window.location.origin).origin,
+              window.location.origin,
+            ];
+            if (!allowedOrigins.includes(parsed.origin)) {
+              throw new Error("Untrusted SSO redirect target");
+            }
+            targetUrl = parsed.toString();
+          }
+        } catch {
+          setError("SSO redirect target could not be validated. Please contact your administrator.");
+          return;
+        }
         setSsoStatus(`Connecting to ${data.tenant_name || "corporate"} ${data.idp_type?.toUpperCase()} IdP...`);
-        const targetUrl = data.login_url.startsWith("http")
-          ? data.login_url
-          : `${API_URL}${data.login_url}`;
         window.location.href = targetUrl;
       } else {
         const domain = ssoEmail.split("@")[1] || "";

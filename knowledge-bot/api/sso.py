@@ -37,8 +37,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth/sso", tags=["Enterprise SSO"])
 
-# In-memory store for OIDC CSRF state validation fallback
-_memory_oidc_states: Dict[str, int] = {}
+# In-memory store for OIDC CSRF state and nonce validation fallback
+import threading
+from cachetools import TTLCache
+
+_oidc_state_lock = threading.Lock()
+_memory_oidc_states: TTLCache = TTLCache(maxsize=500, ttl=900)  # H-3 fix: bounded TTL eviction, no unbounded growth
+_memory_oidc_nonces: TTLCache = TTLCache(maxsize=500, ttl=900)
 
 
 class SSODiscoverResponse(BaseModel):
@@ -241,7 +246,12 @@ def saml_acs(
 
     # 3. Parse & cryptographically verify SAML assertion against registered IdP certificate
     try:
-        profile = parse_saml_response(SAMLResponse, expected_recipient=SSO_ENTITY_ID, idp_cert_pem=cfg.idp_x509_cert)
+        profile = parse_saml_response(
+            SAMLResponse,
+            expected_recipient=SSO_ENTITY_ID,
+            idp_cert_pem=cfg.idp_x509_cert,
+            expected_acs_url=SSO_ACS_URL,
+        )
     except Exception as e:
         logger.error(f"SAML assertion validation failed: {e}")
         raise HTTPException(status_code=400, detail=f"SAML authentication failed: {str(e)}")
@@ -404,18 +414,23 @@ def oidc_authorize(
         )
 
     eff_redirect = redirect_uri or f"{SSO_FRONTEND_URL}/auth/callback"
+    state_rand = secrets.token_urlsafe(16)
     nonce = secrets.token_urlsafe(16)
-    state = f"oidc_{tenant_id}_{nonce}"
+    state = f"oidc_{tenant_id}_{state_rand}"
 
-    # Cache CSRF state token in Redis with 15m TTL (with in-memory fallback)
+    # Cache CSRF state and nonce tokens in Redis with 15m TTL (with thread-safe in-memory fallback)
     from src.sso.revocation import get_redis_client
     r = get_redis_client()
     if r:
         try:
             r.set(f"sso:oidc:state:{state}", str(tenant_id), ex=900)
+            # C-3 fix: Store nonce separately for ID token verification
+            r.set(f"sso:oidc:nonce:{state}", nonce, ex=900)
         except Exception as se:
             logger.warning(f"OIDC state Redis cache notice: {se}")
-    _memory_oidc_states[state] = tenant_id
+    with _oidc_state_lock:
+        _memory_oidc_states[state] = tenant_id
+        _memory_oidc_nonces[state] = nonce
 
     try:
         auth_url = generate_oidc_authorization_url(
@@ -423,7 +438,8 @@ def oidc_authorize(
             client_id=cfg.oidc_client_id,
             redirect_uri=eff_redirect,
             state=state,
-            scopes=cfg.oidc_scopes or "openid email profile groups"
+            scopes=cfg.oidc_scopes or "openid email profile groups",
+            nonce=nonce,
         )
     except ValueError as url_err:
         raise HTTPException(status_code=400, detail=str(url_err))
@@ -461,8 +477,10 @@ def oidc_callback(
                 r.delete(f"sso:oidc:state:{payload.state}")
         except Exception:
             pass
-    if not expected_tenant and payload.state in _memory_oidc_states:
-        expected_tenant = str(_memory_oidc_states.pop(payload.state, None))
+    if not expected_tenant:
+        with _oidc_state_lock:
+            if payload.state in _memory_oidc_states:
+                expected_tenant = str(_memory_oidc_states.pop(payload.state, None))
 
     if not expected_tenant or int(expected_tenant) != payload.tenant_id:
         logger.warning(f"OIDC CSRF state mismatch or invalid: state={payload.state}, expected tenant={expected_tenant}, got #{payload.tenant_id}")
@@ -500,7 +518,29 @@ def oidc_callback(
         )
     except Exception as e:
         logger.error(f"OIDC exchange failed: {e}")
-        raise HTTPException(status_code=400, detail=f"OIDC verification failed: {str(e)}")
+        from src.config import ENVIRONMENT
+        safe_detail = "OIDC verification failed. Please try again." if ENVIRONMENT == "production" else f"OIDC verification failed: {str(e)}"
+        raise HTTPException(status_code=400, detail=safe_detail)
+
+    # C-3 fix: Verify OIDC nonce from ID token to prevent replay/mix-up attacks
+    expected_nonce = None
+    if r:
+        try:
+            expected_nonce = r.get(f"sso:oidc:nonce:{payload.state}")
+            if expected_nonce:
+                r.delete(f"sso:oidc:nonce:{payload.state}")
+                if isinstance(expected_nonce, bytes):
+                    expected_nonce = expected_nonce.decode("utf-8", errors="ignore")
+        except Exception:
+            pass
+    with _oidc_state_lock:
+        mem_nonce = _memory_oidc_nonces.pop(payload.state, None)
+    if not expected_nonce:
+        expected_nonce = mem_nonce
+
+    if expected_nonce and getattr(profile, "nonce", None) != expected_nonce:
+        logger.warning(f"OIDC nonce mismatch or missing for tenant #{payload.tenant_id}: token replay or mix-up attack suspected.")
+        raise HTTPException(status_code=400, detail="OIDC nonce verification failed: possible token replay or mix-up attack.")
 
     # Resolve application role from Directory Groups
     resolved_role = RoleMappingEngine.resolve_role(

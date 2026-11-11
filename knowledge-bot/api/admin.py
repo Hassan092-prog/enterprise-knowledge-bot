@@ -32,7 +32,7 @@ from src.config import (
 from src.database import generate_join_code
 from src.activity import log_activity
 from src.logger import get_logger
-from api.limiter import limiter
+from api.limiter import limiter, get_user_rate_limit_key
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -415,7 +415,9 @@ def get_join_code(current_user: User = Depends(get_current_admin_user)):
     }
 
 @router.post("/regenerate_join_code")
+@limiter.limit("5/minute", key_func=get_user_rate_limit_key)
 def regenerate_join_code(
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_superadmin_user),
 ):
@@ -448,7 +450,9 @@ class TransferRequest(BaseModel):
     to_user_id: int
 
 @router.post("/transfer_superadmin")
+@limiter.limit("5/minute", key_func=get_user_rate_limit_key)
 def initiate_superadmin_transfer(
+    request: Request,
     transfer_req: TransferRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_superadmin_user),
@@ -524,7 +528,9 @@ def get_pending_transfers(
     } for t in transfers]
 
 @router.post("/accept_transfer/{transfer_id}")
+@limiter.limit("5/minute", key_func=get_user_rate_limit_key)
 def accept_superadmin_transfer(
+    request: Request,
     transfer_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -574,7 +580,9 @@ def accept_superadmin_transfer(
     return {"status": "success", "message": "SuperAdmin ownership transferred successfully"}
 
 @router.post("/cancel_transfer/{transfer_id}")
+@limiter.limit("5/minute", key_func=get_user_rate_limit_key)
 def cancel_superadmin_transfer(
+    request: Request,
     transfer_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_superadmin_user),
@@ -604,7 +612,9 @@ def cancel_superadmin_transfer(
     return {"status": "success", "message": "Ownership transfer cancelled"}
 
 @router.post("/reject_transfer/{transfer_id}")
+@limiter.limit("5/minute", key_func=get_user_rate_limit_key)
 def reject_superadmin_transfer(
+    request: Request,
     transfer_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),

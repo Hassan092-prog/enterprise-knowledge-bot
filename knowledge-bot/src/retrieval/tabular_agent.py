@@ -113,7 +113,14 @@ def run_tabular_query(query: str, filename: str, tenant_id: Optional[int] = None
         db = SQLDatabase(engine)
         toolkit = SQLDatabaseToolkit(db=db, llm=llm)
 
-        columns_list = ", ".join(df.columns.tolist())
+        # C-4 fix: Sanitize CSV column names before embedding into LLM prompt (prevent prompt injection)
+        raw_columns = df.columns.tolist()
+        sanitized_columns = [re.sub(r'[^a-zA-Z0-9_ ]', '_', str(col))[:64] for col in raw_columns]
+        # Cap total columns at 50 and total character budget at 2000 chars (M-8 fix)
+        sanitized_columns = sanitized_columns[:50]
+        columns_list = ", ".join(sanitized_columns)
+        if len(columns_list) > 2000:
+            columns_list = columns_list[:2000] + " ... (truncated)"
         prefix = (
             "You are an expert SQL analyst querying an in-memory SQLite database table named 'data'.\n"
             f"The table is named 'data'. Always query from table 'data'.\n"

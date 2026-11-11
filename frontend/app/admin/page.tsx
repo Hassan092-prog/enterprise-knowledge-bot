@@ -192,6 +192,10 @@ export default function AdminDashboard() {
         if (me.role) localStorage.setItem("role", me.role);
         setIsPlatformAdmin(Boolean(me.is_platform_admin));
         setCurrentUsername(me.username);
+        if (!me.role || !["admin", "superadmin"].includes(me.role)) {
+          router.push("/");
+          return;
+        }
       }
 
       // Fetch Stats
@@ -444,8 +448,13 @@ export default function AdminDashboard() {
   }, [API_URL, authFetch]);
 
   useEffect(() => {
+    const role = localStorage.getItem("role");
+    if (!role || !["admin", "superadmin"].includes(role)) {
+      router.push("/login");
+      return;
+    }
     fetchStatsAndData();
-  }, [fetchStatsAndData]);
+  }, [fetchStatsAndData, router]);
 
   useEffect(() => {
     if (activeTab === "activity") {

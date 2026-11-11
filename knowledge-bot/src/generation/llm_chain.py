@@ -49,9 +49,10 @@ from langchain_core.prompts import ChatPromptTemplate
 from src.llm_factory import get_llm
 from cachetools import TTLCache
 import hashlib
+import re
 
-# Simple in-memory cache: 1000 items, 24-hour TTL
-_semantic_cache = TTLCache(maxsize=1000, ttl=86400)
+# Simple in-memory cache: 1000 items, 4-hour TTL (M-1 fix: reduced from 24h to limit stale deleted-doc answers)
+_semantic_cache = TTLCache(maxsize=1000, ttl=14400)
 
 def _get_cache_key(query: str, chunks: List[Document], chat_history: Optional[List[dict]] = None) -> str:
     """Generate a deterministic hash for the cache key partitioned strictly by tenant, history, and chunk IDs."""
@@ -255,6 +256,19 @@ Conversation History:
 Follow-up Question: {question}
 Standalone Query:"""
 
+_INJECTION_MARKER_RE = re.compile(
+    r"(?i)(SYSTEM:|ASSISTANT:|HUMAN:|###|---INST|\[INST\]|\[/INST\]|<\|im_start\|>|<\|im_end\|>)"
+)
+
+
+def _sanitize_history_text(text: str, max_len: int = 1000) -> str:
+    """Strip common LLM prompt-injection markers and cap history message length."""
+    cleaned = _INJECTION_MARKER_RE.sub("", (text or "").strip())
+    if len(cleaned) > max_len:
+        return cleaned[:max_len] + "..."
+    return cleaned
+
+
 def condense_query(query: str, chat_history: Optional[List[dict]] = None) -> str:
     """
     Reformulate ambiguous follow-up questions using recent chat context.
@@ -266,11 +280,9 @@ def condense_query(query: str, chat_history: Optional[List[dict]] = None) -> str
     history_lines = []
     for msg in chat_history[-4:]:
         role = "User" if msg.get("role") == "user" else "Assistant"
-        text = msg.get("content", "").strip()
+        text = _sanitize_history_text(msg.get("content", ""), max_len=250)
         if not text:
             continue
-        if len(text) > 250:
-            text = text[:250] + "..."
         history_lines.append(f"{role}: {text}")
 
     formatted_history = "\n".join(history_lines).strip()
@@ -328,10 +340,9 @@ def _format_history_block(chat_history: Optional[List[dict]]) -> str:
     lines = ["RECENT CONVERSATION CONTEXT:"]
     for msg in chat_history[-4:]:
         role = "User" if msg.get("role") == "user" else "Assistant"
-        content = msg.get("content", "").strip()
-        if len(content) > 300:
-            content = content[:300] + "..."
-        lines.append(f"{role}: {content}")
+        content = _sanitize_history_text(msg.get("content", ""), max_len=1000)
+        if content:
+            lines.append(f"{role}: {content}")
     lines.append("\n---\n")
     return "\n".join(lines)
 

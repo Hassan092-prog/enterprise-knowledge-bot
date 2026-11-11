@@ -59,13 +59,19 @@ if ENVIRONMENT == "production" and ("*" in (CORS_ORIGINS or []) or not CORS_ORIG
 
 cors_allowed = CORS_ORIGINS if CORS_ORIGINS else ([] if ENVIRONMENT == "production" else ["*"])
 
+import threading
+
 # Initialize Retriever singleton
 retriever = None
+_retriever_lock = threading.Lock()
 
 def get_retriever() -> Retriever:
+    # C-5 fix: Thread-safe lazy singleton initialization with double-checked locking
     global retriever
     if retriever is None:
-        retriever = Retriever()
+        with _retriever_lock:
+            if retriever is None:
+                retriever = Retriever()
     return retriever
 
 @asynccontextmanager
@@ -202,13 +208,12 @@ class SessionTitleUpdate(BaseModel):
     title: str
 
 @app.get("/health")
-def health_check(detailed: bool = False):
+def health_check():
     """
-    Liveness probe endpoint.
-    Returns lightweight health status, or full dependency diagnostics when detailed=True.
+    Liveness probe endpoint. Returns lightweight health status only.
+    Use /ready for full dependency diagnostics (requires internal access or auth).
     """
-    if detailed:
-        return readiness_check()
+    # L-1 fix: Removed ?detailed=true parameter that exposed full infra details unauthenticated
     return {"status": "ok"}
 
 @app.get("/ready")
@@ -241,9 +246,10 @@ def readiness_check():
         }
     except Exception as e:
         is_ready = False
+        api_logger.error("Readiness database check failed: %s", e)
         checks["database"] = {
             "status": "error",
-            "error": str(e)
+            "error": "Database connectivity check failed" if ENVIRONMENT == "production" else str(e)
         }
 
     # 2. Redis check
@@ -257,9 +263,10 @@ def readiness_check():
             "latency_ms": round((time.perf_counter() - t0) * 1000, 2)
         }
     except Exception as e:
+        api_logger.warning("Readiness redis check degraded: %s", e)
         checks["redis"] = {
             "status": "degraded",
-            "warning": str(e)
+            "warning": "Redis connectivity check degraded" if ENVIRONMENT == "production" else str(e)
         }
 
     # 3. ChromaDB check
@@ -269,14 +276,16 @@ def readiness_check():
         hb = r.heartbeat()
         checks["chromadb"] = {
             "status": "ok",
-            "heartbeat": hb,
             "latency_ms": round((time.perf_counter() - t0) * 1000, 2)
         }
+        if ENVIRONMENT != "production":
+            checks["chromadb"]["heartbeat"] = hb
     except Exception as e:
         is_ready = False
+        api_logger.error("Readiness chromadb check failed: %s", e)
         checks["chromadb"] = {
             "status": "error",
-            "error": str(e)
+            "error": "Vector store connectivity check failed" if ENVIRONMENT == "production" else str(e)
         }
 
     # 4. Storage check
@@ -287,30 +296,34 @@ def readiness_check():
         if ok:
             checks["storage"] = {
                 "status": "ok",
-                "backend": storage.__class__.__name__,
                 "latency_ms": round((time.perf_counter() - t0) * 1000, 2)
             }
+            if ENVIRONMENT != "production":
+                checks["storage"]["backend"] = storage.__class__.__name__
         else:
             is_ready = False
             checks["storage"] = {
                 "status": "error",
-                "backend": storage.__class__.__name__,
                 "error": "Storage ping check failed"
             }
+            if ENVIRONMENT != "production":
+                checks["storage"]["backend"] = storage.__class__.__name__
     except Exception as e:
         is_ready = False
+        api_logger.error("Readiness storage check failed: %s", e)
         checks["storage"] = {
             "status": "error",
-            "error": str(e)
+            "error": "Storage connectivity check failed" if ENVIRONMENT == "production" else str(e)
         }
 
     payload = {
         "status": "ready" if is_ready else "unhealthy",
-        "environment": ENVIRONMENT,
-        "version": "2.2.0",
         "checks": checks,
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
+    if ENVIRONMENT != "production":
+        payload["environment"] = ENVIRONMENT
+        payload["version"] = "2.2.0"
 
     if not is_ready:
         return JSONResponse(status_code=503, content=payload)
@@ -526,7 +539,9 @@ def _resolve_document_scope(
 
 
 @app.get("/documents/{filename}/download")
+@limiter.limit("30/minute")
 def download_document(
+    request: Request,
     filename: str,
     presigned: bool = False,
     scope: Optional[str] = Query(None, pattern="^(personal|global)$"),
@@ -545,6 +560,8 @@ def download_document(
 
     resolved = _resolve_document_scope(clean_name, current_user, r, storage, scope=scope)
     target_key = resolved["key_global"] if resolved["is_global"] else resolved["key_personal"]
+    if not target_key.startswith(f"tenants/{current_user.tenant_id}/"):
+        raise HTTPException(status_code=403, detail="Forbidden: storage key tenant mismatch.")
 
     if storage.object_exists(target_key):
         if presigned and STORAGE_BACKEND == "s3":
@@ -570,7 +587,9 @@ def download_document(
     raise HTTPException(status_code=404, detail="Document binary not found.")
 
 @app.delete("/documents/{filename}")
+@limiter.limit("20/hour")
 def delete_document(
+    request: Request,
     filename: str,
     scope: Optional[str] = Query(None, pattern="^(personal|global)$"),
     current_user: User = Depends(get_current_user),
@@ -589,6 +608,10 @@ def delete_document(
 
     if is_global and current_user.role not in ["superadmin", "admin", "editor"]:
         raise HTTPException(status_code=403, detail="Forbidden: You must be an admin or editor to delete a company document.")
+
+    target_key = resolved["key_global"] if is_global else resolved["key_personal"]
+    if not target_key.startswith(f"tenants/{current_user.tenant_id}/"):
+        raise HTTPException(status_code=403, detail="Forbidden: storage key tenant mismatch.")
 
     # Delete strictly within target scope (personal or global)
     if is_global:
@@ -620,7 +643,8 @@ def delete_document(
     return {"status": "deleted", "filename": clean_name, "file_deleted": file_deleted}
 
 @app.post("/sessions")
-def create_session(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+@limiter.limit("30/minute")
+def create_session(request: Request, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     session = ChatSession(title="New Chat", user_id=current_user.id, tenant_id=current_user.tenant_id)
     db.add(session)
     db.commit()
@@ -636,7 +660,13 @@ def list_sessions(db: Session = Depends(get_db), current_user: User = Depends(ge
     return [{"id": s.id, "title": s.title, "created_at": s.created_at} for s in sessions]
 
 @app.get("/sessions/{session_id}/messages")
-def get_messages(session_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def get_messages(
+    session_id: int,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     session = db.query(ChatSession).filter(
         ChatSession.id == session_id,
         ChatSession.user_id == current_user.id,
@@ -645,7 +675,10 @@ def get_messages(session_id: int, db: Session = Depends(get_db), current_user: U
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    messages = db.query(ChatMessage).filter(ChatMessage.session_id == session_id).order_by(ChatMessage.timestamp.asc()).all()
+    # M-10 fix: paginate instead of returning all messages unbounded
+    messages = db.query(ChatMessage).filter(
+        ChatMessage.session_id == session_id
+    ).order_by(ChatMessage.timestamp.asc()).offset(offset).limit(limit).all()
     results = []
     for m in messages:
         sources_list = []
@@ -663,7 +696,8 @@ def get_messages(session_id: int, db: Session = Depends(get_db), current_user: U
     return results
 
 @app.delete("/sessions/{session_id}")
-def delete_session(session_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+@limiter.limit("30/minute")
+def delete_session(request: Request, session_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     session = db.query(ChatSession).filter(
         ChatSession.id == session_id,
         ChatSession.user_id == current_user.id,
@@ -910,7 +944,12 @@ def query_bot(
                 full_response += chunk
                 yield chunk
         except Exception as e:
-            error_msg = f"\n\n[Error generating response: {str(e)}]"
+            # C-6 fix: Mask raw exception details in production streaming responses
+            api_logger.error("Stream error in /query generate(): %s", e, exc_info=True)
+            if ENVIRONMENT == "production":
+                error_msg = "\n\n[An error occurred generating the response.]"
+            else:
+                error_msg = f"\n\n[Error generating response: {str(e)}]"
             full_response += error_msg
             yield error_msg
 

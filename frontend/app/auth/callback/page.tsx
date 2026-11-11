@@ -26,7 +26,7 @@ function OAuthCallbackContent() {
     const errorParam = searchParams.get("error") || searchParams.get("error_description");
 
     if (errorParam) {
-      setError(`Identity provider returned an authorization error: ${errorParam}`);
+      setError(`Identity provider returned an authorization error: ${errorParam.slice(0, 200)}`);
       return;
     }
 

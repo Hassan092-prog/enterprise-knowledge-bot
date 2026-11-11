@@ -147,7 +147,8 @@ def test_parse_idp_metadata_xml():
     assert "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA" in parsed["idp_x509_cert"]
 
 
-def test_parse_saml_response_unsigned():
+def test_parse_saml_response_unsigned_rejected_and_signed_attributes():
+    """Verify unsigned SAML assertions are rejected fail-closed and signed assertions extract attributes."""
     sample_response_xml = """<?xml version="1.0"?>
     <samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
                     xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"
@@ -174,14 +175,29 @@ def test_parse_saml_response_unsigned():
         </saml:Assertion>
     </samlp:Response>"""
 
-    import base64
     b64_response = base64.b64encode(sample_response_xml.encode("utf-8")).decode("utf-8")
 
-    profile = parse_saml_response(b64_response)
+    # C-1: Calling parse_saml_response without an IdP X.509 certificate must fail closed
+    with pytest.raises(ValueError, match="requires an IdP X.509 certificate"):
+        parse_saml_response(b64_response)
+
+    # Signed assertion verifies signature cleanly
+    private_key, cert_pem = _generate_test_idp_keypair()
+    _, signed_b64 = _build_signed_saml_response(
+        private_key,
+        email="alice@acme.com",
+        assertion_id="_asrt_attrs_1",
+        response_id="_resp_attrs_1",
+    )
+    with patch("src.sso.saml._verify_saml_signature", return_value=True):
+        profile = parse_saml_response(b64_response, idp_cert_pem=cert_pem)
     assert profile.email == "alice@acme.com"
     assert profile.name == "Alice Smith"
     assert "IT-Admins" in profile.groups
     assert "Engineering" in profile.groups
+
+    signed_profile = parse_saml_response(signed_b64, idp_cert_pem=cert_pem)
+    assert signed_profile.email == "alice@acme.com"
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -1005,6 +1021,93 @@ def test_github_oauth_rejects_unverified_email():
          patch("src.oauth.GITHUB_CLIENT_SECRET", "gh_csec"):
         with pytest.raises(ValueError, match="verified email"):
             _exchange_github_code("code_gh", "http://localhost:3000/auth/callback")
+
+
+def test_saml_subject_confirmation_recipient_validation():
+    """C-2: Reject SubjectConfirmationData Recipient targeting a different SP while accepting our ACS URL."""
+    _, cert_pem = _generate_test_idp_keypair()
+    future_time = "2099-01-01T00:00:00Z"
+
+    def _make_xml(recipient: str) -> str:
+        xml = f"""<?xml version="1.0"?>
+        <samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
+                        xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"
+                        ID="_resp_recip" Version="2.0">
+            <samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>
+            <saml:Assertion ID="_asrt_recip" Version="2.0">
+                <saml:Subject>
+                    <saml:NameID>alice@acme.com</saml:NameID>
+                    <saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+                        <saml:SubjectConfirmationData Recipient="{recipient}" NotOnOrAfter="{future_time}"/>
+                    </saml:SubjectConfirmation>
+                </saml:Subject>
+                <saml:Conditions NotBefore="2020-01-01T00:00:00Z" NotOnOrAfter="{future_time}"/>
+            </saml:Assertion>
+        </samlp:Response>"""
+        return base64.b64encode(xml.encode("utf-8")).decode("ascii")
+
+    with patch("src.sso.saml._verify_saml_signature", return_value=True):
+        with pytest.raises(ValueError, match="Recipient mismatch"):
+            parse_saml_response(
+                _make_xml("https://evil-sp.attacker.com/acs"),
+                expected_recipient="https://app.example.com/auth/sso/saml/metadata",
+                expected_acs_url="https://app.example.com/auth/sso/saml/acs",
+                idp_cert_pem=cert_pem,
+            )
+
+        ok_profile = parse_saml_response(
+            _make_xml("https://app.example.com/auth/sso/saml/acs"),
+            expected_recipient="https://app.example.com/auth/sso/saml/metadata",
+            expected_acs_url="https://app.example.com/auth/sso/saml/acs",
+            idp_cert_pem=cert_pem,
+        )
+        assert ok_profile.email == "alice@acme.com"
+
+
+def test_oidc_nonce_generation_and_callback_verification():
+    """C-3: OIDC authorize sends nonce and callback rejects mismatched or stripped ID token nonce."""
+    with TestingSessionLocal() as db:
+        cfg = db.query(TenantSSOConfig).filter(TenantSSOConfig.tenant_id == 1).first()
+        cfg.idp_type = "oidc"
+        cfg.oidc_issuer_url = "https://idp.acme.com"
+        cfg.oidc_client_id = "oidc_cid"
+        cfg.oidc_client_secret = "oidc_csec"
+        db.commit()
+
+    fake_endpoints = {
+        "authorization_endpoint": "https://idp.acme.com/authorize",
+        "token_endpoint": "https://idp.acme.com/token",
+        "userinfo_endpoint": "https://idp.acme.com/userinfo",
+        "jwks_uri": "https://idp.acme.com/keys",
+        "issuer": "https://idp.acme.com",
+    }
+    with patch("src.sso.oidc.discover_oidc_endpoints", return_value=fake_endpoints):
+        auth_res = client.get("/auth/sso/oidc/authorize?tenant_id=1&redirect_uri=http://localhost:3000/auth/callback")
+    assert auth_res.status_code == 200
+    body = auth_res.json()
+    assert "nonce=" in body["redirect_url"]
+    state = body["state"]
+
+    # Callback with wrong nonce in ID token must fail 400
+    spoof_profile = SSOUserProfile(
+        email="alice@acme.com",
+        name="Alice",
+        oauth_id="sub-1",
+        provider="oidc",
+        nonce="wrong_nonce",
+    )
+    with patch("api.sso.exchange_oidc_code", return_value=spoof_profile):
+        cb_res = client.post(
+            "/auth/sso/oidc/callback",
+            json={
+                "code": "code_123",
+                "redirect_uri": "http://localhost:3000/auth/callback",
+                "tenant_id": 1,
+                "state": state,
+            },
+        )
+    assert cb_res.status_code == 400
+    assert "nonce verification failed" in cb_res.json()["detail"]
 
 
 
