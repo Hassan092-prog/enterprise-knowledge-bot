@@ -234,3 +234,139 @@ def test_graph_fusion_context():
     assert len(fusion_res["graph_citations"]) >= 1
 
     store.delete_tenant_graph(t_id)
+
+
+def test_personal_document_isolated_from_tenant_graph(tmp_path):
+    """Verify personal docs (is_global=False) never write to or purge the shared tenant graph."""
+    from unittest.mock import MagicMock, patch
+    from langchain_core.documents import Document
+    from src.retrieval.retriever import Retriever
+
+    r = Retriever.__new__(Retriever)
+    r._store = MagicMock()
+    r._store.source_exists.return_value = False
+    r._store.add_documents.return_value = 1
+    r._store.delete_source.return_value = 1
+
+    sample_file = tmp_path / "private_notes.txt"
+    sample_file.write_text("Alice confidential salary bonus memo", encoding="utf-8")
+
+    with patch("src.retrieval.retriever.load_document", return_value=[Document(page_content="Alice secret note", metadata={})]), \
+         patch("src.retrieval.retriever.generate_document_summary", return_value=None), \
+         patch("src.graph.extractor.GraphExtractor.extract_from_text") as mock_extract, \
+         patch("src.graph.get_graph_store") as mock_get_graph:
+
+        # 1. Personal upload must skip GraphExtractor & bulk_add
+        r.ingest_file(sample_file, user_id=7, is_global=False, tenant_id=8806)
+        mock_extract.assert_not_called()
+        mock_get_graph.assert_not_called()
+
+        # 2. Personal delete (user_id set) must not wipe same-named global doc's graph entities
+        r.delete_document("private_notes.txt", user_id=7, tenant_id=8806)
+        mock_get_graph.assert_not_called()
+
+        # 3. Global delete (user_id=None) must purge graph entities
+        r.delete_document("company_policy.txt", user_id=None, tenant_id=8806)
+        mock_get_graph.return_value.delete_document_entities.assert_called_once_with(
+            tenant_id=8806, document_name="company_policy.txt"
+        )
+
+
+def test_graph_rebuild_ignores_personal_chunks():
+    """Verify POST /graph/rebuild filters strictly to global chunks and skips any non-global rows."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+    from api.graph import rebuild_tenant_graph
+
+    mock_store = MagicMock()
+    mock_collection = MagicMock()
+    mock_collection.get.return_value = {
+        "documents": ["Personal secret content", "Global handbook text"],
+        "metadatas": [
+            {"source": "personal_secret.pdf", "is_global": 0, "tenant_id": 8807},
+            {"source": "handbook.pdf", "is_global": 1, "tenant_id": 8807},
+        ],
+    }
+    mock_store._collection = mock_collection
+    mock_retriever = MagicMock()
+    mock_retriever._store = mock_store
+
+    mock_graph_store = MagicMock()
+    extracted_sources = []
+
+    def fake_extract(text, source_document=None):
+        extracted_sources.append(source_document)
+        return (
+            [GraphNodeData(id="handbook_rule", name="Handbook Rule", entity_type="POLICY")],
+            [],
+        )
+
+    admin_user = SimpleNamespace(id=1, username="admin", role="admin", tenant_id=8807)
+
+    with patch("api.main.get_retriever", return_value=mock_retriever), \
+         patch("api.graph.get_graph_store", return_value=mock_graph_store), \
+         patch("api.graph.GraphExtractor.extract_from_text", side_effect=fake_extract):
+        res = rebuild_tenant_graph(current_user=admin_user, db=MagicMock())
+
+    mock_collection.get.assert_called_once_with(
+        where={"$and": [{"tenant_id": 8807}, {"is_global": 1}]},
+        include=["documents", "metadatas"],
+    )
+    assert "personal_secret.pdf" not in extracted_sources
+    assert "handbook.pdf" in extracted_sources
+    assert "from 1 documents" in res["message"]
+
+
+def test_cross_process_cache_version_invalidation():
+    """Verify NetworkXGraphStore and VectorStore reload cached tenant indices when Redis version bumps."""
+    from unittest.mock import MagicMock, patch
+    from src.retrieval.vector_store import VectorStore
+
+    # 1. Graph store reloads when cross-process cache version advances
+    t_id = 8805
+    store_a = NetworkXGraphStore()
+    store_b = NetworkXGraphStore()
+    store_a.delete_tenant_graph(t_id)
+
+    versions = {"graph": "1"}
+
+    def fake_get_ver(key):
+        return versions["graph"] if key == f"graph:version:{t_id}" else "0"
+
+    def fake_bump_ver(key):
+        if key == f"graph:version:{t_id}":
+            versions["graph"] = str(int(versions["graph"]) + 1)
+            return versions["graph"]
+        return "1"
+
+    with patch("src.cache.get_cache_version", side_effect=fake_get_ver), \
+         patch("src.cache.bump_cache_version", side_effect=fake_bump_ver):
+        # Backend (store_a) warms cache at version "1" (empty)
+        assert store_a.get_node(t_id, "apollo_program") is None
+
+        # Worker (store_b) adds entity and bumps Redis version -> "2"
+        store_b.bulk_add(
+            t_id,
+            [GraphNodeData(id="apollo_program", name="Apollo Program", entity_type="PROJECT")],
+            [],
+        )
+        assert versions["graph"] == "2"
+
+        # Backend (store_a) sees version mismatch and reloads from PostgreSQL
+        reloaded = store_a.get_node(t_id, "apollo_program")
+        assert reloaded is not None
+        assert reloaded.name == "Apollo Program"
+
+    store_a.delete_tenant_graph(t_id)
+
+    # 2. VectorStore BM25 freshness check triggers rebuild on version mismatch
+    vs = VectorStore.__new__(VectorStore)
+    vs._bm25_indices = {}
+    vs._bm25_versions = {99: "1"}
+    vs._build_bm25_for_tenant = MagicMock()
+
+    with patch("src.cache.get_cache_version", return_value="2"):
+        vs._ensure_bm25_fresh(99)
+        vs._build_bm25_for_tenant.assert_called_once_with(99)
+        assert vs._bm25_versions[99] == "2"
+

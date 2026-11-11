@@ -501,4 +501,142 @@ def test_sso_revoke_endpoint():
     assert res_user.json()["status"] == "success"
 
 
+def test_sso_ssrf_and_unsafe_scheme_rejected():
+    """Verify SSO config & OIDC discovery reject unsafe schemes and internal/metadata IPs."""
+    import pytest
+    from src.sso.oidc import discover_oidc_endpoints
+
+    # Ensure tenant 1 exists and admin mock is clean
+    db = TestingSessionLocal()
+    if not db.query(Tenant).filter(Tenant.id == 1).first():
+        db.add(Tenant(id=1, name="Acme Corp", slug="acme-corp"))
+    db.commit()
+    db.close()
+
+    unsafe_targets = [
+        "javascript:alert(1)",
+        "file:///etc/passwd",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://127.0.0.1:8000/internal",
+        "http://redis:6379/",
+        "https://10.0.0.5/sso",
+    ]
+    for bad_url in unsafe_targets:
+        res_saml = client.post(
+            "/admin/sso/config",
+            json={"idp_type": "saml", "is_enabled": True, "idp_sso_url": bad_url},
+        )
+        assert res_saml.status_code == 400, f"Expected 400 for idp_sso_url={bad_url}, got {res_saml.status_code}"
+
+        res_oidc = client.post(
+            "/admin/sso/config",
+            json={"idp_type": "oidc", "is_enabled": True, "oidc_issuer_url": bad_url},
+        )
+        assert res_oidc.status_code == 400, f"Expected 400 for oidc_issuer_url={bad_url}, got {res_oidc.status_code}"
+
+        with pytest.raises(ValueError):
+            discover_oidc_endpoints(bad_url)
+
+
+def test_cross_tenant_corporate_domain_hijacking_blocked():
+    """Verify Tenant B cannot claim an allowed corporate domain already owned by Tenant A."""
+    from api.dependencies import get_current_user
+
+    db = TestingSessionLocal()
+    db.merge(Tenant(id=1, name="Acme Corp", slug="acme-corp", allowed_domains="acme.com"))
+    db.merge(Tenant(id=2, name="Rival Corp", slug="rival-corp", allowed_domains="rival.com"))
+    db.merge(User(id=1, username="acme_admin", role="superadmin", tenant_id=1))
+    db.merge(User(id=2, username="rival_admin", role="superadmin", tenant_id=2))
+    db.commit()
+    db.close()
+
+    rival_admin = User(id=2, username="rival_admin", role="superadmin", tenant_id=2)
+    orig_overrides = app.dependency_overrides.copy()
+    try:
+        app.dependency_overrides[get_db] = override_get_db
+        app.dependency_overrides[get_current_user] = lambda: rival_admin
+
+        # 1. Rival attempts to claim acme.com via PATCH /auth/tenant/domains
+        res_patch = client.patch("/auth/tenant/domains", json={"allowed_domains": "acme.com"})
+        assert res_patch.status_code == 409
+
+        # 2. Rival attempts to claim acme.com via POST /admin/sso/config
+        res_sso = client.post(
+            "/admin/sso/config",
+            json={
+                "idp_type": "saml",
+                "is_enabled": False,
+                "allowed_domains": "acme.com",
+            },
+        )
+        assert res_sso.status_code == 409
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(orig_overrides)
+
+
+def test_access_request_replay_and_superadmin_guard():
+    """Verify non-pending access requests cannot be replayed and superadmin role cannot be overwritten."""
+    from api.dependencies import get_current_user
+    from src.models import AccessRequest
+
+    db = TestingSessionLocal()
+    db.merge(Tenant(id=1, name="Acme Corp", slug="acme-corp"))
+    db.merge(User(id=1, username="super_owner", role="superadmin", tenant_id=1))
+    db.merge(User(id=3, username="member_bob", role="user", tenant_id=1))
+    db.query(AccessRequest).filter(AccessRequest.id.in_([901, 902])).delete()
+    db.add(AccessRequest(id=901, user_id=3, tenant_id=1, requested_role="editor", status="approved"))
+    db.add(AccessRequest(id=902, user_id=1, tenant_id=1, requested_role="editor", status="pending"))
+    db.commit()
+    db.close()
+
+    super_owner = User(id=1, username="super_owner", role="superadmin", tenant_id=1)
+    orig_overrides = app.dependency_overrides.copy()
+    try:
+        app.dependency_overrides[get_db] = override_get_db
+        app.dependency_overrides[get_current_user] = lambda: super_owner
+
+        # Replay approve/reject on already approved request 901 -> 400
+        assert client.post("/admin/requests/901/approve").status_code == 400
+        assert client.post("/admin/requests/901/reject").status_code == 400
+
+        # Approving request targeting superadmin -> 400 (cannot demote superadmin)
+        res_super = client.post("/admin/requests/902/approve")
+        assert res_super.status_code == 400
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(orig_overrides)
+
+
+def test_google_oauth_rejects_unverified_email():
+    """Verify Google OAuth rejects accounts whose email_verified claim is false."""
+    import io
+    import pytest
+    from unittest.mock import patch
+    from src.oauth import _exchange_google_code
+
+    class FakeResp:
+        def __init__(self, payload: dict):
+            self._data = json.dumps(payload).encode("utf-8")
+
+        def read(self):
+            return self._data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    responses = [
+        FakeResp({"access_token": "tok_123"}),
+        FakeResp({"email": "spoof@acme.com", "sub": "g-sub-1", "email_verified": False}),
+    ]
+
+    with patch("src.oauth.urllib.request.urlopen", side_effect=responses), \
+         patch("src.oauth.GOOGLE_CLIENT_ID", "cid"), \
+         patch("src.oauth.GOOGLE_CLIENT_SECRET", "csec"):
+        with pytest.raises(ValueError, match="not verified"):
+            _exchange_google_code("code_1", "https://app.example.com/callback")
+
 

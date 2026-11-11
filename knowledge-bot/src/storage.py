@@ -132,7 +132,11 @@ class LocalStorageProvider(BaseStorageProvider):
 
     def _resolve_path(self, key: str) -> Path:
         clean_key = key.lstrip("/\\").replace("..", "")
-        return (self.base_dir / clean_key).resolve()
+        base = self.base_dir.resolve()
+        resolved = (base / clean_key).resolve()
+        if resolved != base and not resolved.is_relative_to(base):
+            raise ValueError(f"Storage key escapes base directory: '{key}'")
+        return resolved
 
     def upload_bytes(self, data: bytes, key: str) -> str:
         path = self._resolve_path(key)

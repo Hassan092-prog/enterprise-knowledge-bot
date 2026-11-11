@@ -153,6 +153,9 @@ def _exchange_google_code(code: str, redirect_uri: str) -> Dict[str, Any]:
     email = profile.get("email")
     if not email:
         raise ValueError("Google profile did not contain a valid email address.")
+    email_verified = profile.get("email_verified")
+    if email_verified is not True and str(email_verified or "").strip().lower() != "true":
+        raise ValueError("Google account email address is not verified.")
 
     return {
         "email": email.lower().strip(),

@@ -233,10 +233,10 @@ class Retriever:
             progress_callback=progress_callback,
         )
 
-        # ── Step 5: Knowledge Graph Extraction & Indexing ───────────
+        # ── Step 5: Knowledge Graph Extraction & Indexing (Global Org Corpus Only) ──
         try:
             from src.config import GRAPH_ENABLED
-            if GRAPH_ENABLED and tenant_id is not None:
+            if GRAPH_ENABLED and tenant_id is not None and is_global:
                 if progress_callback:
                     progress_callback("GRAPH_INDEXING", 90, f"Extracting entities & relations for Knowledge Graph...")
                 from src.graph.extractor import GraphExtractor
@@ -274,10 +274,10 @@ class Retriever:
     ) -> int:
         """
         Remove all chunks for a document from the vector store scoped to tenant,
-        and cascade-purge corresponding entities from the knowledge graph.
+        and cascade-purge corresponding entities from the knowledge graph for global documents.
         """
         deleted = self._store.delete_source(source_filename, user_id=user_id, tenant_id=tenant_id)
-        if tenant_id is not None:
+        if tenant_id is not None and user_id is None:
             try:
                 from src.graph import get_graph_store
                 get_graph_store().delete_document_entities(tenant_id=tenant_id, document_name=source_filename)

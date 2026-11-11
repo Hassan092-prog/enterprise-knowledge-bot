@@ -519,23 +519,13 @@ def update_tenant_domains(update: TenantDomainUpdate, db: Session = Depends(get_
         )
         return {"status": "success", "allowed_domains": None}
 
-    import re
-    domain_list = [d.strip().lower() for d in raw_domains.split(",") if d.strip()]
-    cleaned_domains = []
-
-    for d in domain_list:
-        if d in PUBLIC_EMAIL_DOMAINS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Public consumer email domain '{d}' cannot be used for corporate identity auto-routing. Please specify a proprietary corporate domain."
-            )
-        if not re.match(r'^[a-z0-9.-]+\.[a-z]{2,}$', d) or ".." in d or d.startswith(".") or d.endswith("."):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid domain format: '{d}'. Expected standard hostname format (e.g. 'company.com')."
-            )
-        if d not in cleaned_domains:
-            cleaned_domains.append(d)
+    from src.sso.validators import validate_and_check_corporate_domains
+    cleaned_domains = validate_and_check_corporate_domains(
+        raw_domains=raw_domains,
+        tenant_id=tenant.id,
+        db=db,
+        public_domains=PUBLIC_EMAIL_DOMAINS,
+    )
 
     tenant.allowed_domains = ", ".join(cleaned_domains)
     db.commit()

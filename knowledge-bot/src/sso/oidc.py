@@ -26,7 +26,9 @@ def discover_oidc_endpoints(issuer_url: str) -> Dict[str, str]:
     """
     Fetches and caches the OpenID Connect discovery document (.well-known/openid-configuration).
     """
-    clean_issuer = issuer_url.rstrip("/")
+    from src.sso.validators import SafeRedirectHandler, UnsafeSSOUrlError, validate_external_sso_url
+
+    clean_issuer = validate_external_sso_url(issuer_url.rstrip("/"), "OIDC Issuer URL", resolve_dns=True).rstrip("/")
     if clean_issuer in _OIDC_DISCOVERY_CACHE:
         return _OIDC_DISCOVERY_CACHE[clean_issuer]
 
@@ -36,17 +38,33 @@ def discover_oidc_endpoints(issuer_url: str) -> Dict[str, str]:
     req.add_header("Accept", "application/json")
 
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        opener = urllib.request.build_opener(SafeRedirectHandler())
+        with opener.open(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             endpoints = {
-                "authorization_endpoint": data.get("authorization_endpoint", f"{clean_issuer}/v1/authorize"),
-                "token_endpoint": data.get("token_endpoint", f"{clean_issuer}/v1/token"),
-                "userinfo_endpoint": data.get("userinfo_endpoint", f"{clean_issuer}/v1/userinfo"),
-                "jwks_uri": data.get("jwks_uri", ""),
+                "authorization_endpoint": validate_external_sso_url(
+                    data.get("authorization_endpoint", f"{clean_issuer}/v1/authorize"),
+                    "OIDC authorization_endpoint",
+                ),
+                "token_endpoint": validate_external_sso_url(
+                    data.get("token_endpoint", f"{clean_issuer}/v1/token"),
+                    "OIDC token_endpoint",
+                ),
+                "userinfo_endpoint": validate_external_sso_url(
+                    data.get("userinfo_endpoint", f"{clean_issuer}/v1/userinfo"),
+                    "OIDC userinfo_endpoint",
+                ),
+                "jwks_uri": (
+                    validate_external_sso_url(data["jwks_uri"], "OIDC jwks_uri")
+                    if data.get("jwks_uri")
+                    else ""
+                ),
                 "issuer": data.get("issuer", clean_issuer),
             }
             _OIDC_DISCOVERY_CACHE[clean_issuer] = endpoints
             return endpoints
+    except UnsafeSSOUrlError:
+        raise
     except Exception as e:
         logger.warning(f"OIDC discovery failed for {well_known_url} ({e}). Falling back to convention endpoints.")
         # Fallback to standard RFC endpoints
@@ -111,8 +129,10 @@ def exchange_oidc_code(
     Exchanges an authorization code at the OIDC token endpoint, parses claims,
     and returns a normalized SSOUserProfile.
     """
+    from src.sso.validators import SafeRedirectHandler, validate_external_sso_url
+
     endpoints = discover_oidc_endpoints(issuer_url)
-    token_url = endpoints["token_endpoint"]
+    token_url = validate_external_sso_url(endpoints["token_endpoint"], "OIDC token_endpoint", resolve_dns=True)
 
     data = urllib.parse.urlencode({
         "client_id": client_id,
@@ -127,8 +147,9 @@ def exchange_oidc_code(
     req.add_header("Accept", "application/json")
     req.add_header("User-Agent", "EnterpriseKnowledgeBot-SSO/2.0")
 
+    opener = urllib.request.build_opener(SafeRedirectHandler())
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with opener.open(req, timeout=15) as resp:
             token_res = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as he:
         body = ""
@@ -153,11 +174,14 @@ def exchange_oidc_code(
     userinfo_endpoint = endpoints.get("userinfo_endpoint")
     if access_token and userinfo_endpoint:
         try:
-            u_req = urllib.request.Request(userinfo_endpoint)
+            safe_userinfo_url = validate_external_sso_url(
+                userinfo_endpoint, "OIDC userinfo_endpoint", resolve_dns=True
+            )
+            u_req = urllib.request.Request(safe_userinfo_url)
             u_req.add_header("Authorization", f"Bearer {access_token}")
             u_req.add_header("Accept", "application/json")
             u_req.add_header("User-Agent", "EnterpriseKnowledgeBot-SSO/2.0")
-            with urllib.request.urlopen(u_req, timeout=10) as u_resp:
+            with opener.open(u_req, timeout=10) as u_resp:
                 userinfo_data = json.loads(u_resp.read().decode("utf-8"))
                 claims.update(userinfo_data)
         except Exception as ue:

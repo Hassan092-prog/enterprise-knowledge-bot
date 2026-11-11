@@ -96,8 +96,14 @@ class VectorStore:
 
         # Per-tenant BM25 index mapping: tenant_id -> (BM25Okapi, List[Document])
         self._bm25_indices: Dict[int, Tuple[BM25Okapi, List[Document]]] = {}
+        self._bm25_versions: Dict[int, str] = {}
         self._backfill_legacy_chunks(1)
         self._build_all_bm25()
+        from src.cache import get_cache_version
+        for loaded_tid in list(self._bm25_indices.keys()):
+            ver = get_cache_version(f"bm25:version:{loaded_tid}")
+            if ver is not None:
+                self._bm25_versions[loaded_tid] = ver
 
     def heartbeat(self) -> int:
         """Return ChromaDB server heartbeat timestamp."""
@@ -275,8 +281,9 @@ class VectorStore:
             self._collection.count(),
         )
 
-        # Rebuild BM25 specifically for this tenant
+        # Rebuild BM25 specifically for this tenant and bump cross-process cache version
         self._build_bm25_for_tenant(tid)
+        self._bump_bm25_version(tid)
         return len(new_chunks)
 
     # ──────────────────────────────────────────────────────────────────
@@ -361,6 +368,8 @@ class VectorStore:
         BM25 search executed strictly on the tenant's dedicated index.
         """
         tid = tenant_id if tenant_id is not None else 1
+        if query.strip():
+            self._ensure_bm25_fresh(tid)
         bm25_entry = self._bm25_indices.get(tid)
         if not bm25_entry or not query.strip():
             return []
@@ -466,11 +475,15 @@ class VectorStore:
             tenant_id,
         )
 
-        # Rebuild tenant BM25 index
+        # Rebuild tenant BM25 index and bump Redis version so workers/backend stay synced
         if tenant_id is not None:
             self._build_bm25_for_tenant(tenant_id)
+            self._bump_bm25_version(tenant_id)
         else:
+            known_tids = list(self._bm25_indices.keys())
             self._build_all_bm25()
+            for known_tid in set(known_tids) | set(self._bm25_indices.keys()):
+                self._bump_bm25_version(known_tid)
 
         return count
 
@@ -482,6 +495,7 @@ class VectorStore:
         count = len(results["ids"])
         self._collection.delete(ids=results["ids"])
         self._bm25_indices.pop(tenant_id, None)
+        self._bump_bm25_version(tenant_id)
         logger.info("Purged %d chunks for tenant %d", count, tenant_id)
         return count
 
@@ -500,8 +514,28 @@ class VectorStore:
         count = len(results["ids"])
         self._collection.delete(ids=results["ids"])
         self._build_bm25_for_tenant(tenant_id)
+        self._bump_bm25_version(tenant_id)
         logger.info("Purged %d personal chunks for user %d (tenant %d)", count, user_id, tenant_id)
         return count
+
+    def _bump_bm25_version(self, tenant_id: int) -> None:
+        """Increment cross-process BM25 cache version for a tenant in Redis."""
+        from src.cache import bump_cache_version
+        new_ver = bump_cache_version(f"bm25:version:{tenant_id}")
+        if new_ver is not None:
+            self._bm25_versions[tenant_id] = new_ver
+
+    def _ensure_bm25_fresh(self, tenant_id: int) -> None:
+        """Reload per-tenant BM25 index if another process modified ChromaDB."""
+        from src.cache import get_cache_version
+        remote_ver = get_cache_version(f"bm25:version:{tenant_id}")
+        if remote_ver is None:
+            return
+        local_ver = self._bm25_versions.get(tenant_id)
+        if local_ver != remote_ver:
+            if local_ver is not None or remote_ver != "0":
+                self._build_bm25_for_tenant(tenant_id)
+            self._bm25_versions[tenant_id] = remote_ver
 
     def get_stats(self, user_id: Optional[int] = None, tenant_id: Optional[int] = None) -> dict:
         """Return summary statistics strictly scoped to a tenant."""

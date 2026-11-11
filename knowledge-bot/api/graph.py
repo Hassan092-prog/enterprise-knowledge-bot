@@ -138,14 +138,19 @@ def rebuild_tenant_graph(
     r = get_retriever()
     extractor = GraphExtractor()
 
-    res = r._store._collection.get(where={"tenant_id": tenant_id}, include=["documents", "metadatas"])
+    res = r._store._collection.get(
+        where={"$and": [{"tenant_id": tenant_id}, {"is_global": 1}]},
+        include=["documents", "metadatas"],
+    )
     docs = res.get("documents", [])
     metas = res.get("metadatas", [])
 
-    # Group chunk texts by source document
+    # Group chunk texts by global source document only
     doc_texts: Dict[str, List[str]] = {}
     for text, meta in zip(docs, metas):
         if not meta or not text:
+            continue
+        if meta.get("is_global") not in (1, True):
             continue
         # Skip executive summaries to prevent duplicate entity extraction
         if meta.get("is_summary"):

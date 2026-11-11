@@ -276,16 +276,18 @@ def remove_user(
         (PendingTransfer.to_user_id == target_user.id) | (PendingTransfer.from_user_id == target_user.id)
     ).delete()
 
-    # Purge offboarded member's personal documents from ChromaDB and storage
+    # Purge offboarded member's personal documents and active SSO/JWT sessions
     try:
-        from src.retrieval.vector_store import VectorStore
+        from api.main import get_retriever
         from src.storage import get_storage_provider
-        vs = VectorStore()
+        from src.sso.revocation import revoke_user_sessions
+        vs = get_retriever()._store
         vs.delete_all_user_personal_chunks(user_id=target_user.id, tenant_id=current_user.tenant_id)
         storage = get_storage_provider()
         prefix = f"tenants/{current_user.tenant_id}/personal/{target_user.id}/"
         for obj_key in storage.list_objects(prefix=prefix):
             storage.delete_object(obj_key)
+        revoke_user_sessions(target_user.id)
     except Exception as cleanup_err:
         logger.warning(f"Notice purging personal documents for offboarded user {target_user.id}: {cleanup_err}")
 
@@ -335,11 +337,17 @@ def approve_request(
     if not req:
         raise HTTPException(status_code=404, detail="Request not found")
 
+    if req.status != "pending":
+        raise HTTPException(status_code=400, detail=f"Request has already been {req.status}")
+
     if req.requested_role == "admin" and current_user.role != "superadmin":
         raise HTTPException(status_code=403, detail="Only SuperAdmin can approve Admin promotions")
 
-    req.status = "approved"
     target_user = req.user
+    if target_user.role == "superadmin":
+        raise HTTPException(status_code=400, detail="Cannot alter SuperAdmin role via access request")
+
+    req.status = "approved"
     old_role = target_user.role
     target_user.role = req.requested_role
     db.commit()
@@ -367,6 +375,9 @@ def reject_request(
     ).first()
     if not req:
         raise HTTPException(status_code=404, detail="Request not found")
+
+    if req.status != "pending":
+        raise HTTPException(status_code=400, detail=f"Request has already been {req.status}")
 
     req.status = "rejected"
     db.commit()
@@ -901,19 +912,16 @@ def upsert_tenant_sso_config(
     if clean_default_role not in ("user", "editor", "admin"):
         raise HTTPException(status_code=400, detail=f"Invalid default_role '{payload.default_role}'. Must be user, editor, or admin.")
 
-    # Validate allowed_domains against public mail providers and syntax
-    clean_domains_list = []
-    if payload.allowed_domains and payload.allowed_domains.strip():
-        from src.sso import PUBLIC_EMAIL_DOMAINS
-        for d in payload.allowed_domains.split(","):
-            cd = d.strip().lower().rstrip(".")
-            if not cd:
-                continue
-            if cd in PUBLIC_EMAIL_DOMAINS:
-                raise HTTPException(status_code=400, detail=f"Public domain '{cd}' cannot be configured for corporate SSO auto-routing.")
-            if not re.match(r"^[a-z0-9.-]+\.[a-z]{2,}$", cd):
-                raise HTTPException(status_code=400, detail=f"Invalid corporate domain format: '{cd}'")
-            clean_domains_list.append(cd)
+    # Validate allowed_domains against public mail providers, syntax, and cross-tenant collisions
+    from src.sso import PUBLIC_EMAIL_DOMAINS
+    from src.sso.validators import validate_and_check_corporate_domains, validate_external_sso_url
+
+    clean_domains_list = validate_and_check_corporate_domains(
+        raw_domains=payload.allowed_domains,
+        tenant_id=current_user.tenant_id,
+        db=db,
+        public_domains=PUBLIC_EMAIL_DOMAINS,
+    )
     clean_allowed_domains = ", ".join(clean_domains_list) if clean_domains_list else None
 
     # If raw metadata XML was supplied, parse fields automatically
@@ -928,6 +936,15 @@ def upsert_tenant_sso_config(
     idp_entity_id = parsed_metadata.get("idp_entity_id") or payload.idp_entity_id
     idp_sso_url = parsed_metadata.get("idp_sso_url") or payload.idp_sso_url
     idp_x509_cert = parsed_metadata.get("idp_x509_cert") or payload.idp_x509_cert
+
+    # Validate external SSO / OIDC URLs against SSRF and unsafe schemes (e.g. javascript:, file:, loopback/metadata)
+    try:
+        if idp_sso_url and idp_sso_url.strip():
+            idp_sso_url = validate_external_sso_url(idp_sso_url, "IdP SSO URL")
+        if payload.oidc_issuer_url and payload.oidc_issuer_url.strip():
+            validate_external_sso_url(payload.oidc_issuer_url, "OIDC Issuer URL")
+    except ValueError as url_err:
+        raise HTTPException(status_code=400, detail=str(url_err))
 
     # Validate role mapping JSON if given
     if payload.role_mapping_json and payload.role_mapping_json.strip():

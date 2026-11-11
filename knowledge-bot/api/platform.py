@@ -25,7 +25,7 @@ def get_platform_global_stats(
     db: Session = Depends(get_db),
     current_admin: User = Depends(get_current_platform_admin),
 ):
-    from api.main import retriever
+    from api.main import get_retriever
 
     total_tenants = db.query(Tenant).count()
     active_tenants = db.query(Tenant).filter(Tenant.status == "active").count()
@@ -33,8 +33,9 @@ def get_platform_global_stats(
     total_queries = db.query(ActivityLog).filter(ActivityLog.category == "QUERY").count()
 
     total_chunks = 0
-    if retriever and retriever._store:
-        total_chunks = retriever._store.get_stats().get("total_chunks", 0)
+    r = get_retriever()
+    if r and r._store:
+        total_chunks = r._store.get_stats().get("total_chunks", 0)
 
     return {
         "total_tenants": total_tenants,
@@ -53,8 +54,9 @@ def list_all_tenants(
     db: Session = Depends(get_db),
     current_admin: User = Depends(get_current_platform_admin),
 ):
-    from api.main import retriever
+    from api.main import get_retriever
 
+    r = get_retriever()
     tenants = db.query(Tenant).order_by(Tenant.created_at.desc()).all()
     results = []
 
@@ -64,8 +66,8 @@ def list_all_tenants(
 
         doc_count = 0
         chunk_count = 0
-        if retriever and retriever._store:
-            t_stats = retriever.get_knowledge_base_stats(user_id=None, tenant_id=t.id)
+        if r and r._store:
+            t_stats = r.get_knowledge_base_stats(user_id=None, tenant_id=t.id)
             doc_count = t_stats.get("total_sources", 0)
             chunk_count = t_stats.get("total_chunks", 0)
 
@@ -93,7 +95,7 @@ def inspect_tenant(
     db: Session = Depends(get_db),
     current_admin: User = Depends(get_current_platform_admin),
 ):
-    from api.main import retriever
+    from api.main import get_retriever
 
     tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
     if not tenant:
@@ -105,8 +107,9 @@ def inspect_tenant(
     ).order_by(ActivityLog.timestamp.desc()).limit(20).all()
 
     sources = {"personal": [], "global": []}
-    if retriever:
-        sources = retriever.list_sources_by_type(user_id=None, tenant_id=tenant_id)
+    r = get_retriever()
+    if r:
+        sources = r.list_sources_by_type(user_id=None, tenant_id=tenant_id)
 
     return {
         "tenant": {
@@ -240,6 +243,13 @@ def update_tenant_status(
     tenant.status = status_data.status
     db.commit()
 
+    if status_data.status == "suspended":
+        try:
+            from src.sso.revocation import revoke_tenant_sessions
+            revoke_tenant_sessions(tenant_id)
+        except Exception as rev_err:
+            logger.warning(f"Failed to revoke Redis sessions on suspension for tenant {tenant_id}: {rev_err}")
+
     return {"status": "success", "message": f"Tenant '{tenant.name}' status changed from '{old_status}' to '{tenant.status}'"}
 
 @router.delete("/tenants/{tenant_id}")
@@ -248,7 +258,7 @@ def delete_tenant_organization(
     db: Session = Depends(get_db),
     current_admin: User = Depends(get_current_platform_admin),
 ):
-    from api.main import retriever
+    from api.main import get_retriever
 
     tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
     if not tenant:
@@ -256,15 +266,40 @@ def delete_tenant_organization(
 
     if tenant.id == 1:
         raise HTTPException(status_code=400, detail="Cannot delete default system organization")
+    if tenant.id == current_admin.tenant_id:
+        raise HTTPException(status_code=400, detail="Cannot delete your own active organization")
 
     tenant_name = tenant.name
 
+    # 0. Immediately revoke all active sessions for this tenant
+    try:
+        from src.sso.revocation import revoke_tenant_sessions
+        revoke_tenant_sessions(tenant_id)
+    except Exception as rev_err:
+        logger.warning(f"Failed to revoke Redis sessions for deleted tenant {tenant_id}: {rev_err}")
+
     # 1. Purge all chunks from ChromaDB
     chunks_purged = 0
-    if retriever and retriever._store:
-        chunks_purged = retriever._store.delete_all_tenant_chunks(tenant_id)
+    r = get_retriever()
+    if r and r._store:
+        chunks_purged = r._store.delete_all_tenant_chunks(tenant_id)
 
-    # 2. Delete filesystem directory
+    # 1b. Purge tenant Knowledge Graph (PostgreSQL + cached NetworkX)
+    try:
+        from src.graph import get_graph_store
+        get_graph_store().delete_tenant_graph(tenant_id)
+    except Exception as ge:
+        logger.warning(f"Failed to purge Knowledge Graph for tenant {tenant_id}: {ge}")
+
+    # 2. Purge distributed/local object storage prefix + legacy upload directory
+    try:
+        from src.storage import get_storage_provider
+        storage = get_storage_provider()
+        for obj_key in storage.list_objects(prefix=f"tenants/{tenant_id}/"):
+            storage.delete_object(obj_key)
+    except Exception as se:
+        logger.warning(f"Failed to purge object storage for tenant {tenant_id}: {se}")
+
     tenant_dir = UPLOAD_DIR / f"tenant_{tenant_id}"
     if tenant_dir.exists():
         try:

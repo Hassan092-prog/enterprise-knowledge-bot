@@ -138,9 +138,15 @@ def saml_login(
             detail=f"SAML 2.0 is not configured or enabled for tenant #{tenant_id}"
         )
 
+    from src.sso.validators import validate_external_sso_url
+    try:
+        safe_idp_url = validate_external_sso_url(cfg.idp_sso_url, "IdP SSO URL")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     relay_state = f"tenant_{tenant_id}"
     redirect_url, request_id = generate_authn_request(
-        idp_sso_url=cfg.idp_sso_url,
+        idp_sso_url=safe_idp_url,
         sp_entity_id=SSO_ENTITY_ID,
         acs_url=SSO_ACS_URL,
         relay_state=relay_state
@@ -371,13 +377,16 @@ def oidc_authorize(
             logger.warning(f"OIDC state Redis cache notice: {se}")
     _memory_oidc_states[state] = tenant_id
 
-    auth_url = generate_oidc_authorization_url(
-        issuer_url=cfg.oidc_issuer_url,
-        client_id=cfg.oidc_client_id,
-        redirect_uri=eff_redirect,
-        state=state,
-        scopes=cfg.oidc_scopes or "openid email profile groups"
-    )
+    try:
+        auth_url = generate_oidc_authorization_url(
+            issuer_url=cfg.oidc_issuer_url,
+            client_id=cfg.oidc_client_id,
+            redirect_uri=eff_redirect,
+            state=state,
+            scopes=cfg.oidc_scopes or "openid email profile groups"
+        )
+    except ValueError as url_err:
+        raise HTTPException(status_code=400, detail=str(url_err))
 
     accept_header = request.headers.get("accept", "")
     if "text/html" in accept_header or request.query_params.get("redirect") == "true":

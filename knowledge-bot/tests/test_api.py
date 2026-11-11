@@ -47,6 +47,8 @@ app.dependency_overrides[get_current_user] = override_get_current_user
 @pytest.fixture(autouse=True)
 def clean_db():
     """Ensure the database is clean and seeded before each test."""
+    from api.dependencies import get_db as dep_get_db
+
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
     with TestingSessionLocal() as db:
@@ -56,12 +58,23 @@ def clean_db():
         db.add(u)
         db.commit()
 
+    orig_overrides = app.dependency_overrides.copy()
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[dep_get_db] = override_get_db
+    app.dependency_overrides[get_current_user] = override_get_current_user
+    try:
+        yield
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(orig_overrides)
+
 @pytest.fixture
 def mock_retriever():
     """Mock the Retriever singleton so we don't load real models or DBs."""
     mock_instance = MagicMock()
     mock_store = MagicMock()
     mock_store.delete_source.return_value = 1
+    mock_instance.delete_document.return_value = 1
     mock_instance._store = mock_store
     with patch("api.main.get_retriever", return_value=mock_instance), \
          patch("api.main.retriever", mock_instance):
@@ -215,3 +228,44 @@ def test_query_bot(client, mock_retriever, mock_stream_answer, mock_session_loca
     assert messages[0]["content"] == "What is the revenue?"
     assert messages[1]["role"] == "assistant"
     assert "This is a test answer." in messages[1]["content"]
+
+
+def test_platform_delete_tenant_full_cascade(client, mock_retriever, mock_upload_dir):
+    """Verify platform tenant deletion revokes sessions, purges graph & storage, and blocks self-delete."""
+    from api.dependencies import get_db as dep_get_db
+
+    with TestingSessionLocal() as db:
+        db.add(Tenant(id=99, name="Disposable Org", slug="disposable-org", status="active"))
+        db.commit()
+
+    mock_retriever._store.delete_all_tenant_chunks.return_value = 4
+    mock_storage = MagicMock()
+    mock_storage.list_objects.return_value = ["tenants/99/global/policy.pdf"]
+    mock_graph = MagicMock()
+
+    orig_overrides = app.dependency_overrides.copy()
+    try:
+        app.dependency_overrides[get_db] = override_get_db
+        app.dependency_overrides[dep_get_db] = override_get_db
+        app.dependency_overrides[get_current_user] = lambda: _test_user
+
+        # Self-deletion (tenant 1) rejected
+        res_self = client.delete("/platform/tenants/1")
+        assert res_self.status_code == 400
+
+        with patch("src.sso.revocation.revoke_tenant_sessions") as mock_revoke, \
+             patch("src.graph.get_graph_store", return_value=mock_graph), \
+             patch("src.storage.get_storage_provider", return_value=mock_storage):
+            res = client.delete("/platform/tenants/99")
+            assert res.status_code == 200
+            data = res.json()
+            assert data["status"] == "purged"
+            assert data["chunks_purged"] == 4
+            mock_revoke.assert_called_once_with(99)
+            mock_graph.delete_tenant_graph.assert_called_once_with(99)
+            mock_storage.list_objects.assert_called_once_with(prefix="tenants/99/")
+            mock_storage.delete_object.assert_called_once_with("tenants/99/global/policy.pdf")
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(orig_overrides)
+

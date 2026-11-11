@@ -563,11 +563,11 @@ def delete_document(filename: str, current_user: User = Depends(get_current_user
         if current_user.role not in ["superadmin", "admin", "editor"]:
             raise HTTPException(status_code=403, detail="Forbidden: You must be an admin or editor to delete a company document.")
 
-    # Delete chunks scoped to tenant
-    if is_global or current_user.role in ["superadmin", "admin", "editor"]:
-        deleted_count = r._store.delete_source(clean_name, user_id=None, tenant_id=current_user.tenant_id)
+    # Delete chunks scoped to tenant (cascade-purge Knowledge Graph only for global corpus documents)
+    if is_global:
+        deleted_count = r.delete_document(clean_name, user_id=None, tenant_id=current_user.tenant_id)
     else:
-        deleted_count = r._store.delete_source(clean_name, user_id=current_user.id, tenant_id=current_user.tenant_id)
+        deleted_count = r.delete_document(clean_name, user_id=current_user.id, tenant_id=current_user.tenant_id)
 
     # Cascade delete from object storage
     storage.delete_object(key_personal)

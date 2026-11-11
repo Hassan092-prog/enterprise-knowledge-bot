@@ -40,13 +40,20 @@ class NetworkXGraphStore(BaseGraphStore):
 
     def __init__(self) -> None:
         self._graphs: Dict[int, nx.MultiDiGraph] = {}
+        self._graph_versions: Dict[int, str] = {}
         self._lock = threading.RLock()
 
     def _ensure_tenant_graph(self, tenant_id: int) -> nx.MultiDiGraph:
-        """Load tenant graph from PostgreSQL if not already in memory."""
+        """Load tenant graph from PostgreSQL if missing or stale across processes."""
+        from src.cache import get_cache_version
         with self._lock:
+            remote_ver = get_cache_version(f"graph:version:{tenant_id}")
             if tenant_id in self._graphs:
-                return self._graphs[tenant_id]
+                if remote_ver is None or self._graph_versions.get(tenant_id) == remote_ver:
+                    return self._graphs[tenant_id]
+                self._graphs.pop(tenant_id, None)
+            if remote_ver is not None:
+                self._graph_versions[tenant_id] = remote_ver
 
             g = nx.MultiDiGraph()
             with SessionLocal() as db:
@@ -247,6 +254,10 @@ class NetworkXGraphStore(BaseGraphStore):
                     )
 
             db.commit()
+            from src.cache import bump_cache_version
+            new_ver = bump_cache_version(f"graph:version:{tenant_id}")
+            if new_ver is not None:
+                self._graph_versions[tenant_id] = new_ver
 
         logger.info(
             "Indexed %d nodes and %d edges into tenant %d knowledge graph (Total: %d nodes, %d edges)",
@@ -481,6 +492,11 @@ class NetworkXGraphStore(BaseGraphStore):
             for n in nodes_to_remove:
                 g.remove_node(n)
 
+            if deleted_edges_count > 0:
+                from src.cache import bump_cache_version
+                new_ver = bump_cache_version(f"graph:version:{tenant_id}")
+                if new_ver is not None:
+                    self._graph_versions[tenant_id] = new_ver
             logger.info(
                 "Purged document '%s' from tenant %d graph (removed %d edges, %d orphan nodes)",
                 document_name, tenant_id, deleted_edges_count, len(nodes_to_remove)
@@ -496,6 +512,9 @@ class NetworkXGraphStore(BaseGraphStore):
                 db.commit()
 
             self._graphs.pop(tenant_id, None)
+            self._graph_versions.pop(tenant_id, None)
+            from src.cache import bump_cache_version
+            bump_cache_version(f"graph:version:{tenant_id}")
             logger.info("Purged graph for tenant %d: %d nodes, %d edges deleted", tenant_id, n_count, e_count)
             return e_count + n_count
 
