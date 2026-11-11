@@ -204,24 +204,32 @@ def _exchange_github_code(code: str, redirect_uri: str) -> Dict[str, Any]:
         logger.error(f"GitHub user profile request failed: {e}")
         raise ValueError(f"Failed to fetch GitHub profile: {str(e)}")
 
-    email = profile.get("email")
-    if not email:
-        # Request user emails endpoint
-        emails_req = urllib.request.Request("https://api.github.com/user/emails")
-        emails_req.add_header("Authorization", f"Bearer {access_token}")
-        emails_req.add_header("User-Agent", "EnterpriseKnowledgeBot")
-        try:
-            with urllib.request.urlopen(emails_req, timeout=15) as em_resp:
-                emails_list = json.loads(em_resp.read().decode("utf-8"))
-                for em in emails_list:
-                    if em.get("primary") and em.get("verified"):
-                        email = em.get("email")
-                        break
-        except Exception:
-            pass
+    # Always verify email ownership via GitHub /user/emails endpoint
+    emails_req = urllib.request.Request("https://api.github.com/user/emails")
+    emails_req.add_header("Authorization", f"Bearer {access_token}")
+    emails_req.add_header("User-Agent", "EnterpriseKnowledgeBot")
+    verified_emails = []
+    primary_verified_email = None
+    try:
+        with urllib.request.urlopen(emails_req, timeout=15) as em_resp:
+            emails_list = json.loads(em_resp.read().decode("utf-8"))
+            for em in emails_list:
+                if em.get("verified") and em.get("email"):
+                    verified_emails.append(em.get("email"))
+                    if em.get("primary") and not primary_verified_email:
+                        primary_verified_email = em.get("email")
+    except Exception as e:
+        raise ValueError(f"Failed to verify GitHub account email addresses: {e}")
 
-    if not email:
-        email = f"{profile.get('login')}@github.users.noreply"
+    profile_email = profile.get("email")
+    if primary_verified_email:
+        email = primary_verified_email
+    elif profile_email and profile_email in verified_emails:
+        email = profile_email
+    elif verified_emails:
+        email = verified_emails[0]
+    else:
+        raise ValueError("GitHub account does not have a verified email address.")
 
     return {
         "email": email.lower().strip(),

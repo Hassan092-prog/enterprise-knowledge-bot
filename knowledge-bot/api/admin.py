@@ -115,6 +115,7 @@ async def upload_global_document(
         )
         return {"filename": clean_name, "status": "processing", "task_id": task.id, "storage_key": storage_key}
     except Exception as e:
+        logger.error(f"Failed to enqueue global upload '{clean_name}': {e}", exc_info=True)
         try:
             storage.delete_object(storage_key)
         except Exception:
@@ -124,7 +125,7 @@ async def upload_global_document(
                 save_path.unlink()
             except Exception:
                 pass
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to queue company document for processing.")
 
 @router.delete("/documents_global/{filename}")
 def delete_global_document(
@@ -151,6 +152,7 @@ def delete_global_document(
         clean_name,
         user_id=None,
         tenant_id=current_user.tenant_id,
+        is_global=True,
     )
 
     if deleted_count == 0 and not has_storage and not has_disk:
@@ -287,6 +289,10 @@ def remove_user(
         prefix = f"tenants/{current_user.tenant_id}/personal/{target_user.id}/"
         for obj_key in storage.list_objects(prefix=prefix):
             storage.delete_object(obj_key)
+        personal_dir = get_tenant_upload_dir(current_user.tenant_id) / "personal" / str(target_user.id)
+        if personal_dir.exists():
+            import shutil
+            shutil.rmtree(personal_dir, ignore_errors=True)
         revoke_user_sessions(target_user.id)
     except Exception as cleanup_err:
         logger.warning(f"Notice purging personal documents for offboarded user {target_user.id}: {cleanup_err}")
@@ -938,11 +944,12 @@ def upsert_tenant_sso_config(
     idp_x509_cert = parsed_metadata.get("idp_x509_cert") or payload.idp_x509_cert
 
     # Validate external SSO / OIDC URLs against SSRF and unsafe schemes (e.g. javascript:, file:, loopback/metadata)
+    clean_oidc_issuer = payload.oidc_issuer_url
     try:
         if idp_sso_url and idp_sso_url.strip():
             idp_sso_url = validate_external_sso_url(idp_sso_url, "IdP SSO URL")
         if payload.oidc_issuer_url and payload.oidc_issuer_url.strip():
-            validate_external_sso_url(payload.oidc_issuer_url, "OIDC Issuer URL")
+            clean_oidc_issuer = validate_external_sso_url(payload.oidc_issuer_url, "OIDC Issuer URL")
     except ValueError as url_err:
         raise HTTPException(status_code=400, detail=str(url_err))
 
@@ -969,7 +976,7 @@ def upsert_tenant_sso_config(
         cfg.idp_x509_cert = idp_x509_cert
         if payload.idp_metadata_xml:
             cfg.idp_metadata_xml = payload.idp_metadata_xml
-        cfg.oidc_issuer_url = payload.oidc_issuer_url
+        cfg.oidc_issuer_url = clean_oidc_issuer
         cfg.oidc_client_id = payload.oidc_client_id
         if payload.oidc_client_secret:
             cfg.oidc_client_secret = payload.oidc_client_secret
@@ -988,7 +995,7 @@ def upsert_tenant_sso_config(
             idp_sso_url=idp_sso_url,
             idp_x509_cert=idp_x509_cert,
             idp_metadata_xml=payload.idp_metadata_xml,
-            oidc_issuer_url=payload.oidc_issuer_url,
+            oidc_issuer_url=clean_oidc_issuer,
             oidc_client_id=payload.oidc_client_id,
             oidc_client_secret=payload.oidc_client_secret,
             oidc_scopes=payload.oidc_scopes or "openid email profile groups",

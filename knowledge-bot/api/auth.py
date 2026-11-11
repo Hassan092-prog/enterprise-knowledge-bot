@@ -5,8 +5,10 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
 import logging
+import secrets
+from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
-from src.models import User, AccessRequest, Tenant
+from src.models import User, AccessRequest, Tenant, TenantSSOConfig
 from api.dependencies import get_db, get_current_user
 from src.auth import verify_password, get_password_hash, create_user_token
 from src.activity import log_activity
@@ -38,8 +40,11 @@ class Token(BaseModel):
 class OAuthCallbackRequest(BaseModel):
     code: str
     redirect_uri: str
+    state: Optional[str] = None
     company_name: Optional[str] = None
     join_code: Optional[str] = None
+
+_memory_oauth_states: dict[str, str] = {}
 
 class TenantDomainUpdate(BaseModel):
     allowed_domains: str
@@ -66,7 +71,13 @@ def register(request: Request, user_data: UserCreate, db: Session = Depends(get_
             except Exception as seq_err:
                 logger.warning(f"Registration sequence sync notice: {seq_err}")
 
-        db_user = db.query(User).filter(User.username == user_data.username).first()
+        clean_username = (user_data.username or "").strip()
+        if len(clean_username) < 3 or len(user_data.password or "") < 8:
+            raise HTTPException(
+                status_code=400,
+                detail="Username must be at least 3 characters and password must be at least 8 characters.",
+            )
+        db_user = db.query(User).filter(User.username == clean_username).first()
         if db_user:
             raise HTTPException(status_code=400, detail="Username already registered")
         
@@ -99,6 +110,8 @@ def register(request: Request, user_data: UserCreate, db: Session = Depends(get_
         else:
             # Default tenant fallback
             tenant = db.query(Tenant).filter(Tenant.id == 1).first() or db.query(Tenant).first()
+            if tenant and tenant.status == "suspended":
+                raise HTTPException(status_code=403, detail="Default organization is suspended.")
 
         hashed_password = get_password_hash(user_data.password)
         new_user = User(
@@ -146,8 +159,9 @@ def register(request: Request, user_data: UserCreate, db: Session = Depends(get_
 @router.post("/login", response_model=Token)
 @limiter.limit("10/minute", key_func=get_ip_rate_limit_key)
 def login(request: Request, user_data: UserCreate, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == user_data.username).first()
-    if not user or not verify_password(user_data.password, user.hashed_password):
+    clean_username = (user_data.username or "").strip()
+    user = db.query(User).filter(User.username == clean_username).first()
+    if not user or not user.hashed_password or not verify_password(user_data.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
@@ -291,13 +305,94 @@ def get_oauth_providers():
 
 @router.get("/oauth/{provider}/authorize")
 def oauth_authorize(provider: str, redirect_uri: str):
-    """Generates the provider authorization URL."""
+    """Generates the provider authorization URL with a single-use CSRF state token."""
     from src.oauth import generate_oauth_authorization_url
+    from src.sso.revocation import get_redis_client
     try:
-        url = generate_oauth_authorization_url(provider=provider, redirect_uri=redirect_uri)
-        return {"authorization_url": url}
+        clean_provider = (provider or "").lower().strip()
+        url = generate_oauth_authorization_url(provider=clean_provider, redirect_uri=redirect_uri)
+
+        nonce_state = f"oauth_{clean_provider}_{secrets.token_urlsafe(16)}"
+        parsed = urlparse(url)
+        query_params = [(k, v) for k, v in parse_qsl(parsed.query) if k != "state"]
+        query_params.append(("state", nonce_state))
+        final_url = urlunparse(parsed._replace(query=urlencode(query_params)))
+
+        r = get_redis_client()
+        if r:
+            try:
+                r.set(f"oauth:state:{nonce_state}", clean_provider, ex=900)
+            except Exception as se:
+                logger.warning(f"OAuth state Redis cache notice: {se}")
+        _memory_oauth_states[nonce_state] = clean_provider
+
+        return {"authorization_url": final_url, "state": nonce_state}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+def _validate_and_consume_oauth_state(provider: str, state: Optional[str]) -> None:
+    """Validate and consume single-use OAuth CSRF state against Redis / in-memory fallback."""
+    if not state:
+        raise HTTPException(
+            status_code=400,
+            detail="OAuth state parameter is required for CSRF protection.",
+        )
+    from src.sso.revocation import get_redis_client
+    clean_provider = (provider or "").lower().strip()
+    expected_provider = None
+    r = get_redis_client()
+    if r:
+        try:
+            expected_provider = r.get(f"oauth:state:{state}")
+            if expected_provider:
+                r.delete(f"oauth:state:{state}")
+        except Exception:
+            pass
+    if not expected_provider and state in _memory_oauth_states:
+        expected_provider = _memory_oauth_states.pop(state, None)
+
+    if isinstance(expected_provider, bytes):
+        expected_provider = expected_provider.decode("utf-8", errors="ignore")
+
+    if not expected_provider or expected_provider != clean_provider:
+        raise HTTPException(
+            status_code=400,
+            detail="OAuth state validation failed: invalid, expired, or provider mismatch (possible CSRF attack).",
+        )
+
+
+def _enforce_oauth_sso_gate(db: Session, tenant_id: Optional[int], provider: str, user_role: str = "user", is_platform_admin: bool = False) -> None:
+    """Block social OAuth login/provisioning when an organization enforces an enterprise IdP (e.g. SAML/Okta)."""
+    if not tenant_id:
+        return
+    sso_cfg = db.query(TenantSSOConfig).filter(
+        TenantSSOConfig.tenant_id == tenant_id,
+        TenantSSOConfig.is_enabled == True,
+        TenantSSOConfig.enforce_sso == True,
+    ).first()
+    if sso_cfg and (sso_cfg.idp_type or "").lower() != provider.lower():
+        if not is_platform_admin and user_role != "superadmin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Single Sign-On (SSO) is enforced for this organization. Please sign in via your corporate Identity Provider.",
+            )
+
+
+def _is_domain_claimed(db: Session, domain: str) -> bool:
+    """Return True if a corporate domain is already claimed by any Tenant or TenantSSOConfig."""
+    d_low = domain.lower().strip()
+    for t in db.query(Tenant).all():
+        if t.allowed_domains:
+            claimed = [x.strip().lower() for x in t.allowed_domains.split(",") if x.strip()]
+            if d_low in claimed:
+                return True
+    for cfg in db.query(TenantSSOConfig).all():
+        if cfg.allowed_domains:
+            claimed = [x.strip().lower() for x in cfg.allowed_domains.split(",") if x.strip()]
+            if d_low in claimed:
+                return True
+    return False
+
 
 @router.post("/oauth/{provider}/callback", response_model=Token)
 def oauth_callback(provider: str, request: OAuthCallbackRequest, db: Session = Depends(get_db)):
@@ -307,7 +402,10 @@ def oauth_callback(provider: str, request: OAuthCallbackRequest, db: Session = D
     """
     from src.oauth import exchange_oauth_code
     from src.database import slugify, generate_join_code
+    from src.sso import find_tenant_sso_by_email
     import re
+
+    _validate_and_consume_oauth_state(provider=provider, state=request.state)
 
     try:
         profile = exchange_oauth_code(
@@ -319,14 +417,16 @@ def oauth_callback(provider: str, request: OAuthCallbackRequest, db: Session = D
         logger.error(f"OAuth code exchange failed: {e}")
         raise HTTPException(status_code=400, detail=f"OAuth verification failed: {str(e)}")
 
-    email = profile.get("email")
+    email = (profile.get("email") or "").strip()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Identity provider did not return a verified email address.")
     oauth_id = profile.get("oauth_id")
     name = profile.get("name") or "User"
     avatar_url = profile.get("avatar_url")
 
     # 1. Check if user already exists by email (case-insensitive) or provider sub
     existing_user = db.query(User).filter(
-        (func.lower(User.email) == (email or "").lower()) |
+        (func.lower(User.email) == email.lower()) |
         ((User.auth_provider == provider) & (User.oauth_id == oauth_id))
     ).first()
 
@@ -337,6 +437,14 @@ def oauth_callback(provider: str, request: OAuthCallbackRequest, db: Session = D
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Your organization has been suspended. Please contact platform administrator.",
             )
+
+        _enforce_oauth_sso_gate(
+            db,
+            existing_user.tenant_id,
+            provider,
+            user_role=existing_user.role,
+            is_platform_admin=bool(existing_user.is_platform_admin),
+        )
 
         # Update metadata if needed
         if not existing_user.avatar_url and avatar_url:
@@ -369,18 +477,14 @@ def oauth_callback(provider: str, request: OAuthCallbackRequest, db: Session = D
     # 2. User does not exist: Provision new user with Corporate Domain Auto-Routing
     tenant = None
     assigned_role = "user"
-    email_domain = email.split("@")[-1].lower() if "@" in email else ""
+    email_domain = email.split("@")[-1].lower().strip().rstrip(".")
 
-    # 2a. Check if email domain matches an existing tenant's allowed_domains
+    # 2a. Check both TenantSSOConfig.allowed_domains and Tenant.allowed_domains
     if email_domain and email_domain not in PUBLIC_EMAIL_DOMAINS:
-        matching_tenants = db.query(Tenant).filter(Tenant.status == "active").all()
-        for t in matching_tenants:
-            if t.allowed_domains:
-                domains = [d.strip().lower() for d in t.allowed_domains.split(",") if d.strip()]
-                if email_domain in domains:
-                    tenant = t
-                    assigned_role = "user"
-                    break
+        sso_match = find_tenant_sso_by_email(email, db)
+        if sso_match:
+            tenant, _ = sso_match
+            assigned_role = "user"
 
     # 2b. Explicit company_name or join_code from request
     if not tenant:
@@ -389,12 +493,17 @@ def oauth_callback(provider: str, request: OAuthCallbackRequest, db: Session = D
             slug = slugify(company_clean)
             tenant = db.query(Tenant).filter(Tenant.slug == slug).first()
             if tenant is None:
+                auto_domain = (
+                    email_domain
+                    if email_domain not in PUBLIC_EMAIL_DOMAINS and not _is_domain_claimed(db, email_domain)
+                    else None
+                )
                 tenant = Tenant(
                     name=company_clean,
                     slug=slug,
                     status="active",
                     join_code=generate_join_code(),
-                    allowed_domains=email_domain if email_domain not in PUBLIC_EMAIL_DOMAINS else None,
+                    allowed_domains=auto_domain,
                     monthly_token_budget=500000,
                     current_month_tokens=0,
                     budget_reset_at=datetime.utcnow()
@@ -422,6 +531,10 @@ def oauth_callback(provider: str, request: OAuthCallbackRequest, db: Session = D
             if tenant and tenant.status == "suspended":
                 raise HTTPException(status_code=403, detail="Default organization is suspended. Please contact platform administrator.")
             assigned_role = "user"
+
+    # Enforce SSO requirement before provisioning new social OAuth member
+    if tenant and assigned_role != "superadmin":
+        _enforce_oauth_sso_gate(db, tenant.id, provider, user_role=assigned_role, is_platform_admin=False)
 
     # Synchronize PostgreSQL auto-increment sequences before user insertion
     from src.database import engine

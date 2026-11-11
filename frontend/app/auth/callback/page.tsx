@@ -15,6 +15,11 @@ function OAuthCallbackContent() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    const rawHash = typeof window !== "undefined" && window.location.hash.startsWith("#")
+      ? window.location.hash.slice(1)
+      : "";
+    const hashParams = new URLSearchParams(rawHash);
+
     const code = searchParams.get("code");
     const state = searchParams.get("state") || "";
     const provider = searchParams.get("provider") || (state.startsWith("oidc_") ? "oidc" : "google");
@@ -25,17 +30,18 @@ function OAuthCallbackContent() {
       return;
     }
 
-    // Direct JWT token returned from Enterprise SSO (SAML ACS or direct redirect)
-    const directToken = searchParams.get("token");
+    // Direct JWT token returned from Enterprise SSO (prefer URL fragment #token=... over query string)
+    const directToken = hashParams.get("token") || searchParams.get("token");
     if (directToken) {
+      const paramOf = (k: string) => hashParams.get(k) ?? searchParams.get(k);
       setStatusText("Enterprise SSO authenticated! Launching workspace...");
       localStorage.setItem("token", directToken);
-      const role = searchParams.get("role");
-      const tenantId = searchParams.get("tenant_id");
-      const tenantName = searchParams.get("tenant_name");
-      const username = searchParams.get("username");
-      const email = searchParams.get("email");
-      const isPlatformAdmin = searchParams.get("is_platform_admin");
+      const role = paramOf("role");
+      const tenantId = paramOf("tenant_id");
+      const tenantName = paramOf("tenant_name");
+      const username = paramOf("username");
+      const email = paramOf("email");
+      const isPlatformAdmin = paramOf("is_platform_admin");
 
       if (role) localStorage.setItem("role", role);
       if (tenantId) localStorage.setItem("tenant_id", tenantId);
@@ -48,10 +54,14 @@ function OAuthCallbackContent() {
         localStorage.removeItem("is_platform_admin");
       }
 
-      const returnTo = searchParams.get("return_to");
+      const returnTo = paramOf("return_to");
       const safeReturnTo = (returnTo && returnTo.startsWith("/") && !returnTo.startsWith("//") && !returnTo.includes("\\"))
         ? returnTo
         : "/";
+
+      if (typeof window !== "undefined" && window.location.hash) {
+        window.history.replaceState(null, "", window.location.pathname + window.location.search);
+      }
 
       setTimeout(() => {
         router.push(safeReturnTo);
@@ -75,6 +85,7 @@ function OAuthCallbackContent() {
           code,
           redirect_uri: redirectUri,
         };
+        if (state) reqBody.state = state;
 
         if (isOidc) {
           endpoint = `${API_URL}/auth/sso/oidc/callback`;
@@ -90,7 +101,6 @@ function OAuthCallbackContent() {
             }
           }
           reqBody.tenant_id = tenantIdNum;
-          if (state) reqBody.state = state;
         }
 
         const res = await fetch(endpoint, {

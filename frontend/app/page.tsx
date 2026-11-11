@@ -710,9 +710,20 @@ export default function Home() {
             )}
             <button
               onClick={() => {
+                const tok = localStorage.getItem("token");
+                if (tok) {
+                  fetch(`${API_URL}/auth/logout`, {
+                    method: "POST",
+                    headers: { Authorization: `Bearer ${tok}` },
+                  }).catch(() => {});
+                }
                 localStorage.removeItem("token");
                 localStorage.removeItem("role");
                 localStorage.removeItem("tenant_name");
+                localStorage.removeItem("tenant_id");
+                localStorage.removeItem("username");
+                localStorage.removeItem("email");
+                localStorage.removeItem("avatar_url");
                 localStorage.removeItem("is_platform_admin");
                 router.push("/login");
               }}

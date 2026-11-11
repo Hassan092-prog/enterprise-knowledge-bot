@@ -9,6 +9,7 @@ from sqlalchemy import func
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import logging
+import hashlib
 import re
 import secrets
 from datetime import datetime
@@ -159,6 +160,22 @@ def saml_login(
     return {"redirect_url": redirect_url, "request_id": request_id}
 
 
+def _enforce_sso_allowed_domain(email: str, cfg: TenantSSOConfig, tenant: Tenant) -> None:
+    """Enforce corporate domain allowlist when configured on SSO config or tenant."""
+    allowed_raw = (cfg.allowed_domains if cfg else None) or tenant.allowed_domains
+    if not allowed_raw:
+        return
+    allowed_list = [d.strip().lower() for d in allowed_raw.split(",") if d.strip()]
+    if not allowed_list:
+        return
+    domain = email.split("@")[-1].lower().strip().rstrip(".") if "@" in (email or "") else ""
+    if domain not in allowed_list:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Email domain '@{domain}' is not authorized for '{tenant.name}' SSO."
+        )
+
+
 @router.post("/saml/acs")
 @limiter.limit("30/minute", key_func=get_ip_rate_limit_key)
 def saml_acs(
@@ -172,57 +189,77 @@ def saml_acs(
     Receives HTTP-POST from IdP, parses assertion, verifies signature, synchronizes
     directory groups to application roles, and logs in / provisions the enterprise user.
     """
-    # 1. Resolve tenant_id from RelayState or fallback
+    if not SSO_ENABLED:
+        raise HTTPException(status_code=403, detail="Enterprise SSO is disabled on this platform.")
+
+    # 1. Strictly resolve tenant_id from RelayState BEFORE trusting assertion claims
     tenant_id = None
-    if RelayState and "tenant_" in RelayState:
-        try:
-            tenant_id = int(RelayState.split("tenant_")[-1].strip())
-        except Exception:
-            pass
+    if RelayState:
+        relay_match = re.search(r'(?:^|&)tenant_(\d+)(?:&|$)', RelayState.strip())
+        if relay_match:
+            tenant_id = int(relay_match.group(1))
 
-    # 2. Fetch tenant config if tenant_id known
-    cfg = None
-    if tenant_id:
-        cfg = db.query(TenantSSOConfig).filter(TenantSSOConfig.tenant_id == tenant_id).first()
-
-    # 3. Parse SAML assertion
-    idp_cert = cfg.idp_x509_cert if cfg else None
+    # 2. Resolve enabled SAML config & mandatory IdP X.509 certificate
+    from src.sso.saml import extract_saml_issuer
     try:
-        profile = parse_saml_response(SAMLResponse, expected_recipient=SSO_ENTITY_ID, idp_cert_pem=idp_cert)
-    except Exception as e:
-        logger.error(f"SAML assertion validation failed: {e}")
+        peeked_issuer = extract_saml_issuer(SAMLResponse)
+    except ValueError as e:
         raise HTTPException(status_code=400, detail=f"SAML authentication failed: {str(e)}")
 
-    # 3.1 Defend against SAML Assertion Replay Attacks (CWE-294)
-    if getattr(profile, "assertion_id", None):
-        from src.sso.revocation import check_and_record_assertion_id
-        if not check_and_record_assertion_id(profile.assertion_id):
-            logger.warning(f"SAML replay attack blocked for assertion_id={profile.assertion_id}")
-            raise HTTPException(status_code=400, detail="SAML assertion has already been processed (replay detected).")
+    cfg = None
+    if tenant_id:
+        cfg = db.query(TenantSSOConfig).filter(
+            TenantSSOConfig.tenant_id == tenant_id,
+            TenantSSOConfig.is_enabled == True,
+            TenantSSOConfig.idp_type == "saml",
+        ).first()
+    elif peeked_issuer:
+        # IdP-initiated SAML lookup by Issuer EntityID (signature still verified strictly against cert)
+        issuer_matches = db.query(TenantSSOConfig).filter(
+            TenantSSOConfig.is_enabled == True,
+            TenantSSOConfig.idp_type == "saml",
+            TenantSSOConfig.idp_entity_id == peeked_issuer,
+        ).all()
+        if len(issuer_matches) == 1:
+            cfg = issuer_matches[0]
+            tenant_id = cfg.tenant_id
 
-    # If tenant_id not in RelayState, resolve via email domain
-    if not tenant_id:
-        match = find_tenant_sso_by_email(profile.email, db)
-        if match:
-            tenant_obj, cfg_obj = match
-            tenant_id = tenant_obj.id
-            cfg = cfg_obj
-        else:
-            tenant_id = 1
+    if not tenant_id or not cfg or not cfg.idp_x509_cert or not cfg.idp_x509_cert.strip():
+        logger.warning(f"SAML ACS rejected: tenant_id={tenant_id} has no enabled SAML IdP certificate configured.")
+        raise HTTPException(
+            status_code=400,
+            detail="SAML SSO is not configured/enabled or missing IdP X.509 certificate for this organization."
+        )
 
     tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
     if not tenant or tenant.status == "suspended":
         raise HTTPException(status_code=403, detail="Organization is suspended or does not exist.")
 
-    # 4. Resolve application role from Directory Groups
-    role_mapping = cfg.role_mapping_json if cfg else None
-    default_role = cfg.default_role if cfg else "user"
-    resolved_role = RoleMappingEngine.resolve_role(profile.groups, role_mapping, default_role)
+    if cfg.idp_entity_id and peeked_issuer and peeked_issuer != cfg.idp_entity_id.strip():
+        logger.warning(f"SAML Issuer mismatch for tenant #{tenant_id}: got '{peeked_issuer}', expected '{cfg.idp_entity_id}'")
+        raise HTTPException(status_code=403, detail="SAML Issuer does not match organization IdP configuration.")
 
-    # 5. Provision or Update User
+    # 3. Parse & cryptographically verify SAML assertion against registered IdP certificate
+    try:
+        profile = parse_saml_response(SAMLResponse, expected_recipient=SSO_ENTITY_ID, idp_cert_pem=cfg.idp_x509_cert)
+    except Exception as e:
+        logger.error(f"SAML assertion validation failed: {e}")
+        raise HTTPException(status_code=400, detail=f"SAML authentication failed: {str(e)}")
+
+    # 3.1 Mandatory SAML Assertion Replay Protection (CWE-294)
+    from src.sso.revocation import check_and_record_assertion_id
+    replay_id = getattr(profile, "assertion_id", None) or f"sha256_{hashlib.sha256(SAMLResponse.encode('utf-8')).hexdigest()}"
+    if not check_and_record_assertion_id(replay_id):
+        logger.warning(f"SAML replay attack blocked for assertion_id={replay_id}")
+        raise HTTPException(status_code=400, detail="SAML assertion has already been processed (replay detected).")
+
+    # 4. Resolve application role from Directory Groups
+    resolved_role = RoleMappingEngine.resolve_role(profile.groups, cfg.role_mapping_json, cfg.default_role or "user")
+
+    # 5. Provision or Update User (cross-tenant check precedes domain allowlist)
     user = db.query(User).filter(
         (func.lower(User.email) == profile.email.lower()) |
-        ((User.auth_provider == "saml") & (User.oauth_id == profile.oauth_id))
+        ((User.tenant_id == tenant.id) & (User.auth_provider == "saml") & (User.oauth_id == profile.oauth_id))
     ).first()
 
     if user:
@@ -236,6 +273,8 @@ def saml_acs(
                 status_code=403,
                 detail="Security violation: User account belongs to another organization."
             )
+
+        _enforce_sso_allowed_domain(profile.email, cfg, tenant)
 
         # Check suspended tenant
         if user.tenant and user.tenant.status == "suspended" and not user.is_platform_admin:
@@ -251,13 +290,14 @@ def saml_acs(
         db.refresh(user)
 
         log_activity(
-            tenant_id=user.tenant_id or 1,
+            tenant_id=user.tenant_id or tenant.id,
             user_id=user.id,
             action="USER_LOGIN",
             category="AUTH",
             description=f"User '{user.username}' signed in via SAML 2.0 (role={user.role})"
         )
     else:
+        _enforce_sso_allowed_domain(profile.email, cfg, tenant)
         # Generate clean unique username
         base_user = re.sub(r'[^a-zA-Z0-9_]', '', profile.name.lower().replace(" ", "_")).strip()
         if not base_user or len(base_user) < 3:
@@ -327,7 +367,7 @@ def saml_acs(
         }
         if safe_return_to:
             params["return_to"] = safe_return_to
-        redirect_target = f"{SSO_FRONTEND_URL}/auth/callback?{urlencode(params)}"
+        redirect_target = f"{SSO_FRONTEND_URL}/auth/callback#{urlencode(params)}"
         return RedirectResponse(url=redirect_target, status_code=303)
 
     return {
@@ -431,9 +471,13 @@ def oidc_callback(
             detail="OIDC state validation failed: invalid, expired, or tenant mismatch (possible CSRF attack)."
         )
 
+    if not SSO_ENABLED:
+        raise HTTPException(status_code=403, detail="Enterprise SSO is disabled on this platform.")
+
     cfg = db.query(TenantSSOConfig).filter(
         TenantSSOConfig.tenant_id == payload.tenant_id,
         TenantSSOConfig.is_enabled == True,
+        TenantSSOConfig.idp_type.in_(["oidc", "okta", "microsoft", "google"]),
     ).first()
 
     if not cfg or not cfg.oidc_issuer_url or not cfg.oidc_client_id or not cfg.oidc_client_secret:
@@ -465,7 +509,7 @@ def oidc_callback(
 
     user = db.query(User).filter(
         (func.lower(User.email) == profile.email.lower()) |
-        ((User.auth_provider == "oidc") & (User.oauth_id == profile.oauth_id))
+        ((User.tenant_id == tenant.id) & (User.auth_provider == "oidc") & (User.oauth_id == profile.oauth_id))
     ).first()
 
     if user:
@@ -479,6 +523,8 @@ def oidc_callback(
                 status_code=403,
                 detail="Security violation: User account belongs to another organization."
             )
+
+        _enforce_sso_allowed_domain(profile.email, cfg, tenant)
 
         # Check suspended tenant
         if user.tenant and user.tenant.status == "suspended" and not user.is_platform_admin:
@@ -494,13 +540,14 @@ def oidc_callback(
         db.refresh(user)
 
         log_activity(
-            tenant_id=user.tenant_id or 1,
+            tenant_id=user.tenant_id or tenant.id,
             user_id=user.id,
             action="USER_LOGIN",
             category="AUTH",
             description=f"User '{user.username}' signed in via Enterprise OIDC (role={user.role})"
         )
     else:
+        _enforce_sso_allowed_domain(profile.email, cfg, tenant)
         base_user = re.sub(r'[^a-zA-Z0-9_]', '', profile.name.lower().replace(" ", "_")).strip()
         if not base_user or len(base_user) < 3:
             base_user = profile.email.split("@")[0].lower()

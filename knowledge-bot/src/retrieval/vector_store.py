@@ -225,10 +225,11 @@ class VectorStore:
 
         tid = tenant_id if tenant_id is not None else 1
 
-        # Prefix chunk IDs with tenant_id if not already done
+        # Prefix chunk IDs with tenant_id and personal/global scope to prevent same-filename collisions
+        scope_tag = "g" if is_global else f"u{user_id if user_id is not None else 0}"
         for c in chunks:
             raw_id = c.metadata.get("chunk_id", "")
-            prefix = f"t{tid}_"
+            prefix = f"t{tid}_{scope_tag}_"
             if not raw_id.startswith(prefix):
                 c.metadata["chunk_id"] = f"{prefix}{raw_id}"
 
@@ -448,15 +449,20 @@ class VectorStore:
         source_filename: str,
         user_id: Optional[int] = None,
         tenant_id: Optional[int] = None,
+        is_global: Optional[bool] = None,
     ) -> int:
         """
-        Delete chunks belonging to a source document within a tenant.
+        Delete chunks belonging to a source document within a tenant and scope.
         """
         conditions = [{"source": source_filename}]
         if tenant_id is not None:
             conditions.append({"tenant_id": tenant_id})
         if user_id is not None:
             conditions.append({"user_id": user_id})
+        if is_global is True:
+            conditions.append({"is_global": 1})
+        elif is_global is False:
+            conditions.append({"is_global": 0})
 
         where = {"$and": conditions} if len(conditions) > 1 else conditions[0]
         results = self._collection.get(where=where, include=["metadatas"])

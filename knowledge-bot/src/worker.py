@@ -49,6 +49,7 @@ def process_document(
                 "msg": msg,
                 "tenant_id": tenant_id,
                 "user_id": user_id,
+                "is_global": is_global,
             }
         )
 
@@ -131,6 +132,7 @@ def process_document(
             "already_existed": result.already_existed,
             "tenant_id": tenant_id,
             "user_id": user_id,
+            "is_global": is_global,
             "storage_key": storage_key,
         }
     except Exception as e:
@@ -143,6 +145,7 @@ def process_document(
                 "msg": str(e),
                 "tenant_id": tenant_id,
                 "user_id": user_id,
+                "is_global": is_global,
             }
         )
         raise e

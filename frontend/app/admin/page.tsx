@@ -852,7 +852,10 @@ export default function AdminDashboard() {
       const res = await authFetch(`${API_URL}/auth/sso/revoke`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ all_tenants: false }),
+        body: JSON.stringify({
+          tenant_id: ssoConfig.tenant_id ?? stats?.tenant_id ?? (localStorage.getItem("tenant_id") ? Number(localStorage.getItem("tenant_id")) : undefined),
+          all_tenants: false,
+        }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));

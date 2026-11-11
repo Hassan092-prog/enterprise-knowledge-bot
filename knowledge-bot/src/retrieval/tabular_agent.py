@@ -12,63 +12,75 @@ from src.logger import get_logger
 
 logger = get_logger(__name__)
 
-def run_tabular_query(query: str, filename: str, tenant_id: Optional[int] = None) -> str:
+def run_tabular_query(query: str, filename: str, tenant_id: Optional[int] = None, user_id: Optional[int] = None) -> str:
     """
     Runs a query on a specific CSV file using a SQL Agent on an in-memory SQLite database,
-    partitioned securely by tenant_id with strict path traversal prevention.
+    partitioned securely by tenant_id and user-personal scoping with strict path traversal prevention.
     """
     try:
         clean_name = sanitize_filename(filename)
     except Exception as e:
         return f"Invalid filename: {e}"
 
-    # Determine file path based on tenant
-    if tenant_id is not None:
-        tenant_dir = get_tenant_upload_dir(tenant_id)
-        file_path = tenant_dir / clean_name
-        # Fallback to root upload dir ONLY for default tenant (tenant 1) if file was uploaded prior to multi-tenancy
-        if tenant_id == 1 and not file_path.exists():
-            fallback_path = UPLOAD_DIR / clean_name
-            if fallback_path.exists():
-                file_path = fallback_path
-    else:
-        file_path = UPLOAD_DIR / clean_name
+    upload_root = UPLOAD_DIR.resolve()
+    tenant_dir = get_tenant_upload_dir(tenant_id) if tenant_id is not None else UPLOAD_DIR
+    personal_path = (tenant_dir / "personal" / str(user_id) / clean_name) if (tenant_id is not None and user_id is not None) else None
+    global_path = tenant_dir / clean_name
 
-    # Enforce filesystem jail check
-    try:
-        resolved = file_path.resolve()
-        upload_root = UPLOAD_DIR.resolve()
-        if not str(resolved).startswith(str(upload_root)):
+    def _is_within_jail(p: Path) -> bool:
+        try:
+            return p.resolve().is_relative_to(upload_root)
+        except Exception:
+            return False
+
+    file_path: Optional[Path] = None
+    if personal_path is not None:
+        if not _is_within_jail(personal_path):
             logger.error("Path traversal attempt blocked: %s", filename)
             return "Access denied: invalid file path."
-    except Exception as e:
-        return f"Path verification failed: {e}"
+        if personal_path.exists():
+            file_path = personal_path
 
-    if not file_path.exists():
-        # Attempt to retrieve CSV from decoupled object storage
+    if file_path is None:
+        if not _is_within_jail(global_path):
+            logger.error("Path traversal attempt blocked: %s", filename)
+            return "Access denied: invalid file path."
+        if global_path.exists():
+            file_path = global_path
+        elif tenant_id == 1:
+            fallback_path = UPLOAD_DIR / clean_name
+            if _is_within_jail(fallback_path) and fallback_path.exists():
+                file_path = fallback_path
+
+    if file_path is None:
+        # Retrieve CSV strictly from caller's personal object key or tenant global object key
         try:
             from src.storage import get_storage_provider, get_object_key
             storage = get_storage_provider()
-            key_global = get_object_key(tenant_id=tenant_id, user_id=None, filename=clean_name, is_global=True)
             content_bytes = None
-            if storage.object_exists(key_global):
-                content_bytes = storage.download_bytes(key_global)
-            elif tenant_id:
-                prefix = f"tenants/{tenant_id}/"
-                objs = storage.list_objects(prefix=prefix)
-                for obj in objs:
-                    if obj.endswith(f"/{clean_name}") or obj == clean_name:
-                        content_bytes = storage.download_bytes(obj)
-                        break
+            target_cache_path = None
 
-            if content_bytes:
-                file_path.parent.mkdir(parents=True, exist_ok=True)
-                file_path.write_bytes(content_bytes)
+            if tenant_id is not None and user_id is not None:
+                key_personal = get_object_key(tenant_id=tenant_id, user_id=user_id, filename=clean_name, is_global=False)
+                if storage.object_exists(key_personal):
+                    content_bytes = storage.download_bytes(key_personal)
+                    target_cache_path = personal_path
+
+            if content_bytes is None:
+                key_global = get_object_key(tenant_id=tenant_id, user_id=None, filename=clean_name, is_global=True)
+                if storage.object_exists(key_global):
+                    content_bytes = storage.download_bytes(key_global)
+                    target_cache_path = global_path
+
+            if content_bytes and target_cache_path is not None and _is_within_jail(target_cache_path):
+                target_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                target_cache_path.write_bytes(content_bytes)
+                file_path = target_cache_path
                 logger.info(f"Retrieved and cached {clean_name} from object storage for tabular query.")
         except Exception as storage_err:
             logger.warning(f"Failed to fetch {clean_name} from storage: {storage_err}")
 
-    if not file_path.exists():
+    if file_path is None or not file_path.exists():
         return f"File {filename} not found in your organization's repository."
 
     try:

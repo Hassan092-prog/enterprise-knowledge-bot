@@ -1,7 +1,8 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Request
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
+from typing import Optional
 import os
 import time
 import logging
@@ -180,6 +181,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     api_logger.error(f"Global unhandled exception on {request.method} {request.url.path}: {exc}", exc_info=True)
+    detail_msg = "Internal server error" if ENVIRONMENT == "production" else f"Internal server error: {str(exc)}"
     return JSONResponse(
         status_code=500,
         content={
@@ -188,7 +190,7 @@ async def global_exception_handler(request: Request, exc: Exception):
                 "message": "An unexpected server error occurred.",
                 "timestamp": datetime.now(timezone.utc).isoformat()
             },
-            "detail": f"Internal server error: {str(exc)}"
+            "detail": detail_msg
         }
     )
 
@@ -357,8 +359,9 @@ async def upload_document(
     # Stream upload bytes to object storage
     storage.upload_bytes(contents, storage_key)
 
-    tenant_dir = get_tenant_upload_dir(current_user.tenant_id)
-    save_path = tenant_dir / clean_name
+    personal_dir = get_tenant_upload_dir(current_user.tenant_id) / "personal" / str(current_user.id)
+    personal_dir.mkdir(parents=True, exist_ok=True)
+    save_path = personal_dir / clean_name
     try:
         save_path.write_bytes(contents)
     except Exception as io_err:
@@ -385,6 +388,7 @@ async def upload_document(
 
         return {"filename": clean_name, "status": "processing", "task_id": task.id, "storage_key": storage_key}
     except Exception as e:
+        api_logger.error(f"Failed to enqueue personal upload '{clean_name}': {e}", exc_info=True)
         try:
             storage.delete_object(storage_key)
         except Exception:
@@ -394,7 +398,7 @@ async def upload_document(
                 save_path.unlink()
             except Exception:
                 pass
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to queue document for processing.")
 
 @app.get("/tasks/{task_id}")
 @limiter.limit("120/minute")
@@ -406,36 +410,42 @@ def get_task_status(
     from src.worker import celery_app
     res = celery_app.AsyncResult(task_id)
 
-    # Multi-tenant IDOR boundary: check if task metadata belongs to caller's tenant
-    task_tenant_id = None
-    if isinstance(res.info, dict) and "tenant_id" in res.info:
-        task_tenant_id = res.info.get("tenant_id")
-    elif isinstance(res.result, dict) and "tenant_id" in res.result:
-        task_tenant_id = res.result.get("tenant_id")
+    # Multi-tenant & user-personal IDOR boundary check
+    meta_dict = res.info if isinstance(res.info, dict) else (res.result if isinstance(res.result, dict) else {})
+    task_tenant_id = meta_dict.get("tenant_id")
+    task_user_id = meta_dict.get("user_id")
+    task_is_global = bool(meta_dict.get("is_global", False))
 
-    if task_tenant_id is not None and not getattr(current_user, "is_platform_admin", False):
-        if task_tenant_id != current_user.tenant_id:
+    if not getattr(current_user, "is_platform_admin", False):
+        if task_tenant_id is not None and task_tenant_id != current_user.tenant_id:
             raise HTTPException(status_code=403, detail="Forbidden: You do not have permission to inspect this background task.")
+        if task_user_id is not None:
+            if not task_is_global and task_user_id != current_user.id:
+                raise HTTPException(status_code=403, detail="Forbidden: You do not have permission to inspect this personal background task.")
+            if task_is_global and task_user_id != current_user.id and current_user.role not in ("superadmin", "admin", "editor"):
+                raise HTTPException(status_code=403, detail="Forbidden: Insufficient permissions to inspect this organization task.")
 
+    hidden_keys = ("tenant_id", "user_id", "is_global")
     progress = {}
     if res.state == "PROGRESS" and isinstance(res.info, dict):
-        progress = {k: v for k, v in res.info.items() if k not in ("tenant_id", "user_id")}
+        progress = {k: v for k, v in res.info.items() if k not in hidden_keys}
     elif res.ready() and res.successful():
         progress = {"stage": "COMPLETED", "pct": 100, "msg": "Document indexed successfully"}
     elif res.ready() and res.failed():
-        err_msg = str(res.result)
-        if isinstance(res.info, dict) and "msg" in res.info:
-            err_msg = res.info["msg"]
+        if ENVIRONMENT == "production":
+            err_msg = "Document processing failed."
+        else:
+            err_msg = res.info["msg"] if (isinstance(res.info, dict) and "msg" in res.info) else str(res.result)
         progress = {"stage": "FAILED", "pct": 0, "msg": err_msg}
 
     result_data = None
     if res.successful():
         if isinstance(res.result, dict):
-            result_data = {k: v for k, v in res.result.items() if k not in ("tenant_id", "user_id")}
+            result_data = {k: v for k, v in res.result.items() if k not in hidden_keys}
         else:
             result_data = res.result
     elif res.failed():
-        result_data = str(res.result)
+        result_data = "Document processing failed." if ENVIRONMENT == "production" else str(res.result)
 
     return {
         "task_id": task_id,
@@ -446,10 +456,80 @@ def get_task_status(
         "progress": progress,
     }
 
+
+def _resolve_document_scope(
+    clean_name: str,
+    current_user: User,
+    retriever_inst: Retriever,
+    storage,
+    scope: Optional[str] = None,
+) -> dict:
+    """
+    Resolve ownership and personal-vs-global scope without colliding on same-named files.
+    """
+    where_filter = {
+        "$and": [
+            {"source": clean_name},
+            {"tenant_id": current_user.tenant_id},
+        ]
+    }
+    metadata = retriever_inst._store._collection.get(where=where_filter, include=["metadatas"])
+    metadatas = (metadata or {}).get("metadatas") or []
+
+    has_personal_chroma = any(m and m.get("is_global") != 1 and m.get("user_id") == current_user.id for m in metadatas)
+    has_global_chroma = any(m and m.get("is_global") == 1 for m in metadatas)
+    has_other_personal_chroma = any(m and m.get("is_global") != 1 and m.get("user_id") != current_user.id for m in metadatas)
+
+    key_personal = f"tenants/{current_user.tenant_id}/personal/{current_user.id}/{clean_name}"
+    key_global = f"tenants/{current_user.tenant_id}/global/{clean_name}"
+    try:
+        from src.storage import get_object_key
+        key_personal = get_object_key(tenant_id=current_user.tenant_id, user_id=current_user.id, filename=clean_name, is_global=False)
+        key_global = get_object_key(tenant_id=current_user.tenant_id, user_id=None, filename=clean_name, is_global=True)
+    except Exception:
+        pass
+
+    tenant_dir = get_tenant_upload_dir(current_user.tenant_id)
+    personal_file = tenant_dir / "personal" / str(current_user.id) / clean_name
+    global_file = tenant_dir / clean_name
+
+    personal_exists = has_personal_chroma or storage.object_exists(key_personal) or personal_file.exists()
+    global_exists = has_global_chroma or storage.object_exists(key_global) or global_file.exists()
+
+    if scope == "personal":
+        if not personal_exists:
+            if has_other_personal_chroma:
+                raise HTTPException(status_code=403, detail="Forbidden: You do not own this document.")
+            raise HTTPException(status_code=404, detail="Personal document not found.")
+        target_global = False
+    elif scope == "global":
+        if not global_exists:
+            raise HTTPException(status_code=404, detail="Company document not found.")
+        target_global = True
+    else:
+        if personal_exists:
+            target_global = False
+        elif global_exists:
+            target_global = True
+        elif has_other_personal_chroma:
+            raise HTTPException(status_code=403, detail="Forbidden: You do not own this document.")
+        else:
+            raise HTTPException(status_code=404, detail="Document not found.")
+
+    return {
+        "is_global": target_global,
+        "key_personal": key_personal,
+        "key_global": key_global,
+        "personal_file": personal_file,
+        "global_file": global_file,
+    }
+
+
 @app.get("/documents/{filename}/download")
 def download_document(
     filename: str,
     presigned: bool = False,
+    scope: Optional[str] = Query(None, pattern="^(personal|global)$"),
     current_user: User = Depends(get_current_user)
 ):
     r = get_retriever()
@@ -459,53 +539,26 @@ def download_document(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Verify document access in ChromaDB
-    where_filter = {
-        "$and": [
-            {"source": clean_name},
-            {"tenant_id": current_user.tenant_id}
-        ]
-    }
-    metadata = r._store._collection.get(where=where_filter, include=["metadatas"])
-    if not metadata or not metadata.get("metadatas"):
-        raise HTTPException(status_code=404, detail="Document not found.")
-
-    meta = metadata["metadatas"][0]
-    is_global = meta.get("is_global") == 1
-    owner_id = meta.get("user_id")
-
-    if not is_global and owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Forbidden: You do not own this document.")
-
-    from src.storage import get_storage_provider, get_object_key
+    from src.storage import get_storage_provider
     from src.config import STORAGE_BACKEND
     storage = get_storage_provider()
 
-    target_key = None
-    if is_global:
-        key_global = get_object_key(tenant_id=current_user.tenant_id, user_id=None, filename=clean_name, is_global=True)
-        if storage.object_exists(key_global):
-            target_key = key_global
-    else:
-        key_personal = get_object_key(tenant_id=current_user.tenant_id, user_id=current_user.id, filename=clean_name, is_global=False)
-        if storage.object_exists(key_personal):
-            target_key = key_personal
+    resolved = _resolve_document_scope(clean_name, current_user, r, storage, scope=scope)
+    target_key = resolved["key_global"] if resolved["is_global"] else resolved["key_personal"]
 
-    if target_key:
+    if storage.object_exists(target_key):
         if presigned and STORAGE_BACKEND == "s3":
             url = storage.generate_presigned_url(target_key, expiration_seconds=900)
             return {"filename": clean_name, "download_url": url, "expires_in": 900}
-        else:
-            stream = storage.download_stream(target_key)
-            return StreamingResponse(
-                stream,
-                media_type="application/octet-stream",
-                headers={"Content-Disposition": f'attachment; filename="{clean_name}"'}
-            )
+        stream = storage.download_stream(target_key)
+        return StreamingResponse(
+            stream,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{clean_name}"'}
+        )
 
-    # Local fallback if not in object storage
-    tenant_dir = get_tenant_upload_dir(current_user.tenant_id)
-    file_path = tenant_dir / clean_name
+    # Local fallback scoped strictly to personal directory or org global directory
+    file_path = resolved["global_file"] if resolved["is_global"] else resolved["personal_file"]
     if file_path.exists():
         import io
         return StreamingResponse(
@@ -517,7 +570,11 @@ def download_document(
     raise HTTPException(status_code=404, detail="Document binary not found.")
 
 @app.delete("/documents/{filename}")
-def delete_document(filename: str, current_user: User = Depends(get_current_user)):
+def delete_document(
+    filename: str,
+    scope: Optional[str] = Query(None, pattern="^(personal|global)$"),
+    current_user: User = Depends(get_current_user),
+):
     r = get_retriever()
 
     try:
@@ -525,58 +582,24 @@ def delete_document(filename: str, current_user: User = Depends(get_current_user
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Check ownership in ChromaDB within current tenant
-    where_filter = {
-        "$and": [
-            {"source": clean_name},
-            {"tenant_id": current_user.tenant_id}
-        ]
-    }
-    metadata = r._store._collection.get(where=where_filter, include=["metadatas"])
-
-    from src.storage import get_storage_provider, get_object_key
+    from src.storage import get_storage_provider
     storage = get_storage_provider()
-    key_personal = get_object_key(tenant_id=current_user.tenant_id, user_id=current_user.id, filename=clean_name, is_global=False)
-    key_global = get_object_key(tenant_id=current_user.tenant_id, user_id=None, filename=clean_name, is_global=True)
-    tenant_dir = get_tenant_upload_dir(current_user.tenant_id)
-    file_path = tenant_dir / clean_name
+    resolved = _resolve_document_scope(clean_name, current_user, r, storage, scope=scope)
+    is_global = resolved["is_global"]
 
-    has_chroma = bool(metadata and metadata.get("metadatas"))
-    has_storage = storage.object_exists(key_personal) or storage.object_exists(key_global)
-    has_disk = file_path.exists()
+    if is_global and current_user.role not in ["superadmin", "admin", "editor"]:
+        raise HTTPException(status_code=403, detail="Forbidden: You must be an admin or editor to delete a company document.")
 
-    if not has_chroma and not has_storage and not has_disk:
-        raise HTTPException(status_code=404, detail="Document not found.")
-
-    is_global = False
-    if has_chroma:
-        meta = metadata["metadatas"][0]
-        is_global = meta.get("is_global") == 1
-        owner_id = meta.get("user_id")
-
-        if not is_global and owner_id != current_user.id:
-            raise HTTPException(status_code=403, detail="Forbidden: You do not own this document.")
-        if is_global and current_user.role not in ["superadmin", "admin", "editor"]:
-            raise HTTPException(status_code=403, detail="Forbidden: You must be an admin or editor to delete a company document.")
-    elif storage.object_exists(key_global):
-        is_global = True
-        if current_user.role not in ["superadmin", "admin", "editor"]:
-            raise HTTPException(status_code=403, detail="Forbidden: You must be an admin or editor to delete a company document.")
-
-    # Delete chunks scoped to tenant (cascade-purge Knowledge Graph only for global corpus documents)
+    # Delete strictly within target scope (personal or global)
     if is_global:
-        deleted_count = r.delete_document(clean_name, user_id=None, tenant_id=current_user.tenant_id)
+        deleted_count = r.delete_document(clean_name, user_id=None, tenant_id=current_user.tenant_id, is_global=True)
+        storage.delete_object(resolved["key_global"])
+        file_path = resolved["global_file"]
     else:
-        deleted_count = r.delete_document(clean_name, user_id=current_user.id, tenant_id=current_user.tenant_id)
+        deleted_count = r.delete_document(clean_name, user_id=current_user.id, tenant_id=current_user.tenant_id, is_global=False)
+        storage.delete_object(resolved["key_personal"])
+        file_path = resolved["personal_file"]
 
-    # Cascade delete from object storage
-    storage.delete_object(key_personal)
-    if is_global or current_user.role in ["superadmin", "admin", "editor"]:
-        storage.delete_object(key_global)
-
-    # Delete physical file
-    tenant_dir = get_tenant_upload_dir(current_user.tenant_id)
-    file_path = tenant_dir / clean_name
     file_deleted = False
     if file_path.exists():
         try:
@@ -774,7 +797,12 @@ def query_bot(
         def generate_tabular():
             from src.database import SessionLocal
             try:
-                response = run_tabular_query(query_req.query, target_file, tenant_id=current_user.tenant_id)
+                response = run_tabular_query(
+                    query_req.query,
+                    target_file,
+                    tenant_id=current_user.tenant_id,
+                    user_id=current_user.id,
+                )
                 yield response
             except Exception as e:
                 response = f"\n\n[Error executing tabular query: {str(e)}]"

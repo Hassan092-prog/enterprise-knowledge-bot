@@ -269,3 +269,178 @@ def test_platform_delete_tenant_full_cascade(client, mock_retriever, mock_upload
         app.dependency_overrides.clear()
         app.dependency_overrides.update(orig_overrides)
 
+
+def test_task_status_isolates_same_tenant_personal_tasks(client):
+    """Non-admin User B in the same tenant cannot inspect User A's personal background task."""
+    import api.main as main_mod
+    from src.models import User
+
+    fake_result = MagicMock()
+    fake_result.state = "SUCCESS"
+    fake_result.result = {
+        "filename": "u1_private.pdf",
+        "chunks": 3,
+        "tenant_id": 1,
+        "user_id": 1,
+        "is_global": False,
+    }
+    fake_result.info = fake_result.result
+
+    user_b = User(
+        id=2,
+        username="user_b",
+        email="user_b@example.com",
+        role="user",
+        tenant_id=1,
+        is_platform_admin=False,
+    )
+
+    from src.worker import celery_app
+
+    orig_overrides = app.dependency_overrides.copy()
+    try:
+        with patch.object(celery_app, "AsyncResult", return_value=fake_result):
+            # User B (same tenant, non-admin) must receive 403 on User 1's personal task
+            app.dependency_overrides[get_current_user] = lambda: user_b
+            res_b = client.get("/tasks/task_personal_u1")
+            assert res_b.status_code == 403
+
+            # Owner (User 1) can inspect their own personal task
+            app.dependency_overrides[get_current_user] = lambda: _test_user
+            res_a = client.get("/tasks/task_personal_u1")
+            assert res_a.status_code == 200
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(orig_overrides)
+
+
+def test_download_and_delete_mixed_scope_not_fooled_by_first_metadata(client, mock_retriever, mock_upload_dir):
+    """Ensure download/delete resolve caller's personal or global scope even when metadatas[0] belongs to another user."""
+    import api.main as main_mod
+    from src.models import User
+
+    user_b = User(
+        id=2,
+        username="user_b",
+        email="user_b@example.com",
+        role="user",
+        tenant_id=1,
+        is_platform_admin=False,
+    )
+
+    # Prepare mixed metadata where index 0 belongs to User 99 (different user in tenant 1)
+    mock_retriever._store._collection.get.return_value = {
+        "metadatas": [
+            {"tenant_id": 1, "source": "report.pdf", "is_global": False, "user_id": 99},
+            {"tenant_id": 1, "source": "report.pdf", "is_global": True, "user_id": 1},
+            {"tenant_id": 1, "source": "report.pdf", "is_global": False, "user_id": 2},
+        ]
+    }
+
+    u2_personal_dir = mock_upload_dir / "tenant_1" / "personal" / "2"
+    u2_personal_dir.mkdir(parents=True, exist_ok=True)
+    (u2_personal_dir / "report.pdf").write_bytes(b"user2-personal-pdf")
+
+    orig_overrides = app.dependency_overrides.copy()
+    try:
+        app.dependency_overrides[get_current_user] = lambda: user_b
+        with patch.object(main_mod, "get_tenant_upload_dir", return_value=mock_upload_dir / "tenant_1"):
+            dl_res = client.get("/documents/report.pdf/download?scope=personal")
+            assert dl_res.status_code == 200
+            assert dl_res.content == b"user2-personal-pdf"
+
+            del_res = client.delete("/documents/report.pdf?scope=personal")
+            assert del_res.status_code == 200
+            mock_retriever.delete_document.assert_called_with("report.pdf", user_id=2, tenant_id=1, is_global=False)
+
+        # If ONLY User 99's personal file exists, User 2 must get 403
+        mock_retriever._store._collection.get.return_value = {
+            "metadatas": [
+                {"tenant_id": 1, "source": "only_u99.pdf", "is_global": False, "user_id": 99},
+            ]
+        }
+        res_forbidden_dl = client.get("/documents/only_u99.pdf/download")
+        assert res_forbidden_dl.status_code == 403
+        res_forbidden_del = client.delete("/documents/only_u99.pdf")
+        assert res_forbidden_del.status_code == 403
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(orig_overrides)
+
+
+def test_vector_store_chunk_ids_scoped_per_user_and_global():
+    """Verify same-filename chunks get distinct chunk_ids for user_id=1, user_id=2, and is_global=True."""
+    from langchain_core.documents import Document
+    from src.retrieval.vector_store import VectorStore
+
+    store = VectorStore.__new__(VectorStore)
+    store._collection = MagicMock()
+    store._collection.get.return_value = {"ids": []}
+    store._bm25_indices = {}
+    store._bm25_versions = {}
+    store._mistral_client = None
+    store._local_embedder = None
+    store._embeddings = MagicMock()
+    store._embeddings.embed_documents.return_value = [[0.1, 0.2]]
+    store._build_bm25_for_tenant = MagicMock()
+
+    captured_ids = []
+
+    def _capture_ids(*args, **kwargs):
+        ids_arg = kwargs.get("ids")
+        if ids_arg is None and args:
+            ids_arg = args[0]
+        if ids_arg:
+            captured_ids.extend(ids_arg)
+
+    store._collection.add.side_effect = _capture_ids
+    store._collection.upsert.side_effect = _capture_ids
+
+    with patch("src.cache.bump_cache_version"):
+        store.add_documents(
+            [Document(page_content="chunk text", metadata={"source": "report.pdf", "chunk_id": "c0"})],
+            user_id=1,
+            is_global=False,
+            tenant_id=1,
+        )
+        store.add_documents(
+            [Document(page_content="chunk text", metadata={"source": "report.pdf", "chunk_id": "c0"})],
+            user_id=2,
+            is_global=False,
+            tenant_id=1,
+        )
+        store.add_documents(
+            [Document(page_content="chunk text", metadata={"source": "report.pdf", "chunk_id": "c0"})],
+            user_id=1,
+            is_global=True,
+            tenant_id=1,
+        )
+
+    assert len(captured_ids) == 3
+    assert len(set(captured_ids)) == 3
+    assert "t1_u1_c0" in captured_ids
+    assert "t1_u2_c0" in captured_ids
+    assert "t1_g_c0" in captured_ids
+
+
+def test_tabular_query_isolates_personal_csv_between_users(tmp_path):
+    """User 2 must not read User 1's personal/1/secret.csv via disk or storage fallback."""
+    from src.retrieval.tabular_agent import run_tabular_query
+
+    tenant_dir = tmp_path / "tenant_1"
+    u1_dir = tenant_dir / "personal" / "1"
+    u1_dir.mkdir(parents=True, exist_ok=True)
+    (u1_dir / "secret.csv").write_text("secret_col\nTOP_SECRET_VALUE\n", encoding="utf-8")
+
+    mock_storage = MagicMock()
+    mock_storage.download_file.side_effect = FileNotFoundError("not found")
+
+    with patch("src.retrieval.tabular_agent.get_tenant_upload_dir", return_value=tenant_dir), \
+         patch("src.retrieval.tabular_agent.UPLOAD_DIR", tmp_path), \
+         patch("src.storage.get_storage_provider", return_value=mock_storage):
+        result = run_tabular_query("list all rows", "secret.csv", tenant_id=1, user_id=2)
+
+    assert "TOP_SECRET_VALUE" not in result
+    mock_storage.list_objects.assert_not_called()
+
+

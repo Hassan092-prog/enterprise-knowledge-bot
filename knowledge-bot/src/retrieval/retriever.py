@@ -218,8 +218,10 @@ class Retriever:
             
         stats  = get_chunk_stats(chunks)
 
-        # ── Step 3: Check if already indexed within tenant ──────────
-        already_existed = source_filename in self._store.list_sources(user_id=user_id, tenant_id=tenant_id)
+        # ── Step 3: Check if already indexed within tenant & scope ──
+        by_type = self._store.list_sources_by_type(user_id=user_id, tenant_id=tenant_id)
+        scope_list = by_type.get("global", []) if is_global else by_type.get("personal", [])
+        already_existed = source_filename in scope_list
 
         # ── Step 4: Store embeddings ────────────────────────────────
         if progress_callback:
@@ -271,13 +273,19 @@ class Retriever:
         source_filename: str,
         user_id: Optional[int] = None,
         tenant_id: Optional[int] = None,
+        is_global: Optional[bool] = None,
     ) -> int:
         """
         Remove all chunks for a document from the vector store scoped to tenant,
         and cascade-purge corresponding entities from the knowledge graph for global documents.
         """
-        deleted = self._store.delete_source(source_filename, user_id=user_id, tenant_id=tenant_id)
-        if tenant_id is not None and user_id is None:
+        deleted = self._store.delete_source(
+            source_filename,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            is_global=is_global,
+        )
+        if tenant_id is not None and (is_global is True or (user_id is None and is_global is not False)):
             try:
                 from src.graph import get_graph_store
                 get_graph_store().delete_document_entities(tenant_id=tenant_id, document_name=source_filename)

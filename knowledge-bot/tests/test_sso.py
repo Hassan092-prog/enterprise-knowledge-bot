@@ -640,3 +640,371 @@ def test_google_oauth_rejects_unverified_email():
             _exchange_google_code("code_1", "https://app.example.com/callback")
 
 
+def _generate_test_idp_keypair():
+    """Generate an ephemeral RSA-2048 keypair and self-signed X.509 cert PEM for SAML tests."""
+    from datetime import datetime, timedelta, timezone
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test-idp.acme.com")])
+    now = datetime.now(timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=5))
+        .not_valid_after(now + timedelta(days=1))
+        .sign(private_key, hashes.SHA256())
+    )
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM).decode("ascii")
+    return private_key, cert_pem
+
+
+def _build_signed_saml_response(
+    private_key,
+    email: str = "alice@acme.com",
+    issuer: str = "https://idp.acme.com/metadata",
+    assertion_id: str = "_assert_1",
+    response_id: str = "_resp_1",
+    name_id_inner: str = None,
+    include_assertion_id: bool = True,
+) -> tuple[str, str]:
+    """Build a canonical Exclusive-C14N XMLDSig-signed SAML 2.0 Response.
+
+    Returns (raw_xml, base64_encoded_xml).
+    """
+    from datetime import datetime, timedelta, timezone
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    now = datetime.now(timezone.utc)
+    not_before = (now - timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    not_on_or_after = (now + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    name_id_xml = name_id_inner if name_id_inner is not None else email
+
+    def _sign_target(target_xml: str, ref_id: str) -> str:
+        digest = hashes.Hash(hashes.SHA256())
+        digest.update(target_xml.encode("utf-8"))
+        digest_b64 = base64.b64encode(digest.finalize()).decode("ascii")
+
+        signed_info_xml = (
+            '<ds:SignedInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#">'
+            '<ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"></ds:CanonicalizationMethod>'
+            '<ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"></ds:SignatureMethod>'
+            f'<ds:Reference URI="#{ref_id}">'
+            '<ds:Transforms>'
+            '<ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"></ds:Transform>'
+            '<ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"></ds:Transform>'
+            '</ds:Transforms>'
+            '<ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"></ds:DigestMethod>'
+            f'<ds:DigestValue>{digest_b64}</ds:DigestValue>'
+            '</ds:Reference>'
+            '</ds:SignedInfo>'
+        )
+        sig_bytes = private_key.sign(
+            signed_info_xml.encode("utf-8"),
+            padding.PKCS1v15(),
+            hashes.SHA256(),
+        )
+        sig_b64 = base64.b64encode(sig_bytes).decode("ascii")
+        return (
+            '<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">'
+            f"{signed_info_xml}"
+            f"<ds:SignatureValue>{sig_b64}</ds:SignatureValue>"
+            "</ds:Signature>"
+        )
+
+    id_attr = f'ID="{assertion_id}" ' if include_assertion_id else ""
+    assertion_body = (
+        f"<saml:Issuer>{issuer}</saml:Issuer>"
+        f'<saml:Subject><saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">{name_id_xml}</saml:NameID></saml:Subject>'
+        f'<saml:Conditions NotBefore="{not_before}" NotOnOrAfter="{not_on_or_after}"></saml:Conditions>'
+    )
+    assertion_open = f'<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" {id_attr}Version="2.0">'
+    status_xml = '<samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"></samlp:StatusCode></samlp:Status>'
+
+    if include_assertion_id:
+        unsigned_assertion = f"{assertion_open}{assertion_body}</saml:Assertion>"
+        sig_xml = _sign_target(unsigned_assertion, assertion_id)
+        signed_assertion = (
+            f"{assertion_open}<saml:Issuer>{issuer}</saml:Issuer>{sig_xml}"
+            f'<saml:Subject><saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">{name_id_xml}</saml:NameID></saml:Subject>'
+            f'<saml:Conditions NotBefore="{not_before}" NotOnOrAfter="{not_on_or_after}"></saml:Conditions>'
+            "</saml:Assertion>"
+        )
+        full_xml = (
+            f'<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ID="{response_id}" Version="2.0">'
+            f"{status_xml}{signed_assertion}</samlp:Response>"
+        )
+    else:
+        unsigned_assertion = f"{assertion_open}{assertion_body}</saml:Assertion>"
+        unsigned_resp = (
+            f'<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ID="{response_id}" Version="2.0">'
+            f"{status_xml}{unsigned_assertion}</samlp:Response>"
+        )
+        sig_xml = _sign_target(unsigned_resp, response_id)
+        full_xml = (
+            f'<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ID="{response_id}" Version="2.0">'
+            f"{sig_xml}{status_xml}{unsigned_assertion}</samlp:Response>"
+        )
+
+    b64 = base64.b64encode(full_xml.encode("utf-8")).decode("ascii")
+    return full_xml, b64
+
+
+def test_saml_acs_rejects_unsigned_without_relay_state_or_cert():
+    """Unsigned assertions without matching RelayState/IdP cert must return 400 and never fall back to Tenant 1."""
+    unsigned_xml = """<?xml version="1.0"?>
+    <samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
+                    xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"
+                    ID="_resp_unverified" Version="2.0">
+        <samlp:Status>
+            <samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/>
+        </samlp:Status>
+        <saml:Assertion ID="_asrt_unverified" Version="2.0">
+            <saml:Issuer>https://unknown-idp.evil.com/metadata</saml:Issuer>
+            <saml:Subject>
+                <saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">victim@acme.com</saml:NameID>
+            </saml:Subject>
+        </saml:Assertion>
+    </samlp:Response>"""
+    b64 = base64.b64encode(unsigned_xml.encode("utf-8")).decode("ascii")
+
+    # Missing RelayState + unknown Issuer must fail closed (never fall back to Tenant 1)
+    res_no_relay = client.post("/auth/sso/saml/acs", data={"SAMLResponse": b64})
+    assert res_no_relay.status_code == 400
+
+    # Tenant configured with SAML enabled but missing X.509 cert must also reject with 400
+    with TestingSessionLocal() as db:
+        t2 = Tenant(id=2, name="No Cert Org", slug="nocert", allowed_domains="nocert.com", status="active")
+        db.add(t2)
+        db.add(TenantSSOConfig(
+            tenant_id=2,
+            idp_type="saml",
+            is_enabled=True,
+            idp_entity_id="https://idp.nocert.com/metadata",
+            idp_sso_url="https://idp.nocert.com/sso",
+            idp_x509_cert="",
+            allowed_domains="nocert.com",
+        ))
+        db.commit()
+
+    res_no_cert = client.post(
+        "/auth/sso/saml/acs",
+        data={"SAMLResponse": b64, "RelayState": "tenant_2"},
+    )
+    assert res_no_cert.status_code == 400
+
+
+def test_saml_xmldsig_signed_assertion_and_digest_tamper_rejected():
+    """Verify valid XMLDSig passes and NameID tampering fails Reference DigestValue verification."""
+    private_key, cert_pem = _generate_test_idp_keypair()
+    raw_xml, b64 = _build_signed_saml_response(private_key, email="alice@acme.com", assertion_id="_asrt_signed_1")
+
+    profile = parse_saml_response(b64, idp_cert_pem=cert_pem)
+    assert profile.email == "alice@acme.com"
+
+    # Tamper NameID without updating SignedInfo / SignatureValue
+    tampered_xml = raw_xml.replace(">alice@acme.com<", ">admin@acme.com<")
+    assert tampered_xml != raw_xml
+    tampered_b64 = base64.b64encode(tampered_xml.encode("utf-8")).decode("ascii")
+
+    with pytest.raises(ValueError, match="(?i)digest|signature"):
+        parse_saml_response(tampered_b64, idp_cert_pem=cert_pem)
+
+
+def test_saml_rejects_xml_comment_injection():
+    """XML comments inside Assertion (even when validly signed) must be rejected."""
+    private_key, cert_pem = _generate_test_idp_keypair()
+    _, b64 = _build_signed_saml_response(
+        private_key,
+        name_id_inner="alice@acme.com<!--evil-->@attacker.com",
+        assertion_id="_asrt_comment_1",
+    )
+
+    with pytest.raises(ValueError, match="(?i)comment"):
+        parse_saml_response(b64, idp_cert_pem=cert_pem)
+
+    with TestingSessionLocal() as db:
+        cfg = db.query(TenantSSOConfig).filter(TenantSSOConfig.tenant_id == 1).first()
+        cfg.idp_x509_cert = cert_pem
+        db.commit()
+
+    res = client.post(
+        "/auth/sso/saml/acs",
+        data={"SAMLResponse": b64, "RelayState": "tenant_1"},
+    )
+    assert res.status_code == 400
+
+
+def test_saml_acs_replay_without_assertion_id_and_fragment_redirect():
+    """Verify browser redirect uses URL #token= fragment and replay protection blocks reused assertions."""
+    import uuid
+
+    private_key, cert_pem = _generate_test_idp_keypair()
+    with TestingSessionLocal() as db:
+        cfg = db.query(TenantSSOConfig).filter(TenantSSOConfig.tenant_id == 1).first()
+        cfg.idp_x509_cert = cert_pem
+        db.commit()
+
+    _, b64 = _build_signed_saml_response(
+        private_key,
+        email="alice@acme.com",
+        response_id=f"_resp_noid_{uuid.uuid4().hex}",
+        include_assertion_id=False,
+    )
+
+    res1 = client.post(
+        "/auth/sso/saml/acs",
+        data={"SAMLResponse": b64, "RelayState": "tenant_1"},
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    assert res1.status_code == 303
+    location = res1.headers.get("location", "")
+    assert "#token=" in location
+    assert "?token=" not in location
+
+    # Replaying identical assertion without an Assertion ID attribute must still be blocked
+    res2 = client.post(
+        "/auth/sso/saml/acs",
+        data={"SAMLResponse": b64, "RelayState": "tenant_1"},
+    )
+    assert res2.status_code in (400, 401, 403)
+
+
+def test_oauth_only_user_password_login_returns_401():
+    """OAuth/SAML users with hashed_password=None must get 401 on password login, not 500."""
+    with TestingSessionLocal() as db:
+        db.add(User(
+            username="sso_only_user",
+            email="sso_only@acme.com",
+            hashed_password=None,
+            auth_provider="saml",
+            oauth_id="saml_sso_only_user",
+            tenant_id=1,
+            role="user",
+        ))
+        db.commit()
+
+    res = client.post(
+        "/auth/login",
+        json={"username": "sso_only_user", "password": "any-password"},
+    )
+    assert res.status_code == 401
+
+
+def test_oauth_callback_validates_state_and_enforces_sso():
+    """Social OAuth callback requires valid single-use CSRF state and respects TenantSSOConfig.enforce_sso."""
+    with TestingSessionLocal() as db:
+        t2 = Tenant(id=2, name="Locked Corp", slug="locked-corp", allowed_domains="lockedcorp.com", status="active")
+        db.add(t2)
+        db.add(TenantSSOConfig(
+            tenant_id=2,
+            idp_type="saml",
+            is_enabled=True,
+            enforce_sso=True,
+            idp_entity_id="https://idp.lockedcorp.com/metadata",
+            idp_sso_url="https://idp.lockedcorp.com/sso",
+            allowed_domains="lockedcorp.com",
+        ))
+        db.commit()
+
+    with patch("src.oauth.GOOGLE_CLIENT_ID", "cid"):
+        auth_res = client.get(
+            "/auth/oauth/google/authorize",
+            params={"redirect_uri": "http://localhost:3000/auth/callback"},
+        )
+    assert auth_res.status_code == 200
+    valid_state = auth_res.json()["state"]
+
+    # Missing or invalid state must fail 400
+    bad_state_res = client.post(
+        "/auth/oauth/google/callback",
+        json={
+            "code": "auth_code_bad",
+            "redirect_uri": "http://localhost:3000/auth/callback",
+            "state": "forged_csrf_state",
+        },
+    )
+    assert bad_state_res.status_code == 400
+
+    class FakeResp:
+        def __init__(self, payload: dict):
+            self._data = json.dumps(payload).encode("utf-8")
+
+        def read(self):
+            return self._data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    responses = [
+        FakeResp({"access_token": "tok_google"}),
+        FakeResp({"email": "bob@lockedcorp.com", "sub": "g-bob-1", "name": "Bob", "email_verified": True}),
+    ]
+
+    with patch("src.oauth.urllib.request.urlopen", side_effect=responses), \
+         patch("src.oauth.GOOGLE_CLIENT_ID", "cid"), \
+         patch("src.oauth.GOOGLE_CLIENT_SECRET", "csec"):
+        blocked_res = client.post(
+            "/auth/oauth/google/callback",
+            json={
+                "code": "auth_code_1",
+                "redirect_uri": "http://localhost:3000/auth/callback",
+                "state": valid_state,
+            },
+        )
+    assert blocked_res.status_code == 403
+
+    # Reusing already-consumed state must fail 400
+    replay_state_res = client.post(
+        "/auth/oauth/google/callback",
+        json={
+            "code": "auth_code_1",
+            "redirect_uri": "http://localhost:3000/auth/callback",
+            "state": valid_state,
+        },
+    )
+    assert replay_state_res.status_code == 400
+
+
+def test_github_oauth_rejects_unverified_email():
+    """Verify GitHub OAuth checks /user/emails and rejects unverified profile emails."""
+    from src.oauth import _exchange_github_code
+
+    class FakeResp:
+        def __init__(self, payload):
+            self._data = json.dumps(payload).encode("utf-8")
+
+        def read(self):
+            return self._data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    responses = [
+        FakeResp({"access_token": "gh_tok_123"}),
+        FakeResp({"id": 999, "login": "spoof", "email": "ceo@acme.com"}),
+        FakeResp([{"email": "ceo@acme.com", "verified": False, "primary": True}]),
+    ]
+
+    with patch("src.oauth.urllib.request.urlopen", side_effect=responses), \
+         patch("src.oauth.GITHUB_CLIENT_ID", "gh_cid"), \
+         patch("src.oauth.GITHUB_CLIENT_SECRET", "gh_csec"):
+        with pytest.raises(ValueError, match="verified email"):
+            _exchange_github_code("code_gh", "http://localhost:3000/auth/callback")
+
+
+
